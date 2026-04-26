@@ -31,9 +31,9 @@ x-common-env: &common-env
   S3_PROCESSED_REGION:            ${S3_PROCESSED_REGION:-}
   S3_PROCESSED_KEY_PREFIX:        ${S3_PROCESSED_KEY_PREFIX:-}
   # Auth
-  API_KEY: "${API_KEY:?ERROR: Set API_KEY in .env file}"
-  JWT_SECRET_KEY: "${JWT_SECRET_KEY:?ERROR: Set JWT_SECRET_KEY in .env file}"
-  MODEL_SIGNING_KEY: "${MODEL_SIGNING_KEY:?ERROR: Set MODEL_SIGNING_KEY in .env file}"
+  API_KEY: "${API_KEY:-}"
+  JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"
+  MODEL_SIGNING_KEY: "${MODEL_SIGNING_KEY:-}"
   # PostgreSQL client registry
   DATABASE_URL: postgresql://sku:sku@postgres:5432/sku_forecasting
   # Redis
@@ -313,8 +313,8 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
-      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:?ERROR Set AIRFLOW_FERNET_KEY in .env}"
-      AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY:?ERROR: Set AIRFLOW_SECRET_KEY in .env}"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY:-}"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
       PYTHONPATH: /app
@@ -341,7 +341,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
-      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:?ERROR Set AIRFLOW_FERNET_KEY in .env}"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       PYTHONPATH: /app
       <<: *common-env
@@ -371,7 +371,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
-      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:?ERROR Set AIRFLOW_FERNET_KEY in .env}"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
       _AIRFLOW_DB_MIGRATE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
       _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
@@ -421,7 +421,7 @@ services:
       S3_ENDPOINT_URL:       http://minio:9000
       AWS_ACCESS_KEY_ID:     ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-minioadmin}
-      BACKUP_PASSPHRASE: "${BACKUP_PASSPHRASE:?ERROR: Set BACKUP_PASSPHRASE in .env}"
+      BACKUP_PASSPHRASE: "${BACKUP_PASSPHRASE:-}"
     volumes:
       - ../scripts:/scripts:ro
       - backups:/tmp/backup

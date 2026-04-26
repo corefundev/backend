@@ -12,40 +12,74 @@
 #   • Mounts the service-account authorised-key JSON read-only into
 #     api/worker/scan-worker/process-worker as /run/secrets/yc-sa-key.json.
 #   • Sets YC_SA_KEY_FILE + YC_LOCKBOX_SECRET_ID in those containers.
+#   • Clears all secret-bearing env vars to empty string so lockbox_agent
+#     can inject them at startup (the agent skips already-set keys to
+#     respect explicit overrides — empty string is treated as "not set").
 #
 # Prerequisite on host:
 #   • Place the downloaded `authorized_key.json` at ./secrets/yc-sa-key.json
-#   • chmod 600 ./secrets/yc-sa-key.json
+#   • chmod 644 ./secrets/yc-sa-key.json   (dir is 700, container reads as non-root)
 #
 # The file NEVER gets rebuilt into images and NEVER gets checked into git
 # (add ./secrets/ to .gitignore).
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Anchor: blank-out every var that should come from Lockbox.
+# Without this, x-common-env's hardcoded fallbacks (e.g. DATABASE_URL=
+# postgresql://sku:sku@…) would beat Lockbox's truthy-check.
+x-lockbox-blanks: &lockbox-blanks
+  YC_SA_KEY_FILE:                  /run/secrets/yc-sa-key.json
+  YC_LOCKBOX_SECRET_ID:            "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+  DATABASE_URL:                    ""
+  AWS_ACCESS_KEY_ID:               ""
+  AWS_SECRET_ACCESS_KEY:           ""
+  S3_UNTRUSTED_ACCESS_KEY_ID:      ""
+  S3_UNTRUSTED_SECRET_ACCESS_KEY:  ""
+  S3_QUARANTINE_ACCESS_KEY_ID:     ""
+  S3_QUARANTINE_SECRET_ACCESS_KEY: ""
+  S3_PROCESSED_ACCESS_KEY_ID:      ""
+  S3_PROCESSED_SECRET_ACCESS_KEY:  ""
+  S3_BACKUP_ACCESS_KEY_ID:         ""
+  S3_BACKUP_SECRET_ACCESS_KEY:     ""
+  JWT_SECRET_KEY:                  ""
+  API_KEY:                         ""
+  ADMIN_API_KEY:                   ""
+  MODEL_SIGNING_KEY:               ""
+  BACKUP_PASSPHRASE:               ""
+  GRAFANA_PASSWORD:                ""
+  POSTGRES_PASSWORD:               ""
+  AIRFLOW_FERNET_KEY:              ""
+  AIRFLOW_SECRET_KEY:              ""
+  AIRFLOW_PASSWORD:                ""
+  RESEND_API_KEY:                  ""
+  SMTP_PASSWORD:                   ""
+  TURNSTILE_SECRET_KEY:            ""
+  OAUTH_GOOGLE_CLIENT_ID:          ""
+  OAUTH_GOOGLE_CLIENT_SECRET:      ""
+  OAUTH_YANDEX_CLIENT_ID:          ""
+  OAUTH_YANDEX_CLIENT_SECRET:      ""
+
 services:
   api:
     environment:
-      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
-      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}
+      <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
   worker:
     environment:
-      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
-      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+      <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
   scan-worker:
     environment:
-      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
-      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+      <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
   process-worker:
     environment:
-      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
-      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+      <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
