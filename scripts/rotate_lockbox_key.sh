@@ -66,8 +66,10 @@ VPS_COMPOSE_DIR="${VPS_COMPOSE_DIR:-/srv/backend}"
 API_HEALTH_URL="${API_HEALTH_URL:-https://${VPS_HOST}/readyz}"
 KEEP_KEYS="${KEEP_KEYS:-2}"
 
-# Compose overlays that need restart
-COMPOSE_ARGS="-f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.lockbox.yml"
+# Compose overlays that need restart. --env-file is required because the
+# project root from -f flags is the docker/ subdir, so .env at /srv/backend
+# is not auto-loaded.
+COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
 
 # Sanity checks
 for cmd in yc jq ssh scp curl; do
