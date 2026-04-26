@@ -1,0 +1,83 @@
+# SKU Forecasting System — Main Configuration v2.0
+
+data:
+  date_col: date
+  sku_col: sku
+  target_col: sales
+  optional_cols: [price, promo, stock]
+  max_missing_ratio: 0.10
+  min_rows: 30
+
+features:
+  lags: [1, 2, 3, 7, 14, 21, 28]
+  rolling_windows: [7, 14, 28]
+  calendar: true
+  price: true
+  promo: true
+  stock: true
+
+  # Weather features (Open-Meteo, free API, no key required)
+  weather:
+    enabled: false               # set true to enable
+    latitude: 55.75              # Moscow default
+    longitude: 37.62
+    cache_path: artifacts/weather_cache.parquet
+
+  # Public holidays
+  holidays:
+    enabled: true
+    country: RU                  # RU, US, DE, CN, etc.
+
+model:
+  type: mimo                     # "lgbm" (single-step) or "mimo" (direct multi-step)
+  horizon: 14
+  quantiles: [0.1, 0.5, 0.9]   # for interval forecasts
+  n_estimators: 500
+  learning_rate: 0.05
+  num_leaves: 64
+  min_child_samples: 20
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 5
+  early_stopping_rounds: 50
+
+cold_start:
+  min_history_days: 28
+  n_neighbors: 5
+
+anomaly_detection:
+  enabled: true
+  contamination: 0.05
+  iqr_factor: 3.0
+  anomaly_weight: 0.1
+
+hpo:
+  enabled: false                 # set true to run Optuna HPO
+  n_trials: 30
+  timeout_sec: 600
+
+validation:
+  type: walk_forward
+  n_splits: 3
+
+metrics:
+  - mase
+  - wmape
+  - smape
+
+mlflow:
+  tracking_uri: http://mlflow:5000
+  experiment_name: sku-forecasting
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  max_latency_ms: 200
+  rate_limiting:
+    enabled: true
+    default_tier: pro
+
+monitoring:
+  drift_threshold: 0.15
+  alert_wmape_threshold: 0.30
+  psi_threshold: 0.25

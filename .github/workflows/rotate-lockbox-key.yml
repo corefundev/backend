@@ -1,0 +1,148 @@
+name: Rotate Lockbox SA key
+
+# ─────────────────────────────────────────────────────────────────────────
+# Еженедельная ротация authorized key для Yandex Lockbox service account.
+#
+# Почему через GitHub Actions, а не cron на VPS:
+#   • Master credentials (право создавать/удалять ключи) должны жить
+#     вне prod-поверхности. Иначе компрометация VPS даёт атакующему
+#     не просто read-only ключ, а полные права над IAM-объектом.
+#   • GitHub Secrets дают enclosed среду с аудитом (кто запускал
+#     workflow, когда), чего нет у одиночного cron на VPS.
+#
+# Требуемые Secrets (Settings → Secrets and variables → Actions):
+#
+#   YC_KEY_ROTATOR_SA_KEY    JSON authorized key для sku-key-rotator SA.
+#                            SA должен иметь iam.serviceAccounts.admin
+#                            на одного конкретного sku-lockbox-reader
+#                            (не на всю папку!). См. DEPLOY.md §4.3.
+#   YC_FOLDER_ID             ID папки YC, где живёт sku-lockbox-reader
+#   VPS_HOST                 hostname бэкенд-VPS (e.g. api.example.com)
+#   VPS_USER                 ssh-пользователь (обычно "deploy")
+#   VPS_SSH_PRIVATE_KEY      OpenSSH ed25519 private key с доступом
+#                            к deploy@VPS_HOST. На VPS должен быть
+#                            в ~deploy/.ssh/authorized_keys.
+#   VPS_SSH_KNOWN_HOSTS      Вывод `ssh-keyscan <VPS_HOST>`. Защищает
+#                            от MITM при первом коннекте.
+#   API_HEALTH_URL           (optional) URL для post-check, default
+#                            https://VPS_HOST/readyz
+# ─────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Каждое воскресенье в 03:00 UTC. Самое "тихое" окно по тому, что
+    # пользователи обычно не делают upload'ы/train'ы в это время.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    # Ручной trigger через UI GitHub. Использовать при подозрении на
+    # утечку ключа: жми → rotate немедленно.
+
+concurrency:
+  # Не даём двум ротациям идти параллельно — это создаст несколько
+  # новых ключей одновременно. При manual trigger'е поверх scheduled
+  # отменит предыдущий запуск.
+  group: rotate-lockbox-key
+  cancel-in-progress: false
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    # Жёсткий timeout — если ротация зависла на scp/restart, лучше
+    # упасть громко, чем висеть часами. 10 минут с запасом.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Install yc CLI ─────────────────────────────────────────────
+      - name: Install yc CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | \
+              bash -s -- -i "$HOME/yandex-cloud" -n
+          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
+
+      - name: Verify yc
+        run: yc --version
+
+      # ── Authenticate yc via SA key from secrets ───────────────────
+      - name: Configure yc
+        env:
+          SA_KEY_JSON: ${{ secrets.YC_KEY_ROTATOR_SA_KEY }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        run: |
+          if [ -z "${SA_KEY_JSON:-}" ]; then
+            echo "::error::YC_KEY_ROTATOR_SA_KEY secret is not set"
+            exit 1
+          fi
+          # Write SA key to tmpfs — not to workspace, which is cached.
+          umask 077
+          printf '%s' "$SA_KEY_JSON" > /tmp/yc-sa-key.json
+
+          yc config profile create gh-actions
+          yc config set service-account-key /tmp/yc-sa-key.json
+          yc config set folder-id "$YC_FOLDER_ID"
+
+          # Sanity check — can we list service accounts at all?
+          yc iam service-account list --format json | jq -r '.[].name' | head
+
+      # ── Setup SSH to the VPS ──────────────────────────────────────
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          # Don't auto-add unknown hosts — known_hosts must be explicit.
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      # ── Run rotation ──────────────────────────────────────────────
+      - name: Rotate key
+        env:
+          VPS_HOST:       ${{ secrets.VPS_HOST }}
+          VPS_USER:       ${{ secrets.VPS_USER }}
+          API_HEALTH_URL: ${{ secrets.API_HEALTH_URL }}
+          # Explicit — matches the default in the script. If you
+          # deploy to a non-standard dir on VPS, override here.
+          VPS_COMPOSE_DIR: /srv/backend
+          VPS_PATH:        /srv/backend/secrets/yc-sa-key.json
+          YC_SA_NAME:      sku-lockbox-reader
+          KEEP_KEYS:       "2"
+        run: |
+          chmod +x scripts/rotate_lockbox_key.sh
+          ./scripts/rotate_lockbox_key.sh
+
+      # ── Clean up sensitive files from the runner ──────────────────
+      - name: Cleanup
+        if: always()
+        run: |
+          # These paths contain credentials — shred just in case. GitHub
+          # runners are ephemeral but we don't want them in any diagnostic
+          # log archive.
+          for f in /tmp/yc-sa-key.json ~/.ssh/id_ed25519 ~/.ssh/known_hosts ~/.ssh/config; do
+            [ -f "$f" ] && shred -u "$f" 2>/dev/null || rm -f "$f"
+          done
+
+      # ── On failure — notify via existing alert webhook ────────────
+      # Optional; only fires if the webhook secret is set.
+      - name: Notify on failure
+        if: failure() && env.ALERT_WEBHOOK_URL != ''
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          curl -sS -X POST "$ALERT_WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d '{"text":"🚨 Lockbox SA key rotation FAILED. See GitHub Actions run."}' \
+              > /dev/null || true

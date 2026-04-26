@@ -1,0 +1,305 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Workers — one Deployment per RQ queue, each with its own HPA.
+#
+# Scaling signal: queue depth (rq_queue_jobs_queued), exposed by
+# rq-exporter and routed through prometheus-adapter to
+# external.metrics.k8s.io. Fallback metric: CPU, so the cluster still
+# scales under synthetic load without a full metrics stack.
+#
+# ── Deployment layout ─────────────────────────────────────────────────
+#  sku-worker-training  — heavy ML jobs, 1 job = 1 full pod
+#  sku-worker-scan      — ClamAV streaming, cheap
+#  sku-worker-process   — Docker sandbox launcher (privileged, see notes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════
+# Training worker
+# ══════════════════════════════════════════════════════════════════════
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: sku-worker-training, namespace: sku-forecasting }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sku-worker-training
+  namespace: sku-forecasting
+  labels: { app: sku-worker-training, component: worker, queue: sku-training }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: sku-worker-training }
+  template:
+    metadata:
+      labels: { app: sku-worker-training, component: worker, queue: sku-training }
+    spec:
+      serviceAccountName: sku-worker-training
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1000
+        runAsGroup:   1000
+        fsGroup:      1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/your-org/sku-forecasting/sku-worker:latest
+          imagePullPolicy: Always
+          command: ["rq", "worker", "sku-training", "--url", "redis://redis:6379"]
+          envFrom:
+            - configMapRef: { name: sku-config }
+            - secretRef:    { name: sku-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            # Training is CPU+mem heavy; give it a solid baseline and
+            # let HPA scale horizontally when the queue backs up.
+            requests: { cpu: "1",   memory: "2Gi" }
+            limits:   { cpu: "4",   memory: "8Gi" }
+          volumeMounts:
+            - { name: tmp,       mountPath: /tmp }
+            - { name: artifacts, mountPath: /data/artifacts }
+      volumes:
+        - { name: tmp,       emptyDir: { medium: Memory, sizeLimit: 512Mi } }
+        - { name: artifacts, persistentVolumeClaim: { claimName: sku-artifacts } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: sku-worker-training, namespace: sku-forecasting }
+spec:
+  # Training is async — letting all training workers drop briefly is OK,
+  # but keep at least one running during rolling updates so queued jobs
+  # aren't stranded.
+  minAvailable: 1
+  selector:
+    matchLabels: { app: sku-worker-training }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: sku-worker-training, namespace: sku-forecasting }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind:       Deployment
+    name:       sku-worker-training
+  minReplicas: 1
+  maxReplicas: 8
+  metrics:
+    # ── Primary: queue depth (requires prometheus-adapter) ───────────
+    - type: External
+      external:
+        metric:
+          name: rq_queue_jobs_queued
+          selector:
+            matchLabels: { queue: sku-training }
+        target:
+          # Target ~3 queued jobs per pod. With 3 queued → 1 pod, 12 → 4 pods.
+          type: AverageValue
+          averageValue: "3"
+    # ── Fallback: CPU ────────────────────────────────────────────────
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 80 }
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 600 }  # training runs are long; drain slowly
+    scaleUp:   { stabilizationWindowSeconds: 60 }
+
+# ══════════════════════════════════════════════════════════════════════
+# Scan worker (ClamAV)
+# ══════════════════════════════════════════════════════════════════════
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: sku-worker-scan, namespace: sku-forecasting }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sku-worker-scan
+  namespace: sku-forecasting
+  labels: { app: sku-worker-scan, component: worker, queue: sku-scan }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: sku-worker-scan }
+  template:
+    metadata:
+      labels: { app: sku-worker-scan, component: worker, queue: sku-scan }
+    spec:
+      serviceAccountName: sku-worker-scan
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1000
+        runAsGroup:   1000
+        fsGroup:      1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/your-org/sku-forecasting/sku-worker:latest
+          imagePullPolicy: Always
+          command: ["rq", "worker", "sku-scan", "--url", "redis://redis:6379"]
+          envFrom:
+            - configMapRef: { name: sku-config }
+            - secretRef:    { name: sku-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            # Scanning is mostly network I/O (stream to clamd). Keep small.
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 128Mi } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: sku-worker-scan, namespace: sku-forecasting }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: sku-worker-scan }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: sku-worker-scan, namespace: sku-forecasting }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: sku-worker-scan }
+  minReplicas: 1
+  maxReplicas: 6
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: rq_queue_jobs_queued
+          selector: { matchLabels: { queue: sku-scan } }
+        target:
+          # Scans are faster than training — one pod chews through ~5 scans.
+          type: AverageValue
+          averageValue: "5"
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300 }
+    scaleUp:   { stabilizationWindowSeconds: 30 }
+
+# ══════════════════════════════════════════════════════════════════════
+# Process worker (sandbox launcher)
+# ══════════════════════════════════════════════════════════════════════
+#
+# ⚠  This worker launches Docker containers from inside a pod — in k8s,
+#    the clean way is to switch the sandbox runner to use Kubernetes Jobs
+#    (see src/storage/sandbox.py TODO). Until then, this manifest grants
+#    access to the node's container runtime via the kubelet CRI socket,
+#    which REQUIRES a dedicated node pool. DO NOT schedule this pod
+#    alongside general-purpose workloads.
+#
+#    Alternative: run scan + process logic in the same "sandbox-capable"
+#    node pool with taints.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: sku-worker-process, namespace: sku-forecasting }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sku-worker-process
+  namespace: sku-forecasting
+  labels: { app: sku-worker-process, component: worker, queue: sku-process }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: sku-worker-process }
+  template:
+    metadata:
+      labels: { app: sku-worker-process, component: worker, queue: sku-process }
+    spec:
+      serviceAccountName: sku-worker-process
+      automountServiceAccountToken: false
+      # Schedule only on sandbox-enabled nodes (see taint in prod overlay).
+      nodeSelector: { sku/sandbox: "true" }
+      tolerations:
+        - key: "sku/sandbox"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1000
+        runAsGroup:   1000
+        fsGroup:      1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/your-org/sku-forecasting/sku-worker:latest
+          imagePullPolicy: Always
+          command: ["rq", "worker", "sku-process", "--url", "redis://redis:6379"]
+          envFrom:
+            - configMapRef: { name: sku-config }
+            - secretRef:    { name: sku-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: sandbox-staging, mountPath: /var/lib/sku-sandbox }
+            # Docker socket — only mounted because the current sandbox
+            # implementation shells out to `docker`. Swap for the k8s-Job
+            # launcher when available (removes this high-risk mount).
+            - { name: docker-socket, mountPath: /var/run/docker.sock }
+      volumes:
+        - { name: tmp,             emptyDir: { medium: Memory, sizeLimit: 128Mi } }
+        - { name: sandbox-staging, emptyDir: { sizeLimit: 2Gi } }
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: sku-worker-process, namespace: sku-forecasting }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: sku-worker-process }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: sku-worker-process, namespace: sku-forecasting }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: sku-worker-process }
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: rq_queue_jobs_queued
+          selector: { matchLabels: { queue: sku-process } }
+        target:
+          type: AverageValue
+          averageValue: "3"
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 75 }
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 600 }
+    scaleUp:   { stabilizationWindowSeconds: 60 }

@@ -1,0 +1,54 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths   = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# ── Warning filters ────────────────────────────────────────────────────────────
+# Цель: показывать только предупреждения из НАШЕГО кода (src/).
+# Всё из внешних библиотек — подавляется, т.к. они вне нашего контроля.
+filterwarnings = [
+    # ── По умолчанию: показывать все ──────────────────────────────────────────
+    "default",
+
+    # ── MLflow: использует Pydantic V1 API со старым @validator ───────────────
+    # Причина 890+ warnings: mlflow.gateway.config импортируется при каждом
+    # обращении к mlflow, а Pydantic V2 выдаёт warning на каждый @validator.
+    # Это баг mlflow 2.13 — исправлено в mlflow 2.14+, но мы зафиксированы на 2.13.
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+
+    # ── MLflow: get_latest_versions deprecated в MLflow 2.9 ──────────────────
+    # src/models/registry_gates.py использует этот метод.
+    # Исправление: перейти на search_model_versions() — запланировано.
+    "ignore::FutureWarning:mlflow",
+
+    # ── SHAP: использует устаревший np.inexact dtype ──────────────────────────
+    # shap 0.46 не совместим с numpy 1.26 на этом API. Вне нашего контроля.
+    "ignore::DeprecationWarning:shap",
+
+    # ── google.protobuf: Python 3.14 metaclass ────────────────────────────────
+    # protobuf 4.x использует старый API. Исправлено в protobuf 5+.
+    "ignore::DeprecationWarning:google",
+    "ignore::DeprecationWarning:importlib",
+
+    # ── setuptools: pkg_resources deprecated ──────────────────────────────────
+    # Используется mlflow. Вне нашего контроля.
+    "ignore::UserWarning:pkg_resources",
+    "ignore::UserWarning:mlflow",
+
+    # ── pythonjsonlogger: модуль перемещён ───────────────────────────────────
+    # pythonjsonlogger.jsonlogger → pythonjsonlogger.json
+    "ignore::DeprecationWarning:pythonjsonlogger",
+
+    # ── starlette: multipart deprecated import ────────────────────────────────
+    "ignore::PendingDeprecationWarning:starlette",
+
+    # ── sklearn: feature names warning в chaos тесте ─────────────────────────
+    "ignore::UserWarning:sklearn",
+
+    # ── Наши предупреждения: ПОКАЗЫВАТЬ (не подавлять) ───────────────────────
+    # Всё из src/ должно быть видно разработчикам.
+    "error::DeprecationWarning:src",
+    "error::FutureWarning:src",
+]

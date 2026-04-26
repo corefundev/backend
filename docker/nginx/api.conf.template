@@ -1,0 +1,152 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend VPS — TLS-terminating reverse proxy in front of api:8000.
+#
+# Rendered at container start: envsubst substitutes ${API_DOMAIN}, ${ADMIN_CIDR}
+# and writes to /etc/nginx/conf.d/api.conf. See entrypoint.sh.
+#
+# Expected directory layout in the running container:
+#   /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem
+#   /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem
+#   /var/www/certbot   ← ACME http-01 challenge webroot
+#
+# Rate limit zones (defined in http{} block in nginx.conf — see Dockerfile):
+#   zone=auth_rl  — /auth/token,  10 r/m per IP
+#   zone=upload_rl — /clients/*/uploads (POST), 20 r/m per IP
+#   zone=api_rl    — everything else, 600 r/m per IP (generous; API is tenant-scoped)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 80: HTTP → redirect to HTTPS, except ACME challenge path ────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${API_DOMAIN};
+
+    # certbot webroot challenge; served over plain HTTP on purpose
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+
+    location = /nginx-healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ── 443: TLS termination + reverse proxy ────────────────────────────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${API_DOMAIN};
+
+    # ── TLS ─────────────────────────────────────────────────────────────────
+    ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+
+    # Modern profile — drops everything below TLS 1.2. Matches Mozilla's
+    # "intermediate" recommendation as of 2026-01.
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers               'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+
+    ssl_session_cache        shared:API_TLS:10m;
+    ssl_session_timeout      1d;
+    ssl_session_tickets      off;
+    ssl_stapling             on;
+    ssl_stapling_verify      on;
+    # When Let's Encrypt issues the cert, certbot also writes chain.pem;
+    # we reuse it for OCSP response verification.
+    ssl_trusted_certificate  /etc/letsencrypt/live/${API_DOMAIN}/chain.pem;
+
+    # ── Hardening ───────────────────────────────────────────────────────────
+    # HSTS 1 year + preload. Only enable `preload` after the cert has been
+    # valid for some time; remove if you might ever need to fall back to HTTP.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff"  always;
+    add_header X-Frame-Options        "DENY"     always;
+    add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy     "geolocation=(), microphone=(), camera=()" always;
+    # Note: we deliberately do NOT set Access-Control-* here — FastAPI's
+    # CORSMiddleware owns that policy. Adding them in nginx would double-up
+    # and break preflights.
+
+    # Hide nginx version in Server: header
+    server_tokens off;
+
+    # ── Body limits ─────────────────────────────────────────────────────────
+    # Upload endpoint caps at 50 MB (MAX_UPLOAD_BYTES in the backend).
+    # Headroom to 60 MB so clean errors come from FastAPI's own 413 instead
+    # of nginx's raw HTML 413.
+    client_max_body_size 60M;
+    client_body_buffer_size 128k;
+    client_body_timeout 120s;
+
+    # Proxy connection tuning (uploads are slow, predicts are fast).
+    proxy_connect_timeout 10s;
+    proxy_send_timeout    120s;
+    proxy_read_timeout    300s;
+    proxy_request_buffering off;   # stream uploads straight through
+
+    # ── Proxied locations ───────────────────────────────────────────────────
+    # /metrics exposed to Prometheus only. Treat as internal; block from
+    # everyone except the ops CIDR. If you scrape via a private network,
+    # you don't need this block exposed at all — remove it entirely.
+    location /metrics {
+        allow ${ADMIN_CIDR};
+        deny all;
+        proxy_pass http://api_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Auth token endpoint: abused first in any API attack, so rate-limit hard.
+    # burst=5 gives a small cushion for legitimate retries.
+    location = /auth/token {
+        limit_req zone=auth_rl burst=5 nodelay;
+        proxy_pass http://api_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Upload endpoint: relatively expensive (antivirus + sandbox downstream).
+    # Match POST only; GET /clients/{id}/uploads is a cheap list and goes
+    # through the generic block below.
+    location ~ ^/clients/[^/]+/uploads$ {
+        limit_req zone=upload_rl burst=10 nodelay;
+        proxy_pass http://api_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Everything else — predicts, trainings, config, etc.
+    location / {
+        limit_req zone=api_rl burst=100 nodelay;
+        proxy_pass http://api_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Pass through FastAPI's Retry-After (429 responses from plan quota).
+        proxy_pass_header Retry-After;
+    }
+
+    # liveness probe straight to nginx — useful when api: is down so an
+    # external uptime monitor can distinguish "LB is up but app is down".
+    location = /nginx-healthz {
+        access_log off;
+        return 200 "ok\n";
+        default_type text/plain;
+    }
+}

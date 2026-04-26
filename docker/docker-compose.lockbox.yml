@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Overlay: Yandex Lockbox as the secret source (alternative to Vault).
+#
+# Apply:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.prod.yml \
+#       -f docker/docker-compose.lockbox.yml \
+#       up -d
+#
+# What it does:
+#   • Mounts the service-account authorised-key JSON read-only into
+#     api/worker/scan-worker/process-worker as /run/secrets/yc-sa-key.json.
+#   • Sets YC_SA_KEY_FILE + YC_LOCKBOX_SECRET_ID in those containers.
+#
+# Prerequisite on host:
+#   • Place the downloaded `authorized_key.json` at ./secrets/yc-sa-key.json
+#   • chmod 600 ./secrets/yc-sa-key.json
+#
+# The file NEVER gets rebuilt into images and NEVER gets checked into git
+# (add ./secrets/ to .gitignore).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    environment:
+      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  worker:
+    environment:
+      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  scan-worker:
+    environment:
+      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  process-worker:
+    environment:
+      YC_SA_KEY_FILE: /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: ${YC_LOCKBOX_SECRET_ID}
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

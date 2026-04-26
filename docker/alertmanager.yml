@@ -1,0 +1,66 @@
+# Alertmanager config.
+#
+# Two routes:
+#   • critical → dedicated #ops-pager Slack channel with 5-minute repeat
+#   • warning  → #ops-warn channel, 2-hour repeat
+#
+# Both receivers point at the single ALERT_WEBHOOK_URL env var, but the
+# Alertmanager container substitutes $ALERT_WEBHOOK_URL on startup via
+# envsubst (see docker-compose for the wrapper).
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by:        ["alertname", "cluster"]
+  group_wait:      30s        # quiet window before first notify
+  group_interval:  2m         # gap between notifications in a group
+  repeat_interval: 2h         # re-notify if still firing
+
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: slack-critical
+      group_wait: 10s
+      repeat_interval: 5m
+
+    - matchers:
+        - severity = "warning"
+      receiver: slack-warning
+
+receivers:
+  - name: default
+    slack_configs:
+      - api_url: "${ALERT_WEBHOOK_URL}"
+        channel: "#ops"
+        send_resolved: true
+
+  - name: slack-critical
+    slack_configs:
+      - api_url: "${ALERT_WEBHOOK_URL}"
+        channel: "#ops-pager"
+        send_resolved: true
+        title:    "🚨 {{ .CommonLabels.alertname }}"
+        text:     |
+          *Severity:* `{{ .CommonLabels.severity }}`
+          {{ range .Alerts }}• {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+  - name: slack-warning
+    slack_configs:
+      - api_url: "${ALERT_WEBHOOK_URL}"
+        channel: "#ops-warn"
+        send_resolved: true
+        title:    "⚠ {{ .CommonLabels.alertname }}"
+        text:     |
+          {{ range .Alerts }}• {{ .Annotations.summary }}
+          {{ end }}
+
+inhibit_rules:
+  # When the API is down, every dependent alert fires too. Suppress the
+  # noise so on-call sees the root cause first.
+  - source_matchers: [severity = "critical", alertname = "ApiDown"]
+    target_matchers: [severity = "warning"]
+    equal: ["cluster"]

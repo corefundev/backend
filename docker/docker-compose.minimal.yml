@@ -1,0 +1,75 @@
+# ───────────────────────────────────────────────────────────────────────
+# Override for production VPS:
+#   • mlflow → sqlite backend (no psycopg2)
+#   • scan/process-worker — drop minio dep
+#   • process-worker — group_add for /var/run/docker.sock access
+#   • alertmanager — disabled (no Slack webhook configured)
+#   • postgres / redis — host port mapping removed (internal only)
+#   • prometheus / grafana / mlflow — bind to 127.0.0.1 only (SSH tunnel access)
+#
+# Deploy with all three -f files:
+#   docker compose -f docker/docker-compose.yml \
+#                  -f docker/docker-compose.prod.yml \
+#                  -f docker/docker-compose.minimal.yml \
+#                  --env-file .env up -d <services>
+# ───────────────────────────────────────────────────────────────────────
+services:
+  mlflow:
+    environment:
+      MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow/mlflow.db
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+      MLFLOW_S3_ENDPOINT_URL: ""
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    depends_on: !reset []
+    volumes:
+      - mlflow_data:/mlflow
+    ports: !override
+      - "127.0.0.1:5000:5000"
+
+  scan-worker:
+    depends_on: !override
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+
+  process-worker:
+    depends_on: !override
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    group_add:
+      - "988"
+
+  alertmanager:
+    profiles: ["disabled"]
+
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  prometheus:
+    ports: !override
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:3000:3000"
+
+  backup:
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+

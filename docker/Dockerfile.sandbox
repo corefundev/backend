@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.6
+# ═════════════════════════════════════════════════════════════════════════════
+# Minimal sandbox image for untrusted CSV/XLSX parsing.
+#
+# Principles:
+#   • Distroless-ish: only Python + the parser + its deps. No shell in final
+#     image (python:3.11-slim keeps /bin/sh for pip; we strip it after).
+#   • Non-root by construction: runs as `nobody` (uid 65534).
+#   • Pinned deps with --no-deps to keep the dependency graph tiny.
+#   • No project source — only secure_parser.py is copied in.
+#
+# Container runtime flags set by src/storage/sandbox.py:
+#   --network none --read-only --cap-drop ALL --security-opt no-new-privileges
+#   --user 65534:65534 --pids-limit 64 --memory 512m --cpus 1
+#
+# Build:
+#   docker build -f docker/Dockerfile.sandbox -t sku-forecasting-sandbox ..
+# ═════════════════════════════════════════════════════════════════════════════
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /opt
+
+# pandas + pyarrow (parquet) + openpyxl (xlsx). Pin for reproducibility.
+# numpy is transitive via pandas.
+RUN pip install --no-cache-dir \
+        "pandas==2.2.2" \
+        "pyarrow==16.1.0" \
+        "openpyxl==3.1.2"
+
+COPY src/validation/secure_parser.py /opt/secure_parser.py
+
+# Strip interactive shells — nothing in the sandbox should need them.
+# We keep /bin/sh only if you need it for Docker exec debugging; comment
+# out to go stricter.
+RUN rm -f /bin/bash /bin/dash /usr/bin/perl /usr/bin/awk /usr/bin/ssh || true
+
+# Drop privileges early (Docker will enforce --user too, but defense in depth).
+USER 65534:65534
+
+ENTRYPOINT ["python", "/opt/secure_parser.py"]

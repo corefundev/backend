@@ -1,0 +1,128 @@
+# Prometheus alerting rules for the SKU Forecasting platform.
+#
+# Philosophy
+# ──────────
+#  • Each alert has a severity (critical | warning) and a runbook_url —
+#    keep runbooks short, linked here and nowhere else.
+#  • `for:` gives enough time to filter flaps; don't wake on-call for a
+#    single stuck request.
+#  • Labels `team: forecasting` route to the right Alertmanager receiver.
+#
+# Metrics we rely on come from src/api/main.py:
+#   forecast_requests_total{client_id, status}
+#   forecast_latency_seconds_bucket{client_id}
+#   fallback_model_used_total{client_id}
+
+groups:
+
+  - name: api-availability
+    rules:
+      - alert: ApiDown
+        # `up` is 1 when Prometheus successfully scraped the target in
+        # the last window, 0 otherwise. Missing target for 2 min → page.
+        expr:  up{job="sku-forecasting-api"} == 0
+        for:   2m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "API /metrics is unreachable for 2m"
+          description: "No successful scrape of api:8000 since {{ $value }}. Check container health, /readyz."
+
+      - alert: ApiHighErrorRate
+        # ratio of error responses to all responses in the last 5m
+        expr: |
+          (sum(rate(forecast_requests_total{status="error"}[5m]))
+           /
+           clamp_min(sum(rate(forecast_requests_total[5m])), 0.001))
+          > 0.05
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "API error rate >5% for 10m"
+          description: "Current error ratio is {{ $value | humanizePercentage }}."
+
+      - alert: ApiPredictSlow
+        # p95 latency above 2s sustained
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(forecast_latency_seconds_bucket[10m]))
+          ) > 2
+        for:   15m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Predict p95 latency >2s (15m)"
+          description: "p95 = {{ $value }}s. Check model load / feature build path."
+
+      - alert: FallbackModelInUse
+        # Fallback firing more than 5x/min means the primary model is
+        # broken, not just warming up.
+        expr:  rate(fallback_model_used_total[5m]) > 5/60
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Fallback model active for 10m"
+          description: "Clients: check primary model load logs."
+
+  - name: workers
+    rules:
+      - alert: WorkerQueueBacklog
+        # rq-exporter exposes rq_scheduler_jobs + rq_queue_jobs{status="queued"}
+        expr: |
+          sum by (queue) (rq_queue_jobs{status="queued"}) > 100
+        for:   20m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Queue {{ $labels.queue }} has >100 pending jobs"
+          description: "Consider scaling the matching worker."
+
+  - name: storage
+    rules:
+      - alert: MinioDiskFillingUp
+        expr:  minio_cluster_disk_free_bytes / minio_cluster_disk_total_bytes < 0.15
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "MinIO free space <15%"
+          description: "Free = {{ $value | humanizePercentage }}. Prune old uploads / backups."
+
+      - alert: MinioDiskCritical
+        expr:  minio_cluster_disk_free_bytes / minio_cluster_disk_total_bytes < 0.05
+        for:   10m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "MinIO free space <5%"
+
+  - name: database
+    rules:
+      - alert: PostgresDown
+        expr:  up{job="postgres"} == 0
+        for:   2m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Postgres exporter unreachable"
+
+      - alert: PostgresConnectionsHigh
+        expr: |
+          pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Postgres connections >80% of max_connections"

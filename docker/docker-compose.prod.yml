@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production overlay for the BACKEND VPS.
+#
+# Layered on top of docker-compose.yml:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# Adds:
+#   • nginx — TLS-terminating reverse proxy in front of api:8000
+#   • certbot — obtains + renews the Let's Encrypt cert
+#
+# Shared volumes:
+#   letsencrypt     — the actual cert chain (shared by nginx + certbot)
+#   certbot_webroot — served by nginx for the http-01 challenge,
+#                     populated by certbot during issuance
+#
+# Operational notes:
+#   1. First run needs `scripts/init_tls.sh` to issue the cert before
+#      nginx's reverse-proxy block can load.
+#   2. Renewal happens via the certbot container's built-in loop
+#      (every 12 h it checks, renews when <30 days remain).
+#   3. nginx polls for new certs every 6 h and reloads.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # The API container itself stops exposing 8000 publicly — only the VPS's
+  # localhost bridge + the nginx container need it.
+  api:
+    ports: !reset []    # replace base mapping, remove host-side 8000
+
+  nginx:
+    build:
+      context: ./nginx
+    environment:
+      API_DOMAIN: "${API_DOMAIN:?ERROR: set API_DOMAIN in .env (e.g. api.example.com)}"
+      ADMIN_CIDR: ${ADMIN_CIDR:-127.0.0.1/32}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro         # cert chain
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    # Environment variables referenced by init_tls.sh / renew_tls.sh.
+    environment:
+      CERTBOT_EMAIL: "${CERTBOT_EMAIL:?ERROR: set CERTBOT_EMAIL in .env}"
+      API_DOMAIN:      ${API_DOMAIN}
+      CERTBOT_STAGING: ${CERTBOT_STAGING:-0}     # "1" → use LE staging CA for testing
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        trap exit TERM
+        # Periodic renewal loop — silent when nothing to do.
+        while :; do
+            certbot renew --webroot --webroot-path /var/www/certbot --quiet || true
+            sleep 12h & wait $!
+        done
+    restart: unless-stopped
+
+volumes:
+  letsencrypt:
+  certbot_webroot:

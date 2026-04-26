@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# NetworkPolicy — zero-trust default, explicit allows.
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, kube-router).
+# On clusters without policy enforcement these are advisory — double-check
+# before relying on them for isolation.
+#
+# Policy shape:
+#   1. default-deny-ingress     — nothing reaches any pod in the namespace
+#                                  unless explicitly allowed by a later policy
+#   2. api-allow-ingress        — ingress-nginx controller → api:8000
+#   3. api-allow-egress-internal — api can talk to postgres, redis, minio,
+#                                  clamav, mlflow + DNS
+#   4. workers-allow-egress     — same egress rights as api
+#   5. clamav-from-scan-only    — only scan-worker reaches clamav:3310
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress, namespace: sku-forecasting }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-egress, namespace: sku-forecasting }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # DNS is always needed for service discovery (cluster DNS resolves
+    # `redis`, `postgres`, etc.). Allow it everywhere.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# Allow the ingress controller (namespace: ingress-nginx) to reach the API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api-allow-ingress, namespace: sku-forecasting }
+spec:
+  podSelector:
+    matchLabels: { app: sku-api }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+      ports:
+        - { port: 8000, protocol: TCP }
+    - from:
+        # Prometheus scraping from the monitoring namespace.
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { port: 8000, protocol: TCP }
+---
+# API + workers can talk to the namespace's data services and to the
+# public internet (S3, MLflow remote, webhook alerts).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: app-allow-egress, namespace: sku-forecasting }
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: component, operator: In, values: [api, worker] }
+  policyTypes: [Egress]
+  egress:
+    # Intra-namespace: redis, postgres, mlflow, minio, clamav (via their policies).
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: sku-forecasting }
+    # Internet (S3, webhooks). Restrict to 443 to block plaintext
+    # exfil paths.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16   # link-local / metadata
+      ports:
+        - { port: 443, protocol: TCP }
+---
+# ClamAV: only scan-worker may touch it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: clamav-from-scan-only, namespace: sku-forecasting }
+spec:
+  podSelector:
+    matchLabels: { app: clamav }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: sku-worker-scan }
+      ports:
+        - { port: 3310, protocol: TCP }

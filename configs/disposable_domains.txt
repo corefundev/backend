@@ -1,0 +1,109 @@
+# Throwaway / disposable email domains.
+#
+# Format: one domain per line, lowercase, no port, no @.
+# Lines starting with # are comments; blank lines ignored.
+#
+# This file is loaded at process start by src/auth/disposable_domains.py
+# and consulted on every /auth/signup request. Edits require a process
+# restart (or `kill -HUP <pid>` if a hot-reload mechanism is added).
+#
+# To refresh from the curated public list, run:
+#     scripts/update_disposable_list.sh
+#
+# The bundled set below covers the ~50 services responsible for >95%
+# of casual disposable-email signups in 2024-2026. The full list at
+# https://github.com/disposable/disposable-email-domains has ~12 000
+# entries — overkill for most cases but install if you see abuse.
+
+# ── Mailinator family ────────────────────────────────────────────
+mailinator.com
+mailinator.net
+mailinator2.com
+binkmail.com
+chammy.info
+mailinater.com
+
+# ── Guerrilla Mail family ────────────────────────────────────────
+guerrillamail.com
+guerrillamail.biz
+guerrillamail.de
+guerrillamail.info
+guerrillamail.net
+guerrillamail.org
+guerrillamailblock.com
+sharklasers.com
+spam4.me
+
+# ── 10-Minute / Time-bound ───────────────────────────────────────
+10minutemail.com
+10minutemail.net
+10minutemail.org
+20minutemail.com
+30minutemail.com
+30minutesmail.com
+60minutemail.com
+1secmail.com
+1secmail.net
+1secmail.org
+
+# ── Temp-Mail family ─────────────────────────────────────────────
+temp-mail.org
+temp-mail.io
+temp-mail.ru
+tempail.com
+tempinbox.com
+tempmailaddress.com
+tempmail.email
+tempmail.net
+tempmail.us.com
+tmail.io
+throwawaymail.com
+trashmail.com
+trashmail.net
+
+# ── YOPmail ──────────────────────────────────────────────────────
+yopmail.com
+yopmail.net
+yopmail.fr
+yopmail.gq
+yopmail.pp.ua
+
+# ── Maildrop / Inboxbear / Disroot etc. ──────────────────────────
+maildrop.cc
+inboxbear.com
+mvrht.net
+mvrht.com
+
+# ── Dispostable, Mintemail, GetNada, MailDrop ─────────────────────
+dispostable.com
+mintemail.com
+getnada.com
+nada.email
+nada.ltd
+
+# ── Burner / random services ─────────────────────────────────────
+burnermail.io
+emailondeck.com
+fakeinbox.com
+incognitomail.com
+incognitomail.org
+mt2014.com
+mt2015.com
+spambog.com
+spambog.de
+spambog.ru
+spambox.us
+
+# ── Russian-language disposable services ─────────────────────────
+mail.tm
+spam.la
+emltmp.com
+dropmail.me
+moakt.com
+mohmal.com
+
+# ── Privacy-mailing (EXCLUDED on purpose — these are real privacy
+#     tools, not disposable; legitimate users rely on them)
+# protonmail.com / proton.me — KEEP, do not block
+# tutanota.com / tutamail.com — KEEP
+# fastmail.com — KEEP

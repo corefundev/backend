@@ -1,0 +1,19 @@
+# Не копировать в Docker образ
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.zip
+artifacts/
+data/
+mlflow/
+registry.json
+*.log
+.mypy_cache
+.ruff_cache
+node_modules

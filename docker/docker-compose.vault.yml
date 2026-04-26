@@ -1,0 +1,136 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Overlay: self-hosted Vault on the backend VPS.
+#
+# How to apply (together with the base and prod overlays):
+#
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.prod.yml \
+#       -f docker/docker-compose.vault.yml \
+#       up -d
+#
+# First-time bootstrap sequence:
+#   1. bring Vault up (this overlay)
+#   2. scripts/vault_init.sh       — init + unseal + AppRole + policy
+#   3. scripts/vault_load_env.sh   — ingest your .env into Vault KV
+#   4. scripts/vault_rotate_secret_id.sh — get a short-lived SECRET_ID
+#   5. put VAULT_ADDR, VAULT_ROLE_ID, VAULT_SECRET_ID into .env, remove
+#      all the other secrets, restart app services
+#
+# After step 5, .env on disk is effectively innocent: it only holds
+# credentials that grant brief access to a single KV path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: sku-vault
+    cap_add:
+      # Vault wants IPC_LOCK so memory can't be swapped to disk.
+      # With cap_add we don't have to drop "restricted" PSA posture.
+      - IPC_LOCK
+    environment:
+      # ── Seal mode: awskms | transit | manual ────────────────────
+      VAULT_SEAL_MODE: ${VAULT_SEAL_MODE:-manual}
+
+      # Auto-unseal via AWS KMS (cheapest, ~$1/mo):
+      #   1. Create a CMK in AWS KMS, note its ARN
+      #   2. Create an IAM user with `kms:Encrypt`+`kms:Decrypt` on that CMK
+      #   3. Put credentials here (or attach role if running on EC2)
+      VAULT_AWSKMS_KEY_ID:     ${VAULT_AWSKMS_KEY_ID:-}
+      AWS_REGION:              ${VAULT_AWS_REGION:-}
+      AWS_ACCESS_KEY_ID:       ${VAULT_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY:   ${VAULT_AWS_SECRET_ACCESS_KEY:-}
+
+      # Alternative: Transit auto-unseal through a "root" Vault elsewhere
+      VAULT_TRANSIT_ADDRESS:   ${VAULT_TRANSIT_ADDRESS:-}
+      VAULT_TRANSIT_TOKEN:     ${VAULT_TRANSIT_TOKEN:-}
+      VAULT_TRANSIT_KEY_NAME:  ${VAULT_TRANSIT_KEY_NAME:-}
+      VAULT_TRANSIT_MOUNT:     ${VAULT_TRANSIT_MOUNT:-transit/}
+
+      # Used by Vault internally for cluster-addr / api-addr
+      VAULT_API_ADDR:          ${VAULT_API_ADDR:-http://vault:8200}
+      VAULT_CLUSTER_ADDR:      ${VAULT_CLUSTER_ADDR:-http://vault:8201}
+
+    volumes:
+      - ./vault/config.hcl.template:/vault/config.hcl.template:ro
+      - ./vault/entrypoint.sh:/usr/local/bin/sku-vault-entrypoint:ro
+      - vault_data:/vault/data
+      - vault_logs:/vault/logs
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache gettext > /dev/null && /usr/local/bin/sku-vault-entrypoint"]
+
+    restart: unless-stopped
+    # Expose ONLY on the docker bridge — app containers talk via DNS name "vault".
+    # If you want the CLI available on the host, uncomment the line below;
+    # otherwise use `docker compose exec vault vault ...`.
+    # ports:
+    #   - "127.0.0.1:8200:8200"
+    healthcheck:
+      # /v1/sys/health returns:
+      #   200 OK if unsealed + active
+      #   501 if initialized but sealed (still a reachable Vault)
+      #   503 if uninitialized
+      # We accept 200 and 501 — sealed Vault is "healthy enough" to rely on;
+      # if we failed sealed, docker would restart-loop forever waiting for
+      # manual unseal. The `bootstrap_secrets()` in the app will detect the
+      # sealed state and emit a loud warning.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8200/v1/sys/health || [ $$? -eq 2 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── App services depend on Vault. We only add the dependency here, not
+  #    restate the full service definitions (Docker Compose merges overlays).
+  api:
+    depends_on:
+      vault:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    depends_on:
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+
+  scan-worker:
+    depends_on:
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  process-worker:
+    depends_on:
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  vault_data:
+    # ⚠ Back this up separately. Losing /vault/data means losing all
+    # secrets. The backup.sh service does NOT include it — on purpose
+    # (backup.sh uses DATABASE_URL for pg_dump; Vault has its own snapshot
+    # mechanism: `vault operator raft snapshot save /tmp/vault.snap`).
+  vault_logs:

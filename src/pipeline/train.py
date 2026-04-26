@@ -1,0 +1,206 @@
+"""
+src/pipeline/train.py
+
+End-to-end training pipeline v2.0:
+  load → GE validate → anomaly detection → features (+ weather + holidays)
+  → HPO (optional) → MIMO / LightGBM train → walk-forward validate
+  → SHAP explainer → cold-start model → fallback → save (S3/local) → MLflow
+"""
+from __future__ import annotations
+
+import logging
+import sys
+import time
+
+
+from src.data.loader import load_config, load_data, validate_data
+from src.data.ge_validator import validate_with_great_expectations
+from src.clients.config_manager import get_config_manager
+from src.data.anomaly_detection import SalesAnomalyDetector
+from src.features.engineering import build_features, get_feature_columns
+from src.models.forecaster import SKUForecaster, log_to_mlflow
+from src.models.mimo import MIMOForecaster
+from src.models.fallback import SeasonalNaiveModel
+from src.models.cold_start import ColdStartRouter, ClusterBasedForecaster
+from src.models.explainer import SKUExplainer
+from src.storage.backend import ClientStorage, get_storage
+from src.validation.walk_forward import walk_forward_validate
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
+
+def run_training_pipeline(
+    data_path: str,
+    config_path: str = "configs/config.yaml",
+    client_id:  str = "default",
+    output_dir: str | None = None,
+) -> dict:
+    t0 = time.time()
+    logger.info(f"=== Training pipeline START | client={client_id} ===")
+
+    # ── Load system config ───────────────────────────────────
+    config = load_config(config_path)
+
+    # ── Apply per-client config overrides ────────────────────
+    # Client config is merged ON TOP of system config.
+    # System config.yaml is never modified.
+    try:
+        from src.clients.registry import get_registry
+        registry = get_registry()
+        mgr      = get_config_manager(config_path)
+        config   = mgr.get_effective(client_id, registry)
+        logger.info(f"Config for client={client_id}: applied per-client overrides")
+    except Exception as e:
+        logger.warning(f"Could not load per-client config overrides: {e}. Using system defaults.")
+
+    storage = ClientStorage(client_id)
+    logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
+
+    # ── 1. Load ───────────────────────────────────────────────
+    logger.info("Step 1/9: Loading data...")
+    df = load_data(data_path, config)
+
+    # ── 2. GE Validation ──────────────────────────────────────
+    logger.info("Step 2/9: GE validation...")
+    ge_result = validate_with_great_expectations(df, config, raise_on_failure=True)
+    df = validate_data(df, config)
+    storage.save_raw_data(df)
+
+    # ── 3. Anomaly detection ──────────────────────────────────
+    logger.info("Step 3/9: Anomaly detection...")
+    sample_weights = None
+    anom_cfg = config.get("anomaly_detection", {})
+    if anom_cfg.get("enabled", True):
+        detector = SalesAnomalyDetector(
+            contamination=anom_cfg.get("contamination", 0.05),
+            iqr_factor=anom_cfg.get("iqr_factor", 3.0),
+            anomaly_weight=anom_cfg.get("anomaly_weight", 0.1),
+        )
+        df, sample_weights_full = detector.fit_detect(
+            df,
+            sku_col=config["data"]["sku_col"],
+            target_col=config["data"]["target_col"],
+        )
+
+    # ── 4. Feature engineering ────────────────────────────────
+    logger.info("Step 4/9: Building features (calendar, lags, rolling, price, promo, OOS, weather, holidays)...")
+    df = build_features(df, config)
+    feature_cols = get_feature_columns(df, config)
+    storage.save_features(df)
+    logger.info(f"  {len(feature_cols)} features, {len(df)} rows")
+
+    target_col = config["data"]["target_col"]
+    sku_col    = config["data"]["sku_col"]
+    X = df[feature_cols]
+    y = df[target_col]
+
+    # Align sample weights to feature-engineered rows
+    if anom_cfg.get("enabled", True) and "is_anomaly" in df.columns:
+        sample_weights = sample_weights_full[df.index] if hasattr(sample_weights_full, '__getitem__') else None
+
+    # ── 5. HPO (optional) ─────────────────────────────────────
+    hpo_cfg = config.get("hpo", {})
+    if hpo_cfg.get("enabled", False):
+        logger.info("Step 5/9: Running HPO with Optuna...")
+        from src.models.hpo import run_hpo
+        best_params = run_hpo(df, feature_cols, config, hpo_cfg.get("n_trials", 30))
+        if best_params:
+            config["model"].update(best_params)
+            logger.info(f"  HPO best params: {best_params}")
+    else:
+        logger.info("Step 5/9: HPO skipped (set hpo.enabled=true to activate)")
+
+    # ── 6. Walk-forward validation ────────────────────────────
+    logger.info("Step 6/9: Walk-forward validation...")
+    val_model = SKUForecaster(config)
+    wf_result = walk_forward_validate(df, val_model, feature_cols, config)
+    agg = wf_result.aggregated
+    logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
+    storage.save_per_sku_metrics(wf_result.per_sku_metrics)
+
+    # ── 7. Train final model ──────────────────────────────────
+    logger.info("Step 7/9: Training final model...")
+    model_type = config["model"].get("type", "lgbm")
+
+    if model_type == "mimo":
+        final_model = MIMOForecaster(config)
+        final_model.fit(X, y)
+        # Also fit quantile models for interval forecasts
+        final_model.fit_quantiles(X, y)
+        logger.info("  MIMO model + quantile models fitted")
+    else:
+        final_model = SKUForecaster(config)
+        final_model.fit(X, y)
+
+    # ── 8. Cold-start model ───────────────────────────────────
+    cs_cfg  = config.get("cold_start", {})
+    router  = ColdStartRouter(min_history_days=cs_cfg.get("min_history_days", 28))
+    cluster = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
+    cluster.fit(df, sku_col, target_col)
+
+    # ── 9. SHAP explainer ─────────────────────────────────────
+    if model_type == "lgbm":
+        lgbm_inner = getattr(final_model, "model", None)
+        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+    else:
+        # Use first MIMO model for SHAP
+        lgbm_inner = final_model.models_[0] if final_model.models_ else None
+        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+
+    # ── Save fallback ─────────────────────────────────────────
+    fallback = SeasonalNaiveModel(seasonality=7)
+    fallback.fit(y.values)
+    storage.save_fallback_model(fallback)
+
+    # ── Save primary model ────────────────────────────────────
+    model_path = storage.save_model(final_model)
+    logger.info(f"  Saved → {model_path}")
+
+    # ── MLflow logging ────────────────────────────────────────
+    logger.info("Step 8/9: MLflow logging...")
+    run_id = None
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            tmp_path = tmp.name
+        if hasattr(final_model, "save"):
+            final_model.save(tmp_path)
+            run_id = log_to_mlflow(config, agg, final_model, tmp_path, client_id)
+        import os as _os
+        _os.unlink(tmp_path)
+    except Exception as e:
+        logger.warning(f"MLflow logging failed: {e}")
+
+    elapsed = time.time() - t0
+    logger.info(f"=== Training pipeline DONE in {elapsed:.1f}s ===")
+
+    return {
+        "client_id":       client_id,
+        "model_path":      model_path,
+        "model_type":      model_type,
+        "storage_backend": storage.backend.__class__.__name__,
+        "metrics":         agg,
+        "mlflow_run_id":   run_id,
+        "n_skus":          df[sku_col].nunique(),
+        "n_features":      len(feature_cols),
+        "n_rows":          len(df),
+        "elapsed_sec":     elapsed,
+        "ge_stats":        ge_result.statistics,
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data",   required=True)
+    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--client", default="default")
+    args = parser.parse_args()
+    result = run_training_pipeline(args.data, args.config, args.client)
+    import json
+    logger.info("Pipeline result: " + json.dumps({k: str(v) for k,v in result.items()}, default=str))

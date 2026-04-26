@@ -1,0 +1,102 @@
+# ══════════════════════════════════════════════════════
+# SKU Forecasting Platform — .gitignore
+# ══════════════════════════════════════════════════════
+
+# Секреты — НИКОГДА не коммитить!
+.env
+.env.local
+.env.*.local
+.env.level1.bak
+*.secret
+secrets.yaml
+vault-token
+vault-init.secrets
+
+# YC service-account authorized keys (для Lockbox)
+secrets/
+yc-sa-key*.json
+authorized_key*.json
+sku-sa-key.json
+rotator-key.json
+ci-deploy-key*
+ci-known-hosts
+
+# Локальные dev-фоллбэки (Postgres-фри)
+registry.json
+uploads_registry.json
+otp_codes.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+ENV/
+
+# Тесты и покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+reports/
+
+# ML артефакты — хранить в S3/DVC
+artifacts/
+mlruns/
+mlflow/
+*.pkl
+*.cbm
+*.bin
+
+# CatBoost логи
+catboost_info/
+
+# Данные — хранить в S3/DVC
+data/
+*.csv
+*.parquet
+
+# Логи
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DVC
+/tmp/
+.dvc/tmp/
+
+# Registry — локальная копия, не для репо
+registry.json
+
+# Кэш погоды
+artifacts/weather_cache.parquet
+
+# Docker
+.docker/
+
+# Secrets / Vault / Lockbox / temp backups
+.env.bak.*
+*.pem
+*.key
+!**/configs/disposable_domains.txt
+.env.level3
+.env.lockbox

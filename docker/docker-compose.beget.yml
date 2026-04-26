@@ -1,0 +1,234 @@
+# ══════════════════════════════════════════════════════════════
+# SKU Forecasting Platform — Production (Beget S3)
+#
+# УРОВНИ ЗАПУСКА:
+#
+# Level 3 (production, рекомендуется) — .env НЕ НУЖЕН:
+#   VAULT_ROLE_ID=xxx \
+#   VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/sku-forecasting/secret-id) \
+#   docker compose -f docker/docker-compose.beget.yml up -d
+#
+# Level 2 (staging):
+#   VAULT_ADDR=http://vault:8200 VAULT_TOKEN=xxx docker compose up -d
+#
+# Level 1 (dev):
+#   docker compose --env-file ../.env -f docker/docker-compose.beget.yml up -d
+#
+# ══════════════════════════════════════════════════════════════
+
+x-common: &common
+  restart: unless-stopped
+  networks: [sku_net]
+
+# Переменные которые НЕ СЕКРЕТЫ — адреса, имена, конфигурация
+# Секреты (JWT, API_KEY, AWS_*) — приходят из Vault в runtime
+x-infra-env: &infra-env
+  # ── Окружение ─────────────────────────────────────────────
+  APP_ENV:               ${APP_ENV:-production}
+  CONFIG_PATH:           ${CONFIG_PATH:-configs/config.yaml}
+  # ── Хранилище ─────────────────────────────────────────────
+  STORAGE_BACKEND:       ${STORAGE_BACKEND:-s3}
+  ARTIFACTS_DIR:         ${ARTIFACTS_DIR:-/app/artifacts}
+  S3_BUCKET:             ${S3_BUCKET:-sku-forecasting}
+  S3_ENDPOINT_URL:       ${S3_ENDPOINT_URL:-https://s3.beget.com}
+  AWS_DEFAULT_REGION:    ${AWS_DEFAULT_REGION:-ru-1}
+  S3_KEY_PREFIX:         ${S3_KEY_PREFIX:-}
+  # ── Сервисы ───────────────────────────────────────────────
+  REDIS_URL:             ${REDIS_URL:-redis://redis:6379}
+  MLFLOW_TRACKING_URI:   ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+  # ── База данных ───────────────────────────────────────────
+  DB_HOST:               ${DB_HOST:-postgres}
+  DB_PORT:               ${DB_PORT:-5432}
+  DB_NAME:               ${DB_NAME:-sku_db}
+  DATABASE_URL:          ${DATABASE_URL:-}
+  # ── Vault ─────────────────────────────────────────────────
+  VAULT_ADDR:            ${VAULT_ADDR:-http://vault:8200}
+  VAULT_PATH:            ${VAULT_PATH:-sku-forecasting}
+  VAULT_ROLE_ID:         ${VAULT_ROLE_ID:-}
+  VAULT_SECRET_ID:       ${VAULT_SECRET_ID:-}
+  VAULT_TOKEN:           ${VAULT_TOKEN:-}
+  # ── Секреты (Level 1: из .env / Level 2-3: из Vault) ─────
+  JWT_SECRET_KEY:        ${JWT_SECRET_KEY:-}
+  JWT_EXPIRE_MINUTES:    ${JWT_EXPIRE_MINUTES:-60}
+  JWT_ALGORITHM:         ${JWT_ALGORITHM:-HS256}
+  API_KEY:               ${API_KEY:-}
+  AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  GRAFANA_PASSWORD:      ${GRAFANA_PASSWORD:-}
+  ALERT_WEBHOOK_URL:     ${ALERT_WEBHOOK_URL:-}
+  WEBHOOK_IP_WHITELIST:  ${WEBHOOK_IP_WHITELIST:-}
+
+services:
+
+  # ── API ────────────────────────────────────────────────────
+  api:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: sku-forecasting-api:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      <<: *infra-env
+    volumes:
+      - ../configs:/app/configs:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      vault:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Training Worker ────────────────────────────────────────
+  worker:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    image: sku-forecasting-worker:latest
+    environment:
+      <<: *infra-env
+    volumes:
+      - ../configs:/app/configs:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import redis; redis.from_url('redis://redis:6379').ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    <<: *common
+    image: redis:7.2-alpine
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MLflow ────────────────────────────────────────────────
+  mlflow:
+    <<: *common
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    ports:
+      - "127.0.0.1:5000:5000"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://s3.beget.com}
+      # В Level 3 эти переменные заполняет Vault Agent — не .env
+      AWS_ACCESS_KEY_ID:      ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY:  ${AWS_SECRET_ACCESS_KEY:-}
+    command: >
+      mlflow server
+        --host 0.0.0.0 --port 5000
+        --backend-store-uri sqlite:///mlflow/mlflow.db
+        --default-artifact-root s3://${S3_BUCKET:-sku-forecasting}/mlflow
+    volumes:
+      - mlflow_data:/mlflow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Vault ─────────────────────────────────────────────────
+  vault:
+    <<: *common
+    image: hashicorp/vault:1.16
+    ports:
+      - "127.0.0.1:8200:8200"
+    volumes:
+      - vault_data:/vault/data
+      - ../vault:/vault/config
+    entrypoint: ["vault"]
+    command: ["server", "-config=/vault/config/vault-prod.hcl"]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Prometheus ────────────────────────────────────────────
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Grafana ───────────────────────────────────────────────
+  grafana:
+    <<: *common
+    image: grafana/grafana:10.4.2
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # В Level 3 пароль берётся из Vault — переменная будет заполнена при старте api/worker
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-change-me-via-vault}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on: [prometheus]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Vault Agent sidecar (Level 3) ────────────────────────
+  # Раскомментировать после настройки AppRole (vault/setup_vault.sh)
+  # Рендерит секреты в tmpfs том vault_secrets, доступный api и worker
+  #
+  # vault-agent:
+  #   <<: *common
+  #   image: hashicorp/vault:1.16
+  #   volumes:
+  #     - ../vault/agent.hcl:/vault/config/agent.hcl:ro
+  #     - ../vault/templates:/vault/templates:ro
+  #     - vault_secrets:/vault/secrets    # tmpfs: секреты в RAM
+  #   environment:
+  #     VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+  #   command: agent -config=/vault/config/agent.hcl
+  #   depends_on: [vault]
+  #
+  # Добавить в api и worker (когда vault-agent включён):
+  #   volumes:
+  #     - vault_secrets:/vault/secrets:ro
+
+networks:
+  sku_net:
+    driver: bridge
+
+volumes:
+  redis_data:
+  mlflow_data:
+  prometheus_data:
+  grafana_data:
+  vault_data:
+  # vault_secrets:   # раскомментировать при включении vault-agent
+  #   driver_opts:
+  #     type: tmpfs
+  #     device: tmpfs   # только RAM, никакого диска

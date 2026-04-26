@@ -1,0 +1,23 @@
+# ══════════════════════════════════════════════════════
+# SKU Forecasting Platform — Training Worker Image
+# ══════════════════════════════════════════════════════
+FROM python:3.11-slim
+
+RUN groupadd -r sku && useradd -r -g sku -d /app -s /sbin/nologin sku
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ src/
+COPY configs/ configs/
+
+RUN chown -R sku:sku /app
+USER sku
+
+CMD ["rq", "worker", "--url", "redis://redis:6379", "default"]

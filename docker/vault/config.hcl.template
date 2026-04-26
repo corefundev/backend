@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Vault config for a single-node Beget VPS deployment.
+#
+# Storage: integrated Raft (file-backed, survives reboot, no external DB).
+# Listener: 0.0.0.0:8200, TLS off here — nginx in front terminates TLS
+#           before it reaches Vault (same pattern as the API). If you expose
+#           Vault to other hosts, ADD TLS here and fix the CA path below.
+# Seal:     awskms | transit | (none = Shamir manual unseal).
+#
+# The seal block is rendered by entrypoint.sh using envsubst. Set
+# VAULT_SEAL_MODE=awskms|transit|manual to pick. For "manual", nothing
+# is rendered and Vault defaults to Shamir (5 keys, 3 to unseal).
+# ─────────────────────────────────────────────────────────────────────────────
+
+ui = true
+disable_mlock = false
+cluster_name = "sku-forecasting"
+log_level = "info"
+
+storage "raft" {
+    path    = "/vault/data"
+    node_id = "sku-vault-1"
+}
+
+listener "tcp" {
+    address       = "0.0.0.0:8200"
+    tls_disable   = true
+    # If you later add TLS here, use an internal CA — do NOT reuse the
+    # public Let's Encrypt cert (clients would bypass PKI altogether).
+}
+
+api_addr     = "${VAULT_API_ADDR}"
+cluster_addr = "${VAULT_CLUSTER_ADDR}"
+
+# ── Seal configuration (rendered from VAULT_SEAL_SNIPPET env) ───────────
+${VAULT_SEAL_SNIPPET}
+
+# ── Telemetry — Prometheus can scrape /v1/sys/metrics on same port ──────
+telemetry {
+    prometheus_retention_time = "30s"
+    disable_hostname          = true
+}
