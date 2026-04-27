@@ -48,15 +48,23 @@ services:
         condition: service_healthy
     group_add:
       - "988"
-    # NB: the sandbox_staging named volume comes up as root:root 0755 by
-    # default — unwritable by the container's `sku` (uid 999) user, so
-    # tempfile.mkdtemp() inside the worker fails with PermissionError.
-    # Run this once per VPS after the volume is first created (it
-    # persists across container recreates):
-    #     docker run --rm -v docker_sandbox_staging:/s alpine \
-    #         chmod 1777 /s
-    # We tried a tmpfs override here, but `!override` doesn't replace
-    # the volumes list in compose v2 — the chmod is the durable fix.
+    environment:
+      # When process-worker spawns the sandbox container via the host
+      # docker socket, the bind-mount path it asks for is resolved on
+      # the HOST — not in process-worker's mount namespace. So a named
+      # volume at /var/lib/sku-sandbox is invisible to the spawned
+      # sandbox: docker daemon looks for that path on the host and finds
+      # nothing → "input file not found".
+      #
+      # Fix: use a real host directory and bind-mount it at the SAME
+      # path inside process-worker. Then the path is identical from
+      # both sides, host docker daemon resolves it correctly, and the
+      # sandbox container can mount it.
+      SANDBOX_WORK_DIR: /srv/backend/sandbox-staging
+    volumes:
+      - /srv/backend/sandbox-staging:/srv/backend/sandbox-staging
+    # One-time setup on each VPS:
+    #     mkdir -p /srv/backend/sandbox-staging && chmod 1777 …
 
   alertmanager:
     ports: !override
