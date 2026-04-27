@@ -129,8 +129,13 @@ class DockerSandbox:
         max_rows    = int(os.environ.get("SANDBOX_MAX_ROWS",    "5000000"))
         max_columns = int(os.environ.get("SANDBOX_MAX_COLUMNS", "64"))
 
+        # The sandbox image's ENTRYPOINT is already
+        #     ["python", "/opt/secure_parser.py"]
+        # (see docker/Dockerfile.sandbox), so docker containers.run
+        # appends `command` to that. Don't repeat the python script
+        # here — secure_parser.py would see "python /opt/secure_parser.py"
+        # as positional args and abort with "unrecognized arguments".
         command = [
-            "python", "/opt/secure_parser.py",
             "--input",    f"/sandbox/in/{safe_name}",
             "--output",   "/sandbox/out/data.parquet",
             "--manifest", "/sandbox/out/manifest.json",
