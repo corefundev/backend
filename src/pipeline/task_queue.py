@@ -165,9 +165,17 @@ def get_job_status(job_id: str) -> dict:
         from rq.job import Job
         conn = get_redis_connection()
         job  = Job.fetch(job_id, connection=conn)
+        # RQ 1.16+ returns get_status() as a plain str. The previous
+        # `.value` call worked on older RQ that exposed an Enum; on the
+        # current version it raises AttributeError("'str' object has no
+        # attribute 'value'") and the UI showed every job as "Неизвестно
+        # + Ошибка: 'str' object has no attribute 'value'" regardless of
+        # whether the job actually succeeded. Be permissive here.
+        raw_status = job.get_status()
+        status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
         return {
             "job_id":   job_id,
-            "status":   job.get_status().value,
+            "status":   status_str,
             "result":   job.result if job.is_finished else None,
             "error":    str(job.exc_info) if job.is_failed else None,
             "enqueued": str(job.enqueued_at),

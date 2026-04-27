@@ -1401,6 +1401,21 @@ async def trigger_training(
         except Exception as e:
             logger.warning("upload manifest check failed: %s", e)
 
+    # ── Resolve effective data_path ─────────────────────────────────
+    # If the caller passed an upload_id, ALWAYS resolve the s3:// URI
+    # server-side from the upload registry — the frontend doesn't (and
+    # shouldn't) know our bucket names. req.data_path is only consulted
+    # as a literal fallback when no upload_id is provided (e.g. legacy
+    # ops scripts pointing at a manually-prepared parquet).
+    effective_data_path = req.data_path
+    if req.upload_id:
+        from src.storage.upload_pipeline import get_processed_path
+        from src.storage import upload_registry as ur
+        urec = ur.get_upload_registry().get(req.upload_id)
+        if urec is None:
+            raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
+        effective_data_path = get_processed_path(urec)
+
     # ── Bump quota counters BEFORE enqueueing to avoid TOCTOU windows
     #    where a second request slips in between check and increment.
     record = record_training_started(registry, record)
@@ -1408,7 +1423,7 @@ async def trigger_training(
 
     job_id = enqueue_training(
         client_id=client_id,
-        data_path=req.data_path,
+        data_path=effective_data_path,
         config_path=CONFIG_PATH,
     )
     if job_id:
