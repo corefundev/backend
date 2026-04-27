@@ -10,7 +10,9 @@
 !.env.example
 *.zip
 artifacts/
-data/
+# /data only at the repo root — NOT src/data (that's a real Python
+# package the trainer needs). Leading slash anchors to root.
+/data/
 mlflow/
 registry.json
 *.log
