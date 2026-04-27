@@ -451,13 +451,22 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     volumes:
-      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Template — contains literal ${ALERT_WEBHOOK_URL} placeholder.
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tpl:ro
       - alertmanager_data:/alertmanager
     environment:
-      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+    # Wrap entrypoint: render the template via sed (busybox has no envsubst),
+    # write to a tmpfs path, then exec the real alertmanager binary.
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - "--config.file=/etc/alertmanager/alertmanager.yml"
-      - "--storage.path=/alertmanager"
+      - |
+        set -eu
+        sed "s|\$${ALERT_WEBHOOK_URL}|$$ALERT_WEBHOOK_URL|g" \
+            /etc/alertmanager/alertmanager.yml.tpl > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+            --config.file=/tmp/alertmanager.yml \
+            --storage.path=/alertmanager
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]

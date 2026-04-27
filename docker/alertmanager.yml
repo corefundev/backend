@@ -1,18 +1,21 @@
-# Alertmanager config.
+# Alertmanager config — single Slack webhook.
 #
-# Two routes:
-#   • critical → dedicated #ops-pager Slack channel with 5-minute repeat
-#   • warning  → #ops-warn channel, 2-hour repeat
+# A modern Slack incoming webhook is bound to a single channel at creation
+# time, so the `channel:` field in receiver configs is ignored. Severity-
+# based channel routing requires a separate webhook per channel; if/when
+# that's needed, add more webhooks and split routes accordingly.
 #
-# Both receivers point at the single ALERT_WEBHOOK_URL env var, but the
-# Alertmanager container substitutes $ALERT_WEBHOOK_URL on startup via
-# envsubst (see docker-compose for the wrapper).
+# The ${ALERT_WEBHOOK_URL} placeholder is rendered at startup by the
+# alertmanager service's wrapper entrypoint (sed-based envsubst — see
+# docker-compose.yml). The unrendered template lives at
+#   /etc/alertmanager/alertmanager.yml.tpl
+# and the rendered output goes to /tmp/alertmanager.yml.
 
 global:
   resolve_timeout: 5m
 
 route:
-  receiver: default
+  receiver: slack
   group_by:        ["alertname", "cluster"]
   group_wait:      30s        # quiet window before first notify
   group_interval:  2m         # gap between notifications in a group
@@ -21,41 +24,21 @@ route:
   routes:
     - matchers:
         - severity = "critical"
-      receiver: slack-critical
+      receiver: slack
       group_wait: 10s
       repeat_interval: 5m
 
-    - matchers:
-        - severity = "warning"
-      receiver: slack-warning
-
 receivers:
-  - name: default
+  - name: slack
     slack_configs:
       - api_url: "${ALERT_WEBHOOK_URL}"
-        channel: "#ops"
         send_resolved: true
-
-  - name: slack-critical
-    slack_configs:
-      - api_url: "${ALERT_WEBHOOK_URL}"
-        channel: "#ops-pager"
-        send_resolved: true
-        title:    "🚨 {{ .CommonLabels.alertname }}"
-        text:     |
+        title: |-
+          {{ if eq .CommonLabels.severity "critical" }}🚨{{ else }}⚠️{{ end }} {{ .CommonLabels.alertname }}
+        text: |
           *Severity:* `{{ .CommonLabels.severity }}`
-          {{ range .Alerts }}• {{ .Annotations.summary }}
+          {{ range .Alerts }}• *{{ .Annotations.summary }}*
           {{ .Annotations.description }}
-          {{ end }}
-
-  - name: slack-warning
-    slack_configs:
-      - api_url: "${ALERT_WEBHOOK_URL}"
-        channel: "#ops-warn"
-        send_resolved: true
-        title:    "⚠ {{ .CommonLabels.alertname }}"
-        text:     |
-          {{ range .Alerts }}• {{ .Annotations.summary }}
           {{ end }}
 
 inhibit_rules:
