@@ -115,8 +115,12 @@ echo "       new key id = $NEW_KEY_ID"
 # gets interrupted, the live file is untouched.
 echo "[2/5] scp → ${VPS_PATH}.new"
 scp -q "$NEW_KEY_FILE" "${VPS_USER}@${VPS_HOST}:${VPS_PATH}.new"
+# chmod 644 (not 600): the file is owned by host uid 1000 (deploy) but
+# read by container uid 999 (sku). 600 makes it unreadable from inside
+# the container → silent Lockbox bootstrap failure. The directory at
+# /srv/backend/secrets/ stays 700 so non-deploy host users can't see in.
 ssh -q "${VPS_USER}@${VPS_HOST}" \
-    "chmod 600 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
+    "chmod 644 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
 
 # ── Step 3: restart containers — they'll pick up new key at startup ─────
 # Order matters: api first (shortest downtime users feel), then workers.
