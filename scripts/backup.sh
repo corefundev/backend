@@ -5,7 +5,7 @@
 # Nightly backup pipeline:
 #   1. pg_dump the client registry + upload tables (custom format, compressed)
 #   2. Encrypt with AES-256 via openssl (key from BACKUP_PASSPHRASE)
-#   3. Upload to S3 backup zone: backups/YYYY/MM/DD/<name>.dump.enc
+#   3. Upload to S3 backup zone: backups/YYYY-MM-DD/<name>.dump.enc
 #   4. Keep 30 days of backups; older are expunged via S3 lifecycle rule.
 #
 # Designed to run inside a `busybox` container with postgresql-client + mc
@@ -55,7 +55,7 @@ BACKUP_DIR="/tmp/backup"
 
 mkdir -p "$BACKUP_DIR"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-DATE_PATH="$(date -u +%Y/%m/%d)"
+DATE_PATH="$(date -u +%Y-%m-%d)"
 OUT="$BACKUP_DIR/sku_forecasting_$TS.dump"
 
 echo "[$(date -u +%FT%TZ)] dumping database →  $OUT"
