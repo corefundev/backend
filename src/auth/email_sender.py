@@ -166,9 +166,19 @@ class SmtpEmailSender:
         msg["Subject"] = subject
         msg.set_content(body)
 
+        # Port 465 is SMTP-over-SSL (TLS handshake at connection time);
+        # port 587 is STARTTLS (upgrade after plaintext greeting). Beget
+        # in particular only listens on 25 and 465, not 587 — so port-
+        # based detection is the most portable signal.
+        ssl_at_connect = (self.port == 465)
+
         try:
-            with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
-                if self.use_tls:
+            if ssl_at_connect:
+                smtp_cls = smtplib.SMTP_SSL
+            else:
+                smtp_cls = smtplib.SMTP
+            with smtp_cls(self.host, self.port, timeout=10) as smtp:
+                if not ssl_at_connect and self.use_tls:
                     smtp.starttls()
                 if self.user and self.password:
                     smtp.login(self.user, self.password)
