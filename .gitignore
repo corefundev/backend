@@ -62,7 +62,9 @@ mlflow/
 catboost_info/
 
 # Данные — хранить в S3/DVC
-data/
+# Top-level data/ only. NOT src/data (it's a real Python package the
+# trainer imports). Anchor with leading slash, same as .dockerignore.
+/data/
 *.csv
 *.parquet
 
