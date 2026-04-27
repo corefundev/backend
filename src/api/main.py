@@ -1733,7 +1733,27 @@ async def get_client_usage(
         "training_runs_remaining": status.training_runs_remaining,
         "cooldown_until":          status.cooldown_until.isoformat() if status.cooldown_until else None,
         "trained_sku_count":       record.trained_sku_count,
+        "current_sku_count":       _latest_upload_sku_count(client_id),
     }
+
+
+def _latest_upload_sku_count(client_id: str) -> int | None:
+    """
+    Distinct SKU count from this client's most recent processed upload.
+    None if they've never uploaded a parsed file. Used by the header
+    QuotaMeter so it reflects "what's in the catalog right now", not
+    only "what was used in the last training run".
+    """
+    try:
+        from src.storage import upload_registry as ur
+        registry = ur.get_upload_registry()
+        rows = registry.list_for_client(client_id, limit=20)
+        for r in rows:
+            if r.status == ur.PROCESSED and r.sku_count is not None:
+                return int(r.sku_count)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("usage: latest-upload lookup failed for %s: %s", client_id, e)
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────
