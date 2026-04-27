@@ -48,6 +48,15 @@ services:
         condition: service_healthy
     group_add:
       - "988"
+    # NB: the sandbox_staging named volume comes up as root:root 0755 by
+    # default — unwritable by the container's `sku` (uid 999) user, so
+    # tempfile.mkdtemp() inside the worker fails with PermissionError.
+    # Run this once per VPS after the volume is first created (it
+    # persists across container recreates):
+    #     docker run --rm -v docker_sandbox_staging:/s alpine \
+    #         chmod 1777 /s
+    # We tried a tmpfs override here, but `!override` doesn't replace
+    # the volumes list in compose v2 — the chmod is the durable fix.
 
   alertmanager:
     ports: !override
