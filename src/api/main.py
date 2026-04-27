@@ -1734,3 +1734,54 @@ async def get_client_usage(
         "cooldown_until":          status.cooldown_until.isoformat() if status.cooldown_until else None,
         "trained_sku_count":       record.trained_sku_count,
     }
+
+
+# ──────────────────────────────────────────────────────────────────
+# Plan upgrade — TEMPORARY self-service path
+#
+# Production wants this gated by a payment gateway (acquiring) so the
+# user pays before the plan changes. Until that's wired, we let the
+# authenticated user upgrade themselves immediately. This is in-band
+# only — anyone can flip their own row, not anyone else's. Downgrade
+# to Free is also allowed (a user's right to leave).
+#
+# When acquiring lands: replace the body with a "create payment intent"
+# step, and only flip the plan in the payment-confirmed webhook.
+# ──────────────────────────────────────────────────────────────────
+
+class PlanUpgradeRequest(BaseModel):
+    plan: str = Field(..., description="One of: free | start | business")
+
+
+@app.post("/clients/{client_id}/upgrade", tags=["plans"])
+async def upgrade_client_plan(
+    client_id: str,
+    req: PlanUpgradeRequest,
+    auth: AuthContext = Depends(get_current_client),
+):
+    require_client_access(client_id, auth)
+
+    # Validate target plan against the enum (keeps unknown strings out
+    # of the database — even with a generic update() helper).
+    try:
+        target = Plan(req.plan)
+    except ValueError:
+        raise HTTPException(422, detail=f"Unknown plan: {req.plan!r}")
+
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    if record.plan == target.value:
+        # Idempotent — nothing to do.
+        spec = get_plan_spec(target)
+        return {"plan": target.value, "display_name": spec.display_name, "changed": False}
+
+    registry.update(client_id, plan=target.value)
+    spec = get_plan_spec(target)
+    logger.info(
+        "plan upgrade: client=%s %s → %s (auth_role=%s)",
+        client_id, record.plan, target.value, ",".join(auth.roles or []),
+    )
+    return {"plan": target.value, "display_name": spec.display_name, "changed": True}
