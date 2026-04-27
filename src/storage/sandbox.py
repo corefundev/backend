@@ -117,6 +117,13 @@ class DockerSandbox:
         out_dir = staging / "out"
         in_dir.mkdir()
         out_dir.mkdir()
+        # The sandbox container runs as user 65534:65534 (nobody) for
+        # defence-in-depth, but the staging dirs are created by the
+        # worker uid (sku, 999). Mode 0o777 on out_dir lets the sandbox
+        # write parquet+manifest into it; in_dir stays 0o755 — readable
+        # by everyone but writable only by the worker (the input file
+        # itself is also explicitly chmod'd 0o444 above).
+        out_dir.chmod(0o777)
 
         # Normalise filename to a safe in-sandbox name — the parser still
         # checks the suffix for dispatching, so preserve it.
