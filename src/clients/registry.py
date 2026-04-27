@@ -295,8 +295,16 @@ class PostgresClientRegistry(ClientRegistry):
     def update(self, client_id: str, **fields) -> None:
         if not fields:
             return
-        set_clause = ", ".join(f"{k} = %s" for k in fields)
-        values = list(fields.values()) + [client_id]
+        # psycopg2 can't adapt dict/list directly into JSONB columns —
+        # it raises "can't adapt type 'dict'". Wrap structured values
+        # with extras.Json() so the JSONB columns (config, oauth_meta…)
+        # round-trip cleanly.
+        adapted = {
+            k: (self._extras.Json(v) if isinstance(v, (dict, list)) else v)
+            for k, v in fields.items()
+        }
+        set_clause = ", ".join(f"{k} = %s" for k in adapted)
+        values = list(adapted.values()) + [client_id]
         sql = f"UPDATE sku_clients SET {set_clause} WHERE client_id = %s"
         with self._conn() as conn:
             with conn.cursor() as cur:
