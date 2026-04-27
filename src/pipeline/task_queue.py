@@ -17,6 +17,18 @@ Usage:
 """
 from __future__ import annotations
 
+# RQ workers import this module to find _training_job; main.py never
+# runs in a worker process, so we bootstrap secrets here too. Same
+# rationale as src/pipeline/upload_workers.py — see the comment there.
+# Idempotent: bootstrap_secrets is safe to call multiple times.
+import logging as _early_logging
+_early_logger = _early_logging.getLogger("worker.bootstrap")
+try:
+    from src.auth.vault_agent import bootstrap_secrets as _bootstrap_secrets
+    _bootstrap_secrets()
+except Exception as _e:    # noqa: BLE001
+    _early_logger.warning("worker bootstrap_secrets failed: %s", _e)
+
 import logging
 import os
 from typing import Optional

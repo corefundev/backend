@@ -13,6 +13,26 @@ scan_job itself (to chain scan → process).
 """
 from __future__ import annotations
 
+# ── Worker-side secrets bootstrap ─────────────────────────────────────────
+#
+# RQ imports this module (it's where the job functions live) but never
+# imports src.api.main, so main.py's _early_bootstrap never runs in the
+# worker process. Without it, lockbox_agent doesn't fire and DATABASE_URL
+# / S3 keys / etc stay empty → the upload registry silently falls back to
+# the JSON file and scan_job raises KeyError because the upload row was
+# only written to Postgres by the api.
+#
+# Calling bootstrap_secrets() at module-import time fixes that for every
+# worker queue (sku-scan, sku-process, sku-training) — they all import
+# this file or task_queue indirectly.
+import logging as _early_logging
+_early_logger = _early_logging.getLogger("worker.bootstrap")
+try:
+    from src.auth.vault_agent import bootstrap_secrets as _bootstrap_secrets
+    _bootstrap_secrets()
+except Exception as _e:    # noqa: BLE001
+    _early_logger.warning("worker bootstrap_secrets failed: %s", _e)
+
 import logging
 import os
 from typing import Optional
