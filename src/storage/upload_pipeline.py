@@ -308,3 +308,46 @@ def get_processed_path(record: ur.UploadRecord) -> str:
         )
     backend = z.get_zone_backend(z.Zone.PROCESSED)
     return backend.path(record.processed_key)
+
+
+def cancel_upload(upload_id: str) -> bool:
+    """
+    User-initiated cancel: best-effort cleanup of S3 objects + remove
+    the registry row. Returns True if a row existed and was removed.
+
+    Side effects:
+      • DELETE on each zone's blob (untrusted / quarantine / processed)
+        — failures are swallowed; the row is gone either way.
+      • registry.delete() — durable, single source of truth.
+
+    What we DON'T do:
+      • Cancel RQ jobs by id. We don't store the job id on the row, and
+        in flight scan/process workers will discover the missing row at
+        their next registry.get() and raise KeyError — which is fine,
+        the job just dies. The user-visible state (the row) is gone.
+    """
+    registry = ur.get_upload_registry()
+    record = registry.get(upload_id)
+    if record is None:
+        return False
+
+    # Compute candidate keys for each zone. The same {client}/{upload}/{file}
+    # path is used by untrusted + quarantine; processed has its own filename.
+    untrusted_q_key = z.upload_key(record.client_id, record.upload_id, record.filename)
+    proc_key        = z.processed_key(record.client_id, record.upload_id)
+
+    for zone, key in [
+        (z.Zone.UNTRUSTED,  untrusted_q_key),
+        (z.Zone.QUARANTINE, untrusted_q_key),
+        (z.Zone.PROCESSED,  proc_key),
+    ]:
+        try:
+            backend = z.get_zone_backend(zone)
+            backend.delete(key)
+        except Exception as e:    # noqa: BLE001 — best effort, don't block the row deletion
+            logger.warning(
+                "cancel_upload: failed to delete %s/%s: %s",
+                zone.value, key, e,
+            )
+
+    return registry.delete(upload_id)

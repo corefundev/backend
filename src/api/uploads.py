@@ -169,3 +169,27 @@ async def get_upload_status(
     # Tenant isolation — callers can only see their own client's uploads.
     require_client_access(record.client_id, auth)
     return _to_status(record)
+
+
+# ── DELETE /uploads/{upload_id} ───────────────────────────────────────────────
+# User-initiated cancel. Idempotent: returns 204 whether or not anything
+# was actually removed. Tenant-isolated: a caller can only cancel their
+# own uploads.
+
+@router.delete(
+    "/uploads/{upload_id}",
+    status_code=204,
+)
+async def cancel_upload(
+    upload_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    registry = ur.get_upload_registry()
+    record = registry.get(upload_id)
+    if record is None:
+        # 204 — already gone, nothing to do.
+        return
+    require_client_access(record.client_id, auth)
+    from src.storage.upload_pipeline import cancel_upload as _cancel
+    _cancel(upload_id)
+    return

@@ -135,6 +135,7 @@ class UploadRegistry:
     def list_for_client(
         self, client_id: str, limit: int = 50
     ) -> list[UploadRecord]: ...
+    def delete(self, upload_id: str) -> bool: ...   # True if a row was removed
 
 
 # ── Postgres implementation ───────────────────────────────────────────────────
@@ -261,6 +262,17 @@ class PostgresUploadRegistry(UploadRegistry):
                 rows = cur.fetchall()
         return [self._row_to_record(dict(r)) for r in rows]
 
+    def delete(self, upload_id: str) -> bool:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM sku_uploads WHERE upload_id = %s",
+                    (upload_id,),
+                )
+                deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
+
     @staticmethod
     def _row_to_record(row: dict) -> UploadRecord:
         return UploadRecord(
@@ -334,6 +346,14 @@ class LocalFileUploadRegistry(UploadRegistry):
         records = [UploadRecord(**v) for v in data.values() if v["client_id"] == client_id]
         records.sort(key=lambda r: r.created_at, reverse=True)
         return records[:limit]
+
+    def delete(self, upload_id: str) -> bool:
+        data = self._load()
+        if upload_id not in data:
+            return False
+        del data[upload_id]
+        self._save(data)
+        return True
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────
