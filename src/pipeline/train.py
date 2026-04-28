@@ -34,6 +34,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _progress(step: int, total: int, label: str) -> None:
+    """
+    Publish progress to the current RQ job's meta dict so the API can
+    surface it via /jobs/{id}. Safe to call when run outside a worker
+    (e.g., synchronous fallback path) — get_current_job() returns None.
+    """
+    logger.info(f"Step {step}/{total}: {label}")
+    try:
+        from rq import get_current_job
+        job = get_current_job()
+        if job is None:
+            return
+        job.meta["progress"] = {"step": step, "total": total, "label": label}
+        job.save_meta()
+    except Exception as e:    # noqa: BLE001
+        logger.debug(f"_progress save_meta skipped: {e}")
+
+
 def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
@@ -62,17 +80,17 @@ def run_training_pipeline(
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
 
     # ── 1. Load ───────────────────────────────────────────────
-    logger.info("Step 1/9: Loading data...")
+    _progress(1, 9, "Загрузка данных")
     df = load_data(data_path, config)
 
     # ── 2. GE Validation ──────────────────────────────────────
-    logger.info("Step 2/9: GE validation...")
+    _progress(2, 9, "Проверка качества (Great Expectations)")
     ge_result = validate_with_great_expectations(df, config, raise_on_failure=True)
     df = validate_data(df, config)
     storage.save_raw_data(df)
 
     # ── 3. Anomaly detection ──────────────────────────────────
-    logger.info("Step 3/9: Anomaly detection...")
+    _progress(3, 9, "Поиск аномалий")
     sample_weights = None
     anom_cfg = config.get("anomaly_detection", {})
     if anom_cfg.get("enabled", True):
@@ -88,7 +106,7 @@ def run_training_pipeline(
         )
 
     # ── 4. Feature engineering ────────────────────────────────
-    logger.info("Step 4/9: Building features (calendar, lags, rolling, price, promo, OOS, weather, holidays)...")
+    _progress(4, 9, "Построение признаков (календарь, лаги, погода, праздники)")
     df = build_features(df, config)
     feature_cols = get_feature_columns(df, config)
     storage.save_features(df)
@@ -106,17 +124,17 @@ def run_training_pipeline(
     # ── 5. HPO (optional) ─────────────────────────────────────
     hpo_cfg = config.get("hpo", {})
     if hpo_cfg.get("enabled", False):
-        logger.info("Step 5/9: Running HPO with Optuna...")
+        _progress(5, 9, "Подбор гиперпараметров (Optuna)")
         from src.models.hpo import run_hpo
         best_params = run_hpo(df, feature_cols, config, hpo_cfg.get("n_trials", 30))
         if best_params:
             config["model"].update(best_params)
             logger.info(f"  HPO best params: {best_params}")
     else:
-        logger.info("Step 5/9: HPO skipped (set hpo.enabled=true to activate)")
+        _progress(5, 9, "HPO пропущен")
 
     # ── 6. Walk-forward validation ────────────────────────────
-    logger.info("Step 6/9: Walk-forward validation...")
+    _progress(6, 9, "Walk-forward валидация")
     val_model = SKUForecaster(config)
     wf_result = walk_forward_validate(df, val_model, feature_cols, config)
     agg = wf_result.aggregated
@@ -124,7 +142,7 @@ def run_training_pipeline(
     storage.save_per_sku_metrics(wf_result.per_sku_metrics)
 
     # ── 7. Train final model ──────────────────────────────────
-    logger.info("Step 7/9: Training final model...")
+    _progress(7, 9, "Обучение финальной модели")
     model_type = config["model"].get("type", "lgbm")
 
     if model_type == "mimo":
@@ -161,8 +179,11 @@ def run_training_pipeline(
     model_path = storage.save_model(final_model)
     logger.info(f"  Saved → {model_path}")
 
+    # ── 8. Cold-start + SHAP done above; mark step 8 ──────────
+    _progress(8, 9, "Cold-start модель + SHAP объяснения")
+
     # ── MLflow logging ────────────────────────────────────────
-    logger.info("Step 8/9: MLflow logging...")
+    _progress(9, 9, "Запись эксперимента в MLflow")
     run_id = None
     try:
         import tempfile

@@ -69,20 +69,70 @@ def _training_job(
     data_path: str,
     config_path: str = "configs/config.yaml",
     storage_backend: str = "local",
+    run_id: Optional[str] = None,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.
-    Returns result dict with metrics and model path.
+
+    If `run_id` is supplied, lifecycle transitions are written to the
+    training_runs registry so the API can serve a "training history"
+    independent of RQ's 24h result_ttl.
     """
     import os
+    from datetime import datetime, timezone
     os.environ.setdefault("STORAGE_BACKEND", storage_backend)
 
+    def _now():
+        return datetime.now(timezone.utc).isoformat()
+
+    runs = None
+    if run_id:
+        try:
+            from src.storage.training_runs import get_training_runs_registry, RUNNING
+            runs = get_training_runs_registry()
+            runs.update(run_id, status=RUNNING, started_at=_now())
+        except Exception as e:    # noqa: BLE001
+            logger.warning("training_runs RUNNING update failed: %s", e)
+
     from src.pipeline.train import run_training_pipeline
-    return run_training_pipeline(
-        data_path=data_path,
-        config_path=config_path,
-        client_id=client_id,
-    )
+    try:
+        result = run_training_pipeline(
+            data_path=data_path,
+            config_path=config_path,
+            client_id=client_id,
+        )
+    except Exception as e:
+        if runs is not None:
+            try:
+                from src.storage.training_runs import FAILED
+                runs.update(run_id, status=FAILED, ended_at=_now(), error=str(e))
+            except Exception as upd_err:    # noqa: BLE001
+                logger.warning("training_runs FAILED update failed: %s", upd_err)
+        raise
+
+    # Persist final metrics so the History tab can show them after
+    # RQ has expired the job result.
+    if runs is not None:
+        try:
+            from src.storage.training_runs import FINISHED
+            metrics = result.get("metrics") or {}
+            runs.update(
+                run_id,
+                status=FINISHED,
+                ended_at=_now(),
+                elapsed_sec=result.get("elapsed_sec"),
+                n_skus=result.get("n_skus"),
+                n_features=result.get("n_features"),
+                n_rows=result.get("n_rows"),
+                wmape=metrics.get("wmape_mean"),
+                mase=metrics.get("mase_mean"),
+                smape=metrics.get("smape_mean"),
+                model_path=result.get("model_path"),
+                mlflow_run_id=result.get("mlflow_run_id"),
+            )
+        except Exception as e:    # noqa: BLE001
+            logger.warning("training_runs FINISHED update failed: %s", e)
+    return result
 
 
 def _batch_inference_job(
@@ -127,10 +177,14 @@ def enqueue_training(
     config_path: str = "configs/config.yaml",
     storage_backend: str | None = None,
     timeout: int = 7200,          # 2 hours max
+    run_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Enqueue a training job. Returns rq job_id.
     Falls back to synchronous execution if Redis is unavailable.
+
+    `run_id` is the training_runs registry row created upstream. The
+    worker uses it to update lifecycle status — see `_training_job`.
     """
     backend = storage_backend or os.environ.get("STORAGE_BACKEND", "local")
     try:
@@ -142,6 +196,7 @@ def enqueue_training(
                 data_path=data_path,
                 config_path=config_path,
                 storage_backend=backend,
+                run_id=run_id,
             ),
             job_timeout=timeout,
             result_ttl=86400,       # keep result 24h
@@ -152,7 +207,49 @@ def enqueue_training(
     except Exception as e:
         logger.warning(f"Redis unavailable ({e}); running training synchronously")
         from src.pipeline.train import run_training_pipeline
-        run_training_pipeline(data_path, config_path, client_id)
+        # Synchronous path: still want the row marked finished/failed.
+        try:
+            from src.storage.training_runs import (
+                get_training_runs_registry, RUNNING, FINISHED, FAILED,
+            )
+            from datetime import datetime, timezone
+            now = lambda: datetime.now(timezone.utc).isoformat()
+            runs = get_training_runs_registry() if run_id else None
+        except Exception:
+            runs = None
+        if runs is not None:
+            try:
+                runs.update(run_id, status=RUNNING, started_at=now())
+            except Exception:
+                pass
+        try:
+            result = run_training_pipeline(data_path, config_path, client_id)
+        except Exception as exc:
+            if runs is not None:
+                try:
+                    runs.update(run_id, status=FAILED, ended_at=now(), error=str(exc))
+                except Exception:
+                    pass
+            raise
+        if runs is not None:
+            try:
+                metrics = result.get("metrics") or {}
+                runs.update(
+                    run_id,
+                    status=FINISHED,
+                    ended_at=now(),
+                    elapsed_sec=result.get("elapsed_sec"),
+                    n_skus=result.get("n_skus"),
+                    n_features=result.get("n_features"),
+                    n_rows=result.get("n_rows"),
+                    wmape=metrics.get("wmape_mean"),
+                    mase=metrics.get("mase_mean"),
+                    smape=metrics.get("smape_mean"),
+                    model_path=result.get("model_path"),
+                    mlflow_run_id=result.get("mlflow_run_id"),
+                )
+            except Exception:
+                pass
         return None
 
 
@@ -173,6 +270,11 @@ def get_job_status(job_id: str) -> dict:
         # whether the job actually succeeded. Be permissive here.
         raw_status = job.get_status()
         status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+        # job.meta is written by src.pipeline.train._progress(...) before
+        # each pipeline stage; surface it so the frontend can render a
+        # progress bar.
+        meta = getattr(job, "meta", None) or {}
+        progress = meta.get("progress") if isinstance(meta, dict) else None
         return {
             "job_id":   job_id,
             "status":   status_str,
@@ -181,6 +283,7 @@ def get_job_status(job_id: str) -> dict:
             "enqueued": str(job.enqueued_at),
             "started":  str(job.started_at),
             "ended":    str(job.ended_at),
+            "progress": progress,
         }
     except Exception as e:
         return {"job_id": job_id, "status": "unknown", "error": str(e)}

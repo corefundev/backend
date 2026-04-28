@@ -153,6 +153,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.debug(f"Tracing not configured: {e}")
 
+    # ── Eagerly create training_runs table ────────────────────
+    # The registry is otherwise lazily initialised on first use;
+    # doing it here means the DDL is run once at boot under the
+    # api process (which has DATABASE_URL set by vault bootstrap),
+    # rather than on the first request that happens to hit it.
+    try:
+        from src.storage.training_runs import get_training_runs_registry
+        get_training_runs_registry()
+    except Exception as e:
+        logger.warning("training_runs registry not initialised: %s", e)
+
     logger.info("API starting — storage: %s", os.getenv("STORAGE_BACKEND", "local"))
     yield
     logger.info("API shutting down")
@@ -1421,11 +1432,40 @@ async def trigger_training(
     record = record_training_started(registry, record)
     registry.update(client_id, status="training")
 
+    # ── Pre-create training_runs row so the worker has something to
+    #    update. Failure to write here must not block the actual run —
+    #    history is best-effort, training itself is the priority.
+    run_id: Optional[str] = None
+    try:
+        from src.storage.training_runs import (
+            get_training_runs_registry, TrainingRunRecord, new_run_id,
+        )
+        run_id = new_run_id()
+        get_training_runs_registry().create(TrainingRunRecord(
+            run_id=run_id,
+            client_id=client_id,
+            plan=record.plan,
+            data_path=effective_data_path,
+            upload_id=req.upload_id,
+        ))
+    except Exception as e:    # noqa: BLE001
+        logger.warning("could not create training_runs row: %s", e)
+        run_id = None
+
     job_id = enqueue_training(
         client_id=client_id,
         data_path=effective_data_path,
         config_path=CONFIG_PATH,
+        run_id=run_id,
     )
+    # Stamp job_id onto the row so we can correlate later.
+    if run_id and job_id:
+        try:
+            from src.storage.training_runs import get_training_runs_registry
+            get_training_runs_registry().update(run_id, job_id=job_id)
+        except Exception:    # noqa: BLE001
+            pass
+
     if job_id:
         return TrainResponse(
             client_id=client_id, job_id=job_id, status="queued",
@@ -1441,6 +1481,28 @@ async def trigger_training(
 @app.get("/jobs/{job_id}", tags=["training"])
 async def poll_job(job_id: str, auth: AuthContext = Depends(get_current_client)):
     return get_job_status(job_id)
+
+
+@app.get("/clients/{client_id}/training-runs", tags=["training"])
+async def list_training_runs(
+    client_id: str,
+    limit: int = 50,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Persistent training history. Survives RQ's 24h job result_ttl —
+    pulled from sku_training_runs table.
+    """
+    require_client_access(client_id, auth)
+    if limit < 1 or limit > 200:
+        raise HTTPException(422, detail="limit must be between 1 and 200")
+    try:
+        from src.storage.training_runs import get_training_runs_registry, to_dict
+        runs = get_training_runs_registry().list_for_client(client_id, limit=limit)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("training_runs listing failed: %s", e)
+        return {"runs": [], "count": 0}
+    return {"runs": [to_dict(r) for r in runs], "count": len(runs)}
 
 # ══════════════════════════════════════════════════════════════════
 # Inference
