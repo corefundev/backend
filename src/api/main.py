@@ -51,7 +51,7 @@ import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.auth.jwt_auth import (
     AuthContext, create_access_token, get_current_client, require_client_access,
@@ -245,7 +245,11 @@ class TrainResponse(BaseModel):
 
 class PredictRequest(BaseModel):
     sku: str
-    history: list[dict] = Field(..., min_length=30)
+    # Either inline history (legacy CLI / external API users) OR
+    # an upload_id (UI flow — backend reads history from the processed
+    # parquet for the given upload). Validated post-init below.
+    history: list[dict] = Field(default_factory=list)
+    upload_id: Optional[str] = None
     # The autoregressive predict loop supports arbitrary horizons; plan clip
     # keeps each tier to its own ceiling (Free 7, Start 90, Business 365).
     horizon: Optional[int] = Field(None, ge=1, le=365)
@@ -256,6 +260,10 @@ class PredictRequest(BaseModel):
     @field_validator("history")
     @classmethod
     def _validate_history(cls, v: list[dict]) -> list[dict]:
+        # Empty list is accepted here — exclusivity check with upload_id
+        # happens in the model_validator below.
+        if not v:
+            return v
         if not isinstance(v, list):
             raise ValueError("history must be a list of records")
         for i, row in enumerate(v):
@@ -277,6 +285,18 @@ class PredictRequest(BaseModel):
             if sales < 0:
                 raise ValueError(f"history[{i}].sales is negative ({sales})")
         return v
+
+    @model_validator(mode="after")
+    def _need_history_or_upload(self):
+        if not self.history and not self.upload_id:
+            raise ValueError(
+                "either 'history' (>=30 rows) or 'upload_id' is required"
+            )
+        if self.history and len(self.history) < 30:
+            raise ValueError(
+                f"history must contain at least 30 rows (got {len(self.history)})"
+            )
+        return self
 
     @field_validator("sku")
     @classmethod
@@ -1508,6 +1528,110 @@ async def list_training_runs(
 # Inference
 # ══════════════════════════════════════════════════════════════════
 
+def _load_processed_for_sku(
+    client_id: str, upload_id: str, sku: str,
+) -> list[dict]:
+    """
+    Read the processed parquet for an upload, filter rows where the
+    SKU column equals `sku`, and return them as a list of dicts shaped
+    like the legacy `history` payload (date + sales + optional
+    price/promo/stock).
+
+    Raises HTTPException with the right status code so the predict
+    handler can re-raise unmodified.
+    """
+    from src.storage import upload_registry as ur
+    from src.storage.upload_pipeline import get_processed_path
+    from src.data.loader import load_data
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+    if urec.client_id != client_id:
+        raise HTTPException(403, detail="upload belongs to a different client")
+    if urec.status != ur.PROCESSED:
+        raise HTTPException(
+            409, detail=f"upload is not processed (status={urec.status})"
+        )
+
+    path = get_processed_path(urec)
+    config = _get_cfg(CONFIG_PATH)
+    df = load_data(path, config)
+
+    sku_col  = config["data"]["sku_col"]
+    date_col = config["data"]["date_col"]
+    target   = config["data"]["target_col"]
+    if sku_col not in df.columns:
+        raise HTTPException(500, detail=f"processed parquet missing column '{sku_col}'")
+
+    sub = df[df[sku_col] == sku]
+    if len(sub) == 0:
+        raise HTTPException(
+            404, detail=f"SKU {sku!r} not found in upload {upload_id!r}"
+        )
+    if len(sub) < 30:
+        raise HTTPException(
+            422,
+            detail=f"SKU {sku!r} has only {len(sub)} rows (min 30 required)",
+        )
+
+    sub = sub.sort_values(date_col)
+    rows: list[dict] = []
+    for _, r in sub.iterrows():
+        row = {
+            "date":  pd.Timestamp(r[date_col]).strftime("%Y-%m-%d"),
+            "sales": float(r[target]),
+        }
+        for col in ("price", "promo", "stock"):
+            if col in sub.columns and pd.notna(r[col]):
+                row[col] = float(r[col]) if col != "promo" else int(r[col])
+        rows.append(row)
+    return rows
+
+
+@app.get("/clients/{client_id}/uploads/{upload_id}/skus", tags=["inference"])
+async def list_upload_skus(
+    client_id: str,
+    upload_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Return the SKU catalogue of a processed upload — used by the
+    forecast UI to populate a dropdown without making the user paste
+    history by hand.
+    """
+    require_client_access(client_id, auth)
+    from src.storage import upload_registry as ur
+    from src.storage.upload_pipeline import get_processed_path
+    from src.data.loader import load_data
+
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+    if urec.client_id != client_id:
+        raise HTTPException(403, detail="upload belongs to a different client")
+    if urec.status != ur.PROCESSED:
+        raise HTTPException(
+            409, detail=f"upload is not processed (status={urec.status})"
+        )
+
+    config   = _get_cfg(CONFIG_PATH)
+    sku_col  = config["data"]["sku_col"]
+    date_col = config["data"]["date_col"]
+    df = load_data(get_processed_path(urec), config)
+
+    grouped = df.groupby(sku_col)
+    skus: list[dict] = []
+    for sku_value, group in grouped:
+        skus.append({
+            "sku":         str(sku_value),
+            "row_count":   int(len(group)),
+            "first_date":  pd.Timestamp(group[date_col].min()).strftime("%Y-%m-%d"),
+            "last_date":   pd.Timestamp(group[date_col].max()).strftime("%Y-%m-%d"),
+        })
+    skus.sort(key=lambda s: s["sku"])
+    return {"upload_id": upload_id, "count": len(skus), "skus": skus}
+
+
 @app.post("/clients/{client_id}/predict", response_model=PredictResponse, tags=["inference"])
 async def predict(
     client_id: str,
@@ -1528,7 +1652,13 @@ async def predict(
         horizon, clipped  = clip_horizon_to_plan(record, requested_horizon)
         service  = _get_service(client_id)
 
-        df = pd.DataFrame(req.history)
+        # Resolve history: either inline payload or pulled from the
+        # processed parquet for the given upload_id.
+        history = req.history
+        if not history and req.upload_id:
+            history = _load_processed_for_sku(client_id, req.upload_id, req.sku)
+
+        df = pd.DataFrame(history)
         df["sku"]  = req.sku
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").reset_index(drop=True)
