@@ -270,12 +270,9 @@ def _generate_and_store_forecasts(
     from src.clients.config_manager import get_config_manager
     from src.plans.plans import get_plan_spec
     from src.storage.forecasts import get_forecasts_registry
-    from src.pipeline.inference_utils import (
-        load_model_any_format, forecast_all_skus,
-    )
+    from src.pipeline.inference_utils import forecast_all_skus
     from src.data.loader import load_data, validate_data
     from src.features.engineering import build_features, get_feature_columns
-    import tempfile, os as _os
     from src.storage.backend import ClientStorage
 
     registry = get_registry()
@@ -299,34 +296,22 @@ def _generate_and_store_forecasts(
     df = build_features(df, config)
     feature_cols = get_feature_columns(df, config)
 
-    # Model needs to be available as a local file. If it's already
-    # local, load_model_any_format handles that; for s3:// paths we
-    # download into a temp file via the storage backend.
-    local_model: str
-    cleanup: str | None = None
-    if str(model_path).startswith("s3://"):
-        storage = ClientStorage(client_id)
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
-            local_model = tmp.name
-        cleanup = local_model
-        # processed_key comes after the bucket; re-derive the key from
-        # the storage backend rather than parsing the URL ourselves.
-        rel_key = f"{client_id}/models/model.pkl"
-        storage.backend.download(rel_key, local_model)
-    else:
-        local_model = str(model_path)
-
-    try:
-        model = load_model_any_format(local_model, config)
-        forecasts = forecast_all_skus(
-            model, df, feature_cols, config, horizon=horizon,
+    # Use the same load path the API does — ClientStorage.load_model
+    # handles s3 fetch + pickle deserialisation in one step. The
+    # earlier custom "download to /tmp + load_model_any_format" path
+    # silently produced an UnpicklingError when the local file was
+    # touched before the S3 download fully landed.
+    storage = ClientStorage(client_id)
+    if not storage.model_exists():
+        logger.info(
+            "skip post-training forecasts: model not found in storage for client=%s",
+            client_id,
         )
-    finally:
-        if cleanup:
-            try:
-                _os.unlink(cleanup)
-            except Exception:
-                pass
+        return
+    model = storage.load_model()
+    forecasts = forecast_all_skus(
+        model, df, feature_cols, config, horizon=horizon,
+    )
 
     if forecasts.empty:
         logger.warning("forecast_all_skus returned 0 rows for client=%s", client_id)
