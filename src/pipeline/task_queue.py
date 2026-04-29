@@ -132,7 +132,126 @@ def _training_job(
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)
+
+    # ── Auto-batch-forecast for the whole catalogue ──────────────
+    # The user shouldn't have to pick an SKU + horizon by hand after
+    # training: we already know both. Generate forecasts for every
+    # SKU over the plan's max_horizon_days and persist into
+    # sku_forecasts. Best-effort — failure here doesn't fail the
+    # training run, the model is still saved and trainable.
+    try:
+        _generate_and_store_forecasts(
+            client_id=client_id,
+            data_path=data_path,
+            model_path=result.get("model_path"),
+            config_path=config_path,
+            run_id=run_id or "",
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
     return result
+
+
+def _generate_and_store_forecasts(
+    client_id:   str,
+    data_path:   str,
+    model_path:  str | None,
+    config_path: str,
+    run_id:      str,
+) -> None:
+    """
+    Run forecast_all_skus for the just-trained model and persist into
+    sku_forecasts. Horizon is taken from the client's plan, not from
+    config.yaml, so Free/Start/Business each get their own ceiling.
+    """
+    if not model_path:
+        logger.info("skip post-training forecasts: no model_path in result")
+        return
+
+    from src.clients.registry import get_registry
+    from src.clients.config_manager import get_config_manager
+    from src.plans.plans import get_plan_spec
+    from src.storage.forecasts import get_forecasts_registry
+    from src.pipeline.inference_utils import (
+        load_model_any_format, forecast_all_skus,
+    )
+    from src.data.loader import load_data, validate_data
+    from src.features.engineering import build_features, get_feature_columns
+    import tempfile, os as _os
+    from src.storage.backend import ClientStorage
+
+    registry = get_registry()
+    record   = registry.get(client_id)
+    plan_max = get_plan_spec(record.plan if record else None).max_horizon_days
+
+    # Effective config = system config + per-client overrides. The
+    # user's chosen horizon (Settings → "Дней вперёд") lives there;
+    # we cap it by the plan ceiling so a Free user can't sneak past
+    # 7 days even if their config says 30.
+    config = get_config_manager(config_path).get_effective(client_id, registry)
+    user_horizon = int(config.get("model", {}).get("horizon", 0) or 0)
+
+    if plan_max and plan_max > 0:
+        horizon = min(user_horizon, plan_max) if user_horizon > 0 else plan_max
+    else:
+        horizon = user_horizon
+    horizon = max(1, horizon)
+    df = load_data(data_path, config)
+    df = validate_data(df, config)
+    df = build_features(df, config)
+    feature_cols = get_feature_columns(df, config)
+
+    # Model needs to be available as a local file. If it's already
+    # local, load_model_any_format handles that; for s3:// paths we
+    # download into a temp file via the storage backend.
+    local_model: str
+    cleanup: str | None = None
+    if str(model_path).startswith("s3://"):
+        storage = ClientStorage(client_id)
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            local_model = tmp.name
+        cleanup = local_model
+        # processed_key comes after the bucket; re-derive the key from
+        # the storage backend rather than parsing the URL ourselves.
+        rel_key = f"{client_id}/models/model.pkl"
+        storage.backend.download(rel_key, local_model)
+    else:
+        local_model = str(model_path)
+
+    try:
+        model = load_model_any_format(local_model, config)
+        forecasts = forecast_all_skus(
+            model, df, feature_cols, config, horizon=horizon,
+        )
+    finally:
+        if cleanup:
+            try:
+                _os.unlink(cleanup)
+            except Exception:
+                pass
+
+    if forecasts.empty:
+        logger.warning("forecast_all_skus returned 0 rows for client=%s", client_id)
+        return
+
+    # Normalise columns: forecast_all_skus returns sku/date/predicted_sales
+    rows: list[tuple[str, str, float]] = []
+    import pandas as _pd
+    for _, r in forecasts.iterrows():
+        d = r["date"]
+        if hasattr(d, "strftime"):
+            fdate = d.strftime("%Y-%m-%d")
+        else:
+            fdate = str(_pd.Timestamp(d).date())
+        rows.append((str(r["sku"]), fdate, float(r["predicted_sales"])))
+
+    get_forecasts_registry().replace_for_client(
+        client_id=client_id, run_id=run_id, rows=rows,
+    )
+    logger.info(
+        "post-training forecasts: client=%s sku=%d horizon=%d rows=%d",
+        client_id, forecasts["sku"].nunique(), horizon, len(rows),
+    )
 
 
 def _batch_inference_job(

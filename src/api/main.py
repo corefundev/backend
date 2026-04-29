@@ -153,8 +153,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.debug(f"Tracing not configured: {e}")
 
-    # ── Eagerly create training_runs table ────────────────────
-    # The registry is otherwise lazily initialised on first use;
+    # ── Eagerly create training_runs + forecasts tables ───────
+    # The registries are otherwise lazily initialised on first use;
     # doing it here means the DDL is run once at boot under the
     # api process (which has DATABASE_URL set by vault bootstrap),
     # rather than on the first request that happens to hit it.
@@ -163,6 +163,11 @@ async def lifespan(app: FastAPI):
         get_training_runs_registry()
     except Exception as e:
         logger.warning("training_runs registry not initialised: %s", e)
+    try:
+        from src.storage.forecasts import get_forecasts_registry
+        get_forecasts_registry()
+    except Exception as e:
+        logger.warning("forecasts registry not initialised: %s", e)
 
     logger.info("API starting — storage: %s", os.getenv("STORAGE_BACKEND", "local"))
     yield
@@ -1586,6 +1591,63 @@ def _load_processed_for_sku(
                 row[col] = float(r[col]) if col != "promo" else int(r[col])
         rows.append(row)
     return rows
+
+
+@app.get("/clients/{client_id}/forecasts", tags=["inference"])
+async def list_forecasts(
+    client_id: str,
+    sku: Optional[str] = None,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Return the auto-generated batch forecasts produced after the
+    latest training run. Each SKU's forecast is a flat list of
+    values aligned to the date range [first_date..last_date].
+
+    No input form needed — the worker filled this in already, the
+    UI just renders.
+    """
+    require_client_access(client_id, auth)
+    from src.storage.forecasts import get_forecasts_registry
+    rows = get_forecasts_registry().list_for_client(client_id, sku=sku)
+    if not rows:
+        return {
+            "client_id":     client_id,
+            "generated_at":  None,
+            "first_date":    None,
+            "last_date":     None,
+            "horizon_days":  0,
+            "count":         0,
+            "skus":          [],
+        }
+
+    # Group by SKU, preserve date order from the SQL ORDER BY clause.
+    from collections import defaultdict
+    by_sku: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for r in rows:
+        by_sku[r["sku"]].append((r["forecast_date"], r["value"]))
+
+    all_dates  = sorted({fd for points in by_sku.values() for (fd, _) in points})
+    first_date = all_dates[0]
+    last_date  = all_dates[-1]
+    generated  = rows[0]["generated_at"]
+
+    skus_payload = []
+    for sku_name in sorted(by_sku.keys()):
+        date_to_value = dict(by_sku[sku_name])
+        # Fill missing dates with None — clients can render gaps.
+        values = [date_to_value.get(d) for d in all_dates]
+        skus_payload.append({"sku": sku_name, "values": values})
+
+    return {
+        "client_id":     client_id,
+        "generated_at":  generated,
+        "first_date":    first_date,
+        "last_date":     last_date,
+        "horizon_days":  len(all_dates),
+        "count":         len(skus_payload),
+        "skus":          skus_payload,
+    }
 
 
 @app.get("/clients/{client_id}/uploads/{upload_id}/skus", tags=["inference"])

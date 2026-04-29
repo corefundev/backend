@@ -126,15 +126,21 @@ def forecast_all_skus(
     df:           pd.DataFrame,
     feature_cols: list[str],
     config:       dict,
+    horizon:      int | None = None,
 ) -> pd.DataFrame:
     """
     Run recursive_forecast for every SKU in df.
     Returns combined DataFrame with all forecasts.
+
+    `horizon` overrides config["model"]["horizon"] when provided —
+    used by the post-training batch step so the per-plan ceiling
+    (Free 7d / Start 30d / Business 90d) wins over whatever value
+    is in the system config.
     """
     sku_col    = config["data"]["sku_col"]
     date_col   = config["data"]["date_col"]
     target_col = config["data"]["target_col"]
-    horizon    = config["model"]["horizon"]
+    horizon    = horizon if horizon is not None else config["model"]["horizon"]
 
     all_rows = []
     for sku, group in df.groupby(sku_col, sort=False):
