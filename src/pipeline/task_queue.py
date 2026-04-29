@@ -70,6 +70,7 @@ def _training_job(
     config_path: str = "configs/config.yaml",
     storage_backend: str = "local",
     run_id: Optional[str] = None,
+    extend_from_path: Optional[str] = None,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.
@@ -77,6 +78,12 @@ def _training_job(
     If `run_id` is supplied, lifecycle transitions are written to the
     training_runs registry so the API can serve a "training history"
     independent of RQ's 24h result_ttl.
+
+    If `extend_from_path` is supplied, the worker concatenates the
+    parquet at that path with the new dataset at `data_path`,
+    deduplicates by (sku, date) preferring new values, and trains
+    the model from scratch on the combined set. This is the
+    "продолжить обучение свежими данными" flow.
     """
     import os
     from datetime import datetime, timezone
@@ -94,10 +101,38 @@ def _training_job(
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs RUNNING update failed: %s", e)
 
+    # If asked to extend a prior dataset, build the merged file BEFORE
+    # training; the rest of the pipeline only ever sees one path.
+    effective_data_path = data_path
+    merged_cleanup: Optional[str] = None
+    if extend_from_path:
+        try:
+            effective_data_path = _merge_datasets(
+                base_path=extend_from_path,
+                new_path=data_path,
+                config_path=config_path,
+            )
+            merged_cleanup = effective_data_path
+            logger.info(
+                "extend_from: merged %s + %s → %s",
+                extend_from_path, data_path, effective_data_path,
+            )
+        except Exception as e:    # noqa: BLE001
+            if runs is not None:
+                try:
+                    from src.storage.training_runs import FAILED
+                    runs.update(
+                        run_id, status=FAILED, ended_at=_now(),
+                        error=f"dataset merge failed: {e}",
+                    )
+                except Exception:
+                    pass
+            raise
+
     from src.pipeline.train import run_training_pipeline
     try:
         result = run_training_pipeline(
-            data_path=data_path,
+            data_path=effective_data_path,
             config_path=config_path,
             client_id=client_id,
         )
@@ -142,14 +177,77 @@ def _training_job(
     try:
         _generate_and_store_forecasts(
             client_id=client_id,
-            data_path=data_path,
+            data_path=effective_data_path,
             model_path=result.get("model_path"),
             config_path=config_path,
             run_id=run_id or "",
         )
     except Exception as e:    # noqa: BLE001
         logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
+
+    # Tidy up the temp merged parquet now that both training and
+    # post-training forecasts have read it.
+    if merged_cleanup:
+        try:
+            import os as _os
+            _os.unlink(merged_cleanup)
+        except Exception:
+            pass
+
     return result
+
+
+def _merge_datasets(
+    base_path:   str,
+    new_path:    str,
+    config_path: str,
+) -> str:
+    """
+    Concatenate two processed parquet files into a single dataset
+    used for full retraining. Rules:
+      - sort by (sku_col, date_col)
+      - drop duplicate (sku, date) rows, keeping the value from the
+        NEWER dataset (so re-sent days override older history)
+      - written to /tmp as a fresh parquet; caller is responsible
+        for cleanup once training reads it
+
+    Both input paths can be local or s3:// — load_data already handles
+    both. Schema mismatches (different sku/date column names) raise.
+    """
+    import pandas as _pd
+    import tempfile, os as _os
+    from src.data.loader import load_config, load_data
+
+    config = load_config(config_path)
+    sku_col  = config["data"]["sku_col"]
+    date_col = config["data"]["date_col"]
+
+    base = load_data(base_path, config)
+    new  = load_data(new_path,  config)
+
+    for col in (sku_col, date_col):
+        if col not in base.columns:
+            raise ValueError(f"base dataset missing column {col!r}")
+        if col not in new.columns:
+            raise ValueError(f"new dataset missing column {col!r}")
+
+    base[date_col] = _pd.to_datetime(base[date_col])
+    new[date_col]  = _pd.to_datetime(new[date_col])
+
+    # `new` last in the concat → keep='last' on duplicates retains
+    # rows from the new dataset when the (sku, date) collides.
+    combined = _pd.concat([base, new], ignore_index=True)
+    before   = len(combined)
+    combined = combined.drop_duplicates(subset=[sku_col, date_col], keep="last")
+    combined = combined.sort_values([sku_col, date_col]).reset_index(drop=True)
+    after    = len(combined)
+    if before != after:
+        logger.info("merge: removed %d duplicate (sku,date) rows", before - after)
+
+    fd, out_path = tempfile.mkstemp(suffix=".parquet", prefix="merged-")
+    _os.close(fd)
+    combined.to_parquet(out_path, index=False)
+    return out_path
 
 
 def _generate_and_store_forecasts(
@@ -297,6 +395,7 @@ def enqueue_training(
     storage_backend: str | None = None,
     timeout: int = 7200,          # 2 hours max
     run_id: Optional[str] = None,
+    extend_from_path: Optional[str] = None,
 ) -> Optional[str]:
     """
     Enqueue a training job. Returns rq job_id.
@@ -304,6 +403,10 @@ def enqueue_training(
 
     `run_id` is the training_runs registry row created upstream. The
     worker uses it to update lifecycle status — see `_training_job`.
+
+    `extend_from_path` is the parquet of a prior dataset that should
+    be merged with `data_path` before training (full retrain on the
+    union, deduped by sku+date with the new file winning on overlap).
     """
     backend = storage_backend or os.environ.get("STORAGE_BACKEND", "local")
     try:
@@ -316,6 +419,7 @@ def enqueue_training(
                 config_path=config_path,
                 storage_backend=backend,
                 run_id=run_id,
+                extend_from_path=extend_from_path,
             ),
             job_timeout=timeout,
             result_ttl=86400,       # keep result 24h

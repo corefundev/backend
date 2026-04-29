@@ -241,6 +241,17 @@ class TrainRequest(BaseModel):
             "limits by plan. Omit only for admin / legacy direct-path training."
         ),
     )
+    extend_from_upload_id: Optional[str] = Field(
+        None,
+        description=(
+            "Upload ID of a previously trained dataset. When set, the worker "
+            "concatenates that upload's processed data with the current "
+            "upload's data, deduplicates by (sku, date) preferring the new "
+            "values, and retrains the model from scratch on the combined "
+            "set. Lets a customer add fresh weeks/months without re-uploading "
+            "their full history."
+        ),
+    )
 
 class TrainResponse(BaseModel):
     client_id: str
@@ -1452,6 +1463,36 @@ async def trigger_training(
             raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
         effective_data_path = get_processed_path(urec)
 
+    # ── Resolve extend_from path (incremental retrain) ──────────────
+    extend_from_path: Optional[str] = None
+    if req.extend_from_upload_id:
+        from src.storage.upload_pipeline import get_processed_path
+        from src.storage import upload_registry as ur
+        prev = ur.get_upload_registry().get(req.extend_from_upload_id)
+        if prev is None:
+            raise HTTPException(
+                404,
+                detail=f"extend_from_upload_id {req.extend_from_upload_id!r} not found",
+            )
+        if prev.client_id != client_id:
+            raise HTTPException(
+                403, detail="extend_from upload belongs to a different client"
+            )
+        if prev.status != "processed":
+            raise HTTPException(
+                409,
+                detail=(
+                    f"extend_from upload is not processed "
+                    f"(status={prev.status})"
+                ),
+            )
+        if req.extend_from_upload_id == req.upload_id:
+            raise HTTPException(
+                422,
+                detail="extend_from_upload_id must differ from upload_id",
+            )
+        extend_from_path = get_processed_path(prev)
+
     # ── Bump quota counters BEFORE enqueueing to avoid TOCTOU windows
     #    where a second request slips in between check and increment.
     record = record_training_started(registry, record)
@@ -1482,6 +1523,7 @@ async def trigger_training(
         data_path=effective_data_path,
         config_path=CONFIG_PATH,
         run_id=run_id,
+        extend_from_path=extend_from_path,
     )
     # Stamp job_id onto the row so we can correlate later.
     if run_id and job_id:
