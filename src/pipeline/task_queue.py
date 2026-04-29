@@ -151,6 +151,12 @@ def _training_job(
         try:
             from src.storage.training_runs import FINISHED
             metrics = result.get("metrics") or {}
+            # Prefer the pooled "global" metrics over the per-SKU mean.
+            # _mean treats every SKU equally and explodes when a few
+            # SKUs have intermittent zero-actual periods (NaN-handling
+            # asymmetry between per-fold and combined aggregations).
+            # _global = sum_all(|err|) / sum_all(|actual|), monotonic
+            # in fold metrics and matches what users see on a chart.
             runs.update(
                 run_id,
                 status=FINISHED,
@@ -159,9 +165,9 @@ def _training_job(
                 n_skus=result.get("n_skus"),
                 n_features=result.get("n_features"),
                 n_rows=result.get("n_rows"),
-                wmape=metrics.get("wmape_mean"),
-                mase=metrics.get("mase_mean"),
-                smape=metrics.get("smape_mean"),
+                wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+                mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+                smape=metrics.get("smape_global", metrics.get("smape_mean")),
                 model_path=result.get("model_path"),
                 mlflow_run_id=result.get("mlflow_run_id"),
             )
@@ -450,9 +456,9 @@ def enqueue_training(
                     n_skus=result.get("n_skus"),
                     n_features=result.get("n_features"),
                     n_rows=result.get("n_rows"),
-                    wmape=metrics.get("wmape_mean"),
-                    mase=metrics.get("mase_mean"),
-                    smape=metrics.get("smape_mean"),
+                    wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+                    mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+                    smape=metrics.get("smape_global", metrics.get("smape_mean")),
                     model_path=result.get("model_path"),
                     mlflow_run_id=result.get("mlflow_run_id"),
                 )

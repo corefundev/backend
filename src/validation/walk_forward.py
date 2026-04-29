@@ -92,7 +92,17 @@ def walk_forward_validate(
 
     combined = pd.concat(all_results, ignore_index=True)
     per_sku = compute_metrics_per_sku(combined, sku_col)
-    aggregated = aggregate_metrics(per_sku)
+    # Pass `combined` so aggregate_metrics can compute the globally-pooled
+    # WMAPE/MASE/SMAPE in addition to the per-SKU mean. The globals avoid
+    # the intermittent-demand pathology that inflates wmape_mean when a
+    # SKU has sum(actual)=0 in some folds but not others.
+    aggregated = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col)
+    logger.info(
+        f"Walk-forward aggregated | "
+        f"WMAPE_global={aggregated.get('wmape_global', float('nan')):.3f} · "
+        f"WMAPE_mean(per-SKU)={aggregated['wmape_mean']:.3f} · "
+        f"MASE_global={aggregated.get('mase_global', float('nan')):.3f}"
+    )
 
     return WalkForwardResult(
         per_sku_metrics=per_sku,

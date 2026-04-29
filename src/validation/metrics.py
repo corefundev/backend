@@ -75,12 +75,72 @@ def compute_metrics_per_sku(
     return pd.DataFrame(records)
 
 
-def aggregate_metrics(metrics_df: pd.DataFrame) -> dict:
-    """Aggregate per-SKU metrics: mean, median, p90."""
-    agg = {}
+def aggregate_metrics(
+    metrics_df: pd.DataFrame,
+    raw_df:     pd.DataFrame | None = None,
+    actual_col: str = "actual",
+    pred_col:   str = "predicted",
+    train_col:  str = "train_values",
+    sku_col:    str = "sku",
+) -> dict:
+    """
+    Aggregate per-SKU metrics into headline numbers.
+
+    Returns:
+      - {metric}_mean / _median / _p90  — distribution across SKUs
+        (treats every SKU equally; can blow up when a few SKUs have
+        intermittent demand that gives WMAPE ≈ ∞)
+      - {metric}_global                — single weighted error pooled
+        across ALL rows of `raw_df` (when supplied). Robust to
+        intermittent demand because the denominator includes every
+        actual value, not just non-zero windows. This is the metric
+        we report as the "headline" training error in sku_training_runs.
+
+    The fold-level vs combined-level discrepancy this fixes: in folds
+    where a SKU has sum(actual)=0, per-SKU WMAPE is NaN and gets
+    dropped from the per-SKU mean. When folds are then concatenated,
+    that SKU re-enters with the OTHER folds' positive denominator —
+    but the numerator now also carries the dropped fold's prediction
+    errors. Result: combined wmape_mean can be larger than every
+    per-fold wmape_mean. global pooling avoids that pathology.
+    """
+    agg: dict = {}
     for metric in ["mase", "wmape", "smape"]:
         vals = metrics_df[metric].dropna()
-        agg[f"{metric}_mean"] = float(vals.mean())
+        agg[f"{metric}_mean"]   = float(vals.mean())
         agg[f"{metric}_median"] = float(vals.median())
-        agg[f"{metric}_p90"] = float(np.percentile(vals, 90))
+        agg[f"{metric}_p90"]    = float(np.percentile(vals, 90))
+
+    if raw_df is not None and len(raw_df) > 0:
+        y_true = raw_df[actual_col].to_numpy(dtype=float)
+        y_pred = raw_df[pred_col].to_numpy(dtype=float)
+        agg["wmape_global"] = float(wmape(y_true, y_pred))
+        agg["smape_global"] = float(smape(y_true, y_pred))
+        # MASE needs a baseline naive error per SKU; pool one global
+        # naive_mae from each SKU's training values (deduped per SKU
+        # so we don't repeat the same series for every test row).
+        if train_col in raw_df.columns:
+            naive_errors: list[float] = []
+            mae_errors:   list[float] = []
+            for _, group in raw_df.groupby(sku_col):
+                yt = group[actual_col].to_numpy(dtype=float)
+                yp = group[pred_col].to_numpy(dtype=float)
+                tv_first = group[train_col].iloc[0]
+                if tv_first is None or (isinstance(tv_first, float) and np.isnan(tv_first)):
+                    continue
+                tv = np.asarray(tv_first, dtype=float)
+                if len(tv) < 2:
+                    continue
+                naive_errors.append(float(np.mean(np.abs(np.diff(tv)))))
+                mae_errors.append(float(np.mean(np.abs(yt - yp))))
+            if naive_errors:
+                pooled_mae   = float(np.mean(mae_errors))
+                pooled_naive = float(np.mean(naive_errors))
+                agg["mase_global"] = (
+                    pooled_mae / pooled_naive if pooled_naive > 1e-10 else float("nan")
+                )
+            else:
+                agg["mase_global"] = float("nan")
+        else:
+            agg["mase_global"] = float("nan")
     return agg
