@@ -1772,23 +1772,33 @@ async def predict(
 
         df_feat      = build_features(df, config)
         feature_cols = get_feature_columns(df_feat, config)
-        last_row     = df_feat.sort_values("date").iloc[[-1]].copy()
-        last_date    = pd.Timestamp(last_row["date"].values[0])
 
-        forecasts, forecast_dates, model_source = [], [], "primary"
+        # Use the shared recursive_forecast helper — it knows how to
+        # update lag/rolling/calendar features at each step. Without
+        # this, the loop produces a flat line because the model sees
+        # the same input vector at every horizon step.
+        from src.pipeline.inference_utils import recursive_forecast
 
-        for step in range(1, horizon + 1):
-            preds, source = service.predict(last_row[feature_cols])
+        model_source = "primary"
+        def _wrap_predict(features_df):
+            preds, source = service.predict(features_df)
+            nonlocal model_source
             if source != "primary":
                 model_source = source
                 FALLBACK_COUNT.labels(client_id=client_id).inc()
-            pred = float(np.clip(preds, 0, None)[0])
-            forecasts.append(round(pred, 4))
-            fdate = last_date + pd.Timedelta(days=step)
-            forecast_dates.append(fdate.strftime("%Y-%m-%d"))
-            last_row = last_row.copy()
-            last_row["sales"] = pred
-            last_row["date"]  = fdate
+            return preds, source
+
+        forecast_rows = recursive_forecast(
+            model=None,
+            history=df_feat,
+            feature_cols=feature_cols,
+            horizon=horizon,
+            sku=req.sku,
+            predict_fn=_wrap_predict,
+        )
+
+        forecasts      = [round(float(r["predicted_sales"]), 4) for r in forecast_rows]
+        forecast_dates = [pd.Timestamp(r["date"]).strftime("%Y-%m-%d") for r in forecast_rows]
 
         latency = time.perf_counter() - t_start
         REQUEST_LATENCY.labels(client_id=client_id).observe(latency)
