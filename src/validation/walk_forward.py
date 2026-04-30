@@ -35,6 +35,23 @@ def walk_forward_validate(
     For each fold:
       - train on [t0 → split_date]
       - test on  [split_date + 1 → split_date + horizon]
+
+    `model` can be:
+      - a model INSTANCE — re-used across folds (fit() is called repeatedly,
+        the instance is expected to overwrite its internal state). Backward
+        compatible with the old SKUForecaster usage.
+      - a callable factory — invoked once per fold to produce a fresh
+        instance. Required for stateful models like EnsembleForecaster
+        whose state from a prior fold would leak into the next.
+
+    Multi-step models (MIMO/Ensemble) return shape (N, H) from .predict();
+    we use the 1-step-ahead column (h=0) for fold metrics — the same step
+    walk-forward is testing.
+
+    Ensemble models also need the SKU column at predict time to look up
+    per-SKU blend weights; this function passes a feature matrix enriched
+    with the SKU column when it detects an `is_ensemble` marker on the
+    instance.
     """
     cfg_v = config["validation"]
     horizon = config["model"]["horizon"]
@@ -56,19 +73,49 @@ def walk_forward_validate(
             df[date_col] <= split_date + pd.Timedelta(days=horizon)
         )
 
-        X_train = df.loc[train_mask, feature_cols]
-        y_train = df.loc[train_mask, target_col]
-        X_test = df.loc[test_mask, feature_cols]
-        y_test = df.loc[test_mask, target_col]
+        train_df = df.loc[train_mask]
+        test_df  = df.loc[test_mask]
+        X_train = train_df[feature_cols]
+        y_train = train_df[target_col]
+        y_test  = test_df[target_col]
 
-        if len(X_test) == 0:
+        if len(test_df) == 0:
             logger.warning(f"Fold {fold_idx}: empty test set, skipping")
             continue
 
-        model.fit(X_train, y_train)
-        y_pred = np.clip(model.predict(X_test), 0, None)
+        # Resolve the model for this fold — fresh instance via factory
+        # if callable, otherwise reuse the shared one.
+        fold_model = model() if callable(model) else model
+        fold_model.fit(X_train, y_train)
 
-        fold_df = df.loc[test_mask, [sku_col, date_col]].copy()
+        # Stateful per-SKU blending (EnsembleForecaster) needs to be
+        # primed for this fold's data before predicting.
+        if hasattr(fold_model, "compute_blend_weights"):
+            try:
+                fold_model.compute_blend_weights(
+                    df_full=train_df,
+                    sku_col=sku_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                )
+            except Exception as e:    # noqa: BLE001
+                logger.warning("Fold %d blend-weight estimation failed: %s", fold_idx, e)
+
+        # Ensemble.predict needs the SKU column to look up per-SKU
+        # weights. Single-model classes ignore extra columns.
+        is_ensemble = bool(getattr(fold_model, "is_ensemble", False))
+        if is_ensemble:
+            X_test = test_df[[*feature_cols, sku_col]]
+        else:
+            X_test = test_df[feature_cols]
+
+        raw_pred = fold_model.predict(X_test)
+        # Multi-step models (MIMO/Ensemble) return (N, H); take 1-step.
+        if hasattr(raw_pred, "ndim") and raw_pred.ndim > 1:
+            raw_pred = raw_pred[:, 0]
+        y_pred = np.clip(raw_pred, 0, None)
+
+        fold_df = test_df[[sku_col, date_col]].copy()
         fold_df["actual"] = y_test.values
         fold_df["predicted"] = y_pred
         fold_df["fold"] = fold_idx

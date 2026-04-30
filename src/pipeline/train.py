@@ -166,9 +166,24 @@ def run_training_pipeline(
         _progress(5, 9, "HPO пропущен")
 
     # ── 6. Walk-forward validation ────────────────────────────
+    # Use the SAME class as the final model so reported WMAPE/MASE
+    # actually reflect what the user gets in production. Pass a
+    # factory so the validator builds a fresh instance per fold —
+    # ensemble's per-SKU weights would otherwise leak between folds.
     _progress(6, 9, "Walk-forward валидация")
-    val_model = SKUForecaster(config)
-    wf_result = walk_forward_validate(df, val_model, feature_cols, config)
+    objective_pre = str(config.get("model", {}).get("objective", "")).lower()
+    if objective_pre == "ensemble":
+        from src.models.ensemble import EnsembleForecaster
+        def _val_factory():
+            return EnsembleForecaster(config)
+        logger.info("  Walk-forward will use EnsembleForecaster (3 children per fold)")
+    elif config["model"].get("type") == "mimo":
+        def _val_factory():
+            return MIMOForecaster(config)
+    else:
+        def _val_factory():
+            return SKUForecaster(config)
+    wf_result = walk_forward_validate(df, _val_factory, feature_cols, config)
     agg = wf_result.aggregated
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
     storage.save_per_sku_metrics(wf_result.per_sku_metrics)
