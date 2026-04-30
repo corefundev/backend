@@ -16,6 +16,44 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# Map user-friendly config names → LightGBM `objective` strings.
+# Default `regression` is MSE — same as the historical behaviour.
+_OBJECTIVE_ALIASES = {
+    "mse":     "regression",
+    "l2":      "regression",
+    "mae":     "regression_l1",
+    "l1":      "regression_l1",
+    "huber":   "huber",
+    "tweedie": "tweedie",
+    "poisson": "poisson",
+}
+
+
+def lgb_objective_params(model_cfg: dict) -> dict:
+    """
+    Resolve the objective + any objective-specific hyperparameters from
+    the model config block. Centralised so SKUForecaster, MIMOForecaster
+    and any future ensemble member all agree on vocabulary.
+
+    Why Tweedie: retail demand is non-negative, right-skewed, has many
+    zero-sales days. Tweedie with variance_power∈(1, 2) fits this
+    distribution shape directly — Amazon Forecast uses Tweedie under the
+    hood. MSE assumes normality and over-weights large-volume SKUs.
+
+    Returns a dict ready to splat into `lgb.LGBMRegressor(**params)`.
+    """
+    raw = str(model_cfg.get("objective", "mse")).lower().strip()
+    obj = _OBJECTIVE_ALIASES.get(raw, raw)   # accept either alias or LGB name
+    params: dict = {"objective": obj}
+    if obj == "tweedie":
+        params["tweedie_variance_power"] = float(
+            model_cfg.get("tweedie_variance_power", 1.5)
+        )
+    if obj == "huber":
+        params["alpha"] = float(model_cfg.get("huber_alpha", 0.9))
+    return params
+
+
 class SKUForecaster:
     """
     Global LightGBM model — one model for all SKUs.
@@ -39,14 +77,27 @@ class SKUForecaster:
             "bagging_freq": self.model_cfg.get("bagging_freq", 5),
             "n_jobs": -1,
             "verbose": -1,
+            **lgb_objective_params(self.model_cfg),
         }
         self.feature_cols = list(X.columns)
+        # Tweedie/Poisson require y >= 0. Clip to be safe against
+        # accidental negative observations (returns/refunds in the
+        # data) — alternative is a hard crash deep in C++.
+        if params["objective"] in {"tweedie", "poisson"} and (y < 0).any():
+            logger.warning(
+                "Negative targets detected with objective=%s — clipping to 0",
+                params["objective"],
+            )
+            y = y.clip(lower=0)
         self.model = lgb.LGBMRegressor(**params)
         self.model.fit(
             X, y,
             callbacks=[lgb.log_evaluation(period=100)],
         )
-        logger.info(f"Model fitted on {len(X)} rows, {len(self.feature_cols)} features")
+        logger.info(
+            f"Model fitted on {len(X)} rows, {len(self.feature_cols)} features "
+            f"(objective={params['objective']})"
+        )
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:

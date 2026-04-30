@@ -36,6 +36,13 @@ features:
 model:
   type: mimo                     # "lgbm" (single-step) or "mimo" (direct multi-step)
   horizon: 14
+  # Loss objective. Plan-tier defaults override this (Free→mse, Start/Business→tweedie).
+  # Accepted values: mse | mae | huber | tweedie | poisson
+  # Tweedie is recommended for retail demand: handles intermittent zeros
+  # and right-skewed sales distributions natively. Same family Amazon
+  # Forecast uses internally.
+  objective: mse
+  tweedie_variance_power: 1.5    # used only when objective=tweedie. (1, 2): closer to 1 = poisson-like, closer to 2 = gamma-like
   quantiles: [0.1, 0.5, 0.9]   # for interval forecasts
   n_estimators: 500
   learning_rate: 0.05

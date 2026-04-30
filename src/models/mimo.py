@@ -41,6 +41,7 @@ class MIMOForecaster:
 
     def _base_params(self, extra: dict | None = None) -> dict:
         m = self.config["model"]
+        from src.models.forecaster import lgb_objective_params
         p = dict(
             n_estimators    = m.get("n_estimators",    500),
             learning_rate   = m.get("learning_rate",   0.05),
@@ -51,7 +52,12 @@ class MIMOForecaster:
             bagging_freq    = m.get("bagging_freq",    5),
             n_jobs          = -1,
             verbose         = -1,
+            **lgb_objective_params(m),
         )
+        # `extra` overrides — quantile branch passes
+        # {"objective": "quantile", "alpha": q} to wipe the default
+        # objective and run quantile regression instead. Keep that
+        # contract: extra wins.
         if extra:
             p.update(extra)
         return p
@@ -64,6 +70,14 @@ class MIMOForecaster:
         self.feature_cols = list(X.columns)
         self.models_ = []
 
+        params = self._base_params()
+        if params["objective"] in {"tweedie", "poisson"} and (y < 0).any():
+            logger.warning(
+                "MIMO: negative targets detected with objective=%s — clipping",
+                params["objective"],
+            )
+            y = y.clip(lower=0)
+
         # Build targets for each horizon step using historical shifts
         for h in range(1, self.horizon + 1):
             y_h = y.shift(-h)           # target is h steps ahead
@@ -71,11 +85,14 @@ class MIMOForecaster:
             X_h  = X[mask]
             y_h  = y_h[mask]
 
-            model = lgb.LGBMRegressor(**self._base_params())
+            model = lgb.LGBMRegressor(**params)
             model.fit(X_h, y_h, callbacks=[lgb.log_evaluation(period=-1)])
             self.models_.append(model)
 
-        logger.info(f"MIMO: fitted {self.horizon} direct models on {len(X)} rows")
+        logger.info(
+            f"MIMO: fitted {self.horizon} direct models on {len(X)} rows "
+            f"(objective={params['objective']})"
+        )
         return self
 
     def fit_quantiles(

@@ -77,6 +77,13 @@ class PlanSpec:
     # downgrade explicit choices, only fill in defaults).
     hpo_n_trials:             int = 0
 
+    # ── Loss objective default ───────────────────────────────────────
+    # Free tier stays on plain MSE — simple, fast, good baseline. Higher
+    # tiers default to Tweedie which models retail demand (right-skewed,
+    # zero-inflated) more honestly. User-set objective in client config
+    # wins, same precedence as HPO.
+    default_objective:        str = "mse"
+
     # ── UI hints ─────────────────────────────────────────────────────
     price_label:              str = ""
 
@@ -87,6 +94,8 @@ class PlanSpec:
 # that's Business territory.
 _START_CONFIG_KEYS = frozenset({
     "model.horizon",
+    "model.objective",                  # Tweedie / MAE / MSE choice
+    "model.tweedie_variance_power",     # active only when objective=tweedie
     "features.weather.enabled",
     "features.holidays.enabled",
     "features.holidays.country",
@@ -121,6 +130,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_runs_per_month=UNLIMITED,
         config_allowed_keys=frozenset(),    # "black box" — zero overrides
         hpo_n_trials=0,                # HPO off — keep training fast and free
+        default_objective="mse",       # plain MSE, straightforward baseline
         price_label="₽0",
     ),
     Plan.START: PlanSpec(
@@ -133,6 +143,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_runs_per_month=15,
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
+        default_objective="tweedie",   # retail-shaped distribution
         price_label="",
     ),
     Plan.BUSINESS: PlanSpec(
@@ -143,6 +154,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=90,            # was 365; tightened — model accuracy past 90d is meh
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
+        default_objective="tweedie",   # full HPO will tune variance_power
         training_runs_per_month=UNLIMITED,
         config_allowed_keys=None,  # all keys
         price_label="",

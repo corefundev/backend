@@ -68,38 +68,45 @@ def run_training_pipeline(
     # Client config is merged ON TOP of system config.
     # System config.yaml is never modified.
     user_set_hpo = False
+    user_set_objective = False
     try:
         from src.clients.registry import get_registry
         registry = get_registry()
         mgr      = get_config_manager(config_path)
         record   = registry.get(client_id)
-        # Track whether the user explicitly set hpo so we don't
-        # downgrade their choice to the plan default below.
-        user_set_hpo = bool(record and "hpo" in (record.config or {}))
+        # Track explicit user choices so plan-tier defaults below
+        # don't overwrite them.
+        client_cfg = (record.config if record else None) or {}
+        user_set_hpo = "hpo" in client_cfg
+        user_set_objective = "objective" in (client_cfg.get("model") or {})
         config   = mgr.get_effective(client_id, registry)
         logger.info(f"Config for client={client_id}: applied per-client overrides")
     except Exception as e:
         logger.warning(f"Could not load per-client config overrides: {e}. Using system defaults.")
         record = None
 
-    # ── Plan-tier HPO defaults ───────────────────────────────
-    # Each plan has its own HPO budget (Free 0 / Start 15 / Business 30
-    # trials). Apply only when the user hasn't explicitly set hpo in
-    # their override — explicit user choice always wins.
-    if not user_set_hpo:
-        try:
-            from src.plans.plans import get_plan_spec
-            spec = get_plan_spec(record.plan if record else None)
-            n_trials = spec.hpo_n_trials
+    # ── Plan-tier defaults: HPO + objective ──────────────────
+    # Each plan has its own HPO budget (Free 0 / Start 15 / Business 30)
+    # and its own default loss objective (Free→mse / Start, Business→
+    # tweedie). Applied only when the user hasn't explicitly set the
+    # corresponding override — explicit user choice always wins.
+    try:
+        from src.plans.plans import get_plan_spec
+        spec = get_plan_spec(record.plan if record else None)
+        if not user_set_hpo:
             config.setdefault("hpo", {})
-            config["hpo"]["enabled"]  = n_trials > 0
-            config["hpo"]["n_trials"] = n_trials
-            logger.info(
-                f"Plan-tier HPO: plan={record.plan if record else 'free'} "
-                f"n_trials={n_trials}"
-            )
-        except Exception as e:    # noqa: BLE001
-            logger.warning(f"Could not apply plan HPO defaults: {e}")
+            config["hpo"]["enabled"]  = spec.hpo_n_trials > 0
+            config["hpo"]["n_trials"] = spec.hpo_n_trials
+        if not user_set_objective:
+            config.setdefault("model", {})
+            config["model"]["objective"] = spec.default_objective
+        logger.info(
+            f"Plan-tier defaults: plan={record.plan if record else 'free'} "
+            f"hpo_n_trials={config['hpo'].get('n_trials', 0)} "
+            f"objective={config['model'].get('objective', 'mse')}"
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning(f"Could not apply plan defaults: {e}")
 
     storage = ClientStorage(client_id)
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
