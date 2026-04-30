@@ -176,11 +176,33 @@ def run_training_pipeline(
     # ── 7. Train final model ──────────────────────────────────
     _progress(7, 9, "Обучение финальной модели")
     model_type = config["model"].get("type", "lgbm")
+    objective  = str(config.get("model", {}).get("objective", "")).lower()
+    is_ensemble = objective == "ensemble"
 
-    if model_type == "mimo":
+    if is_ensemble:
+        # 3 MIMO children with different objectives, blended per SKU.
+        # Adds ~3× training time and memory for a meaningful per-SKU
+        # accuracy gain on mixed catalogs.
+        from src.models.ensemble import EnsembleForecaster
+        final_model = EnsembleForecaster(config)
+        final_model.fit(X, y)
+        final_model.fit_quantiles(X, y)
+        # Estimate per-SKU mixing weights from the most recent
+        # window of training data. Needs the SKU + date columns
+        # alongside the targets, so we pass df rather than X.
+        final_model.compute_blend_weights(
+            df_full=df,
+            sku_col=sku_col,
+            date_col=config["data"]["date_col"],
+            target_col=target_col,
+            lookback_days=int(
+                config.get("model", {}).get("ensemble_lookback_days", 28)
+            ),
+        )
+        logger.info("  Ensemble (Tweedie+MAE+MSE) + quantile models fitted")
+    elif model_type == "mimo":
         final_model = MIMOForecaster(config)
         final_model.fit(X, y)
-        # Also fit quantile models for interval forecasts
         final_model.fit_quantiles(X, y)
         logger.info("  MIMO model + quantile models fitted")
     else:
@@ -194,7 +216,12 @@ def run_training_pipeline(
     cluster.fit(df, sku_col, target_col)
 
     # ── 9. SHAP explainer ─────────────────────────────────────
-    if model_type == "lgbm":
+    if is_ensemble:
+        # Use the primary (first) child's first MIMO model for SHAP.
+        primary = final_model.models_[final_model.primary_objective]
+        lgbm_inner = primary.models_[0] if primary.models_ else None
+        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+    elif model_type == "lgbm":
         lgbm_inner = getattr(final_model, "model", None)
         explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
     else:

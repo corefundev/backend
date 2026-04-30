@@ -94,8 +94,9 @@ class PlanSpec:
 # that's Business territory.
 _START_CONFIG_KEYS = frozenset({
     "model.horizon",
-    "model.objective",                  # Tweedie / MAE / MSE choice
+    "model.objective",                  # ensemble / tweedie / mae / mse
     "model.tweedie_variance_power",     # active only when objective=tweedie
+    "model.ensemble_lookback_days",     # weight-estimation window
     "features.weather.enabled",
     "features.holidays.enabled",
     "features.holidays.country",
@@ -143,7 +144,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_runs_per_month=15,
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
-        default_objective="tweedie",   # retail-shaped distribution
+        default_objective="ensemble",  # 3-model blend, per-SKU best-of-three
         price_label="",
     ),
     Plan.BUSINESS: PlanSpec(
@@ -154,7 +155,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=90,            # was 365; tightened — model accuracy past 90d is meh
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
-        default_objective="tweedie",   # full HPO will tune variance_power
+        default_objective="ensemble",  # 3-model blend; HPO tunes each child
         training_runs_per_month=UNLIMITED,
         config_allowed_keys=None,  # all keys
         price_label="",

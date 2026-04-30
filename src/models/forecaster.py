@@ -43,6 +43,12 @@ def lgb_objective_params(model_cfg: dict) -> dict:
     Returns a dict ready to splat into `lgb.LGBMRegressor(**params)`.
     """
     raw = str(model_cfg.get("objective", "mse")).lower().strip()
+    # `ensemble` is a meta-objective handled by EnsembleForecaster, not
+    # by LightGBM itself. If something other than EnsembleForecaster
+    # ends up in this code path with objective=ensemble, fall back to
+    # the primary child objective so LightGBM doesn't choke on it.
+    if raw == "ensemble":
+        raw = "tweedie"
     obj = _OBJECTIVE_ALIASES.get(raw, raw)   # accept either alias or LGB name
     params: dict = {"objective": obj}
     if obj == "tweedie":
