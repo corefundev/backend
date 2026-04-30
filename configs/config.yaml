@@ -9,8 +9,13 @@ data:
   min_rows: 30
 
 features:
-  lags: [1, 2, 3, 7, 14, 21, 28]
-  rolling_windows: [7, 14, 28]
+  # Daily lags up to 90 days — model sees yesterday/last week/last
+  # month/quarter. Adds ~10-15 features but lets LightGBM pick the
+  # signal from any horizon.
+  lags: [1, 2, 3, 7, 14, 21, 28, 60, 90]
+  # Rolling stats over the same scale of windows. Each builds 4
+  # features (mean/std/max/min) so 4 windows = 16 features.
+  rolling_windows: [7, 14, 28, 60, 90]
   calendar: true
   price: true
   promo: true

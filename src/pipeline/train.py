@@ -67,14 +67,39 @@ def run_training_pipeline(
     # ── Apply per-client config overrides ────────────────────
     # Client config is merged ON TOP of system config.
     # System config.yaml is never modified.
+    user_set_hpo = False
     try:
         from src.clients.registry import get_registry
         registry = get_registry()
         mgr      = get_config_manager(config_path)
+        record   = registry.get(client_id)
+        # Track whether the user explicitly set hpo so we don't
+        # downgrade their choice to the plan default below.
+        user_set_hpo = bool(record and "hpo" in (record.config or {}))
         config   = mgr.get_effective(client_id, registry)
         logger.info(f"Config for client={client_id}: applied per-client overrides")
     except Exception as e:
         logger.warning(f"Could not load per-client config overrides: {e}. Using system defaults.")
+        record = None
+
+    # ── Plan-tier HPO defaults ───────────────────────────────
+    # Each plan has its own HPO budget (Free 0 / Start 15 / Business 30
+    # trials). Apply only when the user hasn't explicitly set hpo in
+    # their override — explicit user choice always wins.
+    if not user_set_hpo:
+        try:
+            from src.plans.plans import get_plan_spec
+            spec = get_plan_spec(record.plan if record else None)
+            n_trials = spec.hpo_n_trials
+            config.setdefault("hpo", {})
+            config["hpo"]["enabled"]  = n_trials > 0
+            config["hpo"]["n_trials"] = n_trials
+            logger.info(
+                f"Plan-tier HPO: plan={record.plan if record else 'free'} "
+                f"n_trials={n_trials}"
+            )
+        except Exception as e:    # noqa: BLE001
+            logger.warning(f"Could not apply plan HPO defaults: {e}")
 
     storage = ClientStorage(client_id)
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")

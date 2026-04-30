@@ -70,6 +70,13 @@ class PlanSpec:
     # apply). Empty set means "no overrides permitted".
     config_allowed_keys:      frozenset[str] | None = field(default=None)
 
+    # ── HPO budget ───────────────────────────────────────────────────
+    # Optuna trials run during training. 0 = HPO disabled. Higher tiers
+    # get more trials → better hyperparams at the cost of training time.
+    # User-set hpo overrides in client config still win (we don't
+    # downgrade explicit choices, only fill in defaults).
+    hpo_n_trials:             int = 0
+
     # ── UI hints ─────────────────────────────────────────────────────
     price_label:              str = ""
 
@@ -113,6 +120,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_cooldown_hours=12,    # was 48; lowered for v2 — let testers iterate
         training_runs_per_month=UNLIMITED,
         config_allowed_keys=frozenset(),    # "black box" — zero overrides
+        hpo_n_trials=0,                # HPO off — keep training fast and free
         price_label="₽0",
     ),
     Plan.START: PlanSpec(
@@ -124,6 +132,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_cooldown_hours=UNLIMITED,
         training_runs_per_month=15,
         config_allowed_keys=_START_CONFIG_KEYS,
+        hpo_n_trials=15,               # short HPO — adds ~2 min per training
         price_label="",
     ),
     Plan.BUSINESS: PlanSpec(
@@ -133,6 +142,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_skus=UNLIMITED,
         max_horizon_days=90,            # was 365; tightened — model accuracy past 90d is meh
         training_cooldown_hours=UNLIMITED,
+        hpo_n_trials=30,               # full HPO — adds ~5 min per training
         training_runs_per_month=UNLIMITED,
         config_allowed_keys=None,  # all keys
         price_label="",
