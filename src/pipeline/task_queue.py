@@ -143,11 +143,16 @@ def _training_job(
                 runs.update(run_id, status=FAILED, ended_at=_now(), error=str(e))
             except Exception as upd_err:    # noqa: BLE001
                 logger.warning("training_runs FAILED update failed: %s", upd_err)
-        # Email the user — failure happens during deploys + bad data,
-        # they should know without staring at the page.
+        # Notify on failure too — both channels, silently skip if
+        # the user hasn't opted in or hasn't linked.
         try:
-            from src.notifications.training_email import notify_training_failed
-            notify_training_failed(client_id=client_id, error=str(e))
+            from src.notifications.training_email import notify_training_failed as _email_fail
+            _email_fail(client_id=client_id, error=str(e))
+        except Exception:    # noqa: BLE001
+            pass
+        try:
+            from src.notifications.telegram import notify_training_failed as _tg_fail
+            _tg_fail(client_id=client_id, error=str(e))
         except Exception:    # noqa: BLE001
             pass
         raise
@@ -181,19 +186,26 @@ def _training_job(
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)
 
-    # ── Email the user that training is done ─────────────────────
-    # Best-effort — never blocks the pipeline. Per-client opt-out
-    # lives in client config; default ON.
+    # ── Notify the user that training is done ──────────────────
+    # Email + Telegram in parallel, both best-effort. Each channel
+    # has its own opt-out in client config and silently skips
+    # when not configured.
+    metrics = result.get("metrics") or {}
+    notif_args = dict(
+        client_id=client_id,
+        duration_sec=result.get("elapsed_sec"),
+        n_skus=result.get("n_skus"),
+        wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+        mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+    )
     try:
-        from src.notifications.training_email import notify_training_finished
-        metrics = result.get("metrics") or {}
-        notify_training_finished(
-            client_id=client_id,
-            duration_sec=result.get("elapsed_sec"),
-            n_skus=result.get("n_skus"),
-            wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
-            mase=metrics.get("mase_global",  metrics.get("mase_mean")),
-        )
+        from src.notifications.training_email import notify_training_finished as _email
+        _email(**notif_args)
+    except Exception:    # noqa: BLE001
+        pass
+    try:
+        from src.notifications.telegram import notify_training_finished as _tg
+        _tg(**notif_args)
     except Exception:    # noqa: BLE001
         pass
 

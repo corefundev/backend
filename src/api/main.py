@@ -169,9 +169,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("forecasts registry not initialised: %s", e)
 
+    # ── Telegram long-polling background task ─────────────────
+    # Telegram's resolver intermittently can't see api.testcore.ru
+    # (we got 400 "Failed to resolve host" from setWebhook). Polling
+    # outbound from us avoids any inbound reachability issue. One
+    # asyncio task lives for the api process's lifetime.
+    tg_task = None
+    try:
+        import asyncio as _asyncio
+        from src.notifications.telegram import poll_loop as _tg_poll
+        tg_task = _asyncio.create_task(_tg_poll())
+        logger.info("Telegram poll loop started")
+    except Exception as e:
+        logger.warning("Telegram poll loop not started: %s", e)
+
     logger.info("API starting — storage: %s", os.getenv("STORAGE_BACKEND", "local"))
     yield
     logger.info("API shutting down")
+    if tg_task is not None:
+        tg_task.cancel()
 
 
 app = FastAPI(
@@ -2126,3 +2142,93 @@ async def upgrade_client_plan(
         client_id, record.plan, target.value, ",".join(auth.roles or []),
     )
     return {"plan": target.value, "display_name": spec.display_name, "changed": True}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Telegram notifications — link / unlink / inbound webhook
+# ──────────────────────────────────────────────────────────────────
+
+@app.post("/clients/{client_id}/telegram/link-token", tags=["notifications"])
+async def telegram_link_token(
+    client_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Generate a one-shot deep-link token for connecting the user's
+    Telegram. Frontend opens the returned URL in a new tab; the user
+    sends /start <token> to the bot, the bot's webhook stores the
+    chat_id on the client config. Token TTL = 10 min.
+    """
+    require_client_access(client_id, auth)
+    from src.notifications.telegram import (
+        create_link_token, build_link_url, bot_username,
+    )
+    if not bot_username():
+        raise HTTPException(503, detail="Telegram bot is not configured")
+    token = create_link_token(client_id)
+    return {"token": token, "url": build_link_url(token), "expires_in_sec": 600}
+
+
+@app.delete("/clients/{client_id}/telegram", tags=["notifications"])
+async def telegram_unlink(
+    client_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Remove the chat_id from client config so notifications stop."""
+    require_client_access(client_id, auth)
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+    cfg = dict(record.config or {})
+    notifs = dict(cfg.get("notifications") or {})
+    tg = dict(notifs.get("telegram") or {})
+    if "chat_id" in tg:
+        tg.pop("chat_id", None)
+    notifs["telegram"] = tg
+    cfg["notifications"] = notifs
+    registry.update(client_id, config=cfg)
+    return {"linked": False}
+
+
+@app.get("/clients/{client_id}/telegram", tags=["notifications"])
+async def telegram_status(
+    client_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Return whether the client currently has a chat linked."""
+    require_client_access(client_id, auth)
+    record = get_registry().get(client_id)
+    if record is None:
+        raise HTTPException(404)
+    cfg = (record.config or {})
+    tg = (cfg.get("notifications") or {}).get("telegram", {}) or {}
+    from src.notifications.telegram import bot_username
+    return {
+        "linked":   bool(tg.get("chat_id")),
+        "bot":      bot_username(),
+        "training_complete_enabled": bool(tg.get("training_complete", True)),
+    }
+
+
+@app.post("/telegram/webhook", tags=["notifications"])
+async def telegram_webhook(request: Request):
+    """
+    Telegram → us. Validated via the X-Telegram-Bot-Api-Secret-Token
+    header (registered alongside setWebhook). Always responds 200 so
+    Telegram doesn't keep retrying.
+    """
+    expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+    received = request.headers.get("x-telegram-bot-api-secret-token", "")
+    if expected and received != expected:
+        # Reject silently — return 200 anyway so Telegram doesn't
+        # know we noticed; logs the attempt.
+        logger.warning("telegram webhook: secret mismatch from %s", request.client.host if request.client else "?")
+        return {"ok": True}
+    try:
+        update = await request.json()
+        from src.notifications.telegram import handle_update
+        handle_update(update)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("telegram webhook handling failed: %s", e)
+    return {"ok": True}
