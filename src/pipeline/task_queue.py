@@ -143,6 +143,13 @@ def _training_job(
                 runs.update(run_id, status=FAILED, ended_at=_now(), error=str(e))
             except Exception as upd_err:    # noqa: BLE001
                 logger.warning("training_runs FAILED update failed: %s", upd_err)
+        # Email the user — failure happens during deploys + bad data,
+        # they should know without staring at the page.
+        try:
+            from src.notifications.training_email import notify_training_failed
+            notify_training_failed(client_id=client_id, error=str(e))
+        except Exception:    # noqa: BLE001
+            pass
         raise
 
     # Persist final metrics so the History tab can show them after
@@ -173,6 +180,22 @@ def _training_job(
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)
+
+    # ── Email the user that training is done ─────────────────────
+    # Best-effort — never blocks the pipeline. Per-client opt-out
+    # lives in client config; default ON.
+    try:
+        from src.notifications.training_email import notify_training_finished
+        metrics = result.get("metrics") or {}
+        notify_training_finished(
+            client_id=client_id,
+            duration_sec=result.get("elapsed_sec"),
+            n_skus=result.get("n_skus"),
+            wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+            mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+        )
+    except Exception:    # noqa: BLE001
+        pass
 
     # ── Auto-batch-forecast for the whole catalogue ──────────────
     # The user shouldn't have to pick an SKU + horizon by hand after
