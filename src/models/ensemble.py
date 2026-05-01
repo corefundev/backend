@@ -142,18 +142,24 @@ class EnsembleForecaster:
         global_act: float = 0.0
 
         for sku, group in recent.groupby(sku_col, sort=False):
-            X_sku = group[self.feature_cols]
-            y_sku = group[target_col].to_numpy(dtype=float)
-            if len(y_sku) < 3:
+            # CRITICAL: align predictions to the day they're for.
+            # MIMO.predict(X)[:, 0] gives h=1 forecasts — i.e. "the
+            # day AFTER each input row". So we must compare those to
+            # the NEXT row's actual, not the same row's. The previous
+            # version compared h=1 predictions to y_t, an off-by-one
+            # day mismatch; weights were essentially noise, ensemble
+            # was effectively averaging randomly.
+            g = group.sort_values(date_col).reset_index(drop=True)
+            if len(g) < 3:
                 continue
-            sku_volume = float(np.abs(y_sku).sum())
+            X_in    = g[self.feature_cols].iloc[:-1]              # rows 0..N-2
+            y_next  = g[target_col].iloc[1:].to_numpy(dtype=float) # rows 1..N-1
+            sku_volume = float(np.abs(y_next).sum())
             global_act += sku_volume
             obj_wmape: dict[str, float] = {}
             for obj, model in self.models_.items():
-                # MIMO.predict gives (N, H); we use h=0 (1-step) for
-                # weight estimation — fastest and most informative.
-                preds = np.clip(model.predict(X_sku), 0, None)[:, 0]
-                err = float(np.abs(y_sku - preds).sum())
+                preds = np.clip(model.predict(X_in), 0, None)[:, 0]
+                err = float(np.abs(y_next - preds).sum())
                 global_err[obj] += err
                 if sku_volume < eps:
                     continue
