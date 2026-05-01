@@ -30,28 +30,32 @@ def walk_forward_validate(
     config: dict,
 ) -> WalkForwardResult:
     """
-    Expanding-window walk-forward validation.
+    Expanding-window walk-forward validation with PROPER recursive
+    forecasting per SKU.
 
     For each fold:
       - train on [t0 → split_date]
       - test on  [split_date + 1 → split_date + horizon]
+      - per SKU: take last train row, run recursive_forecast for
+        `horizon` days, match predictions to test rows by date
+
+    Why per-SKU recursive (not bulk model.predict on test rows):
+      Multi-step models (MIMO / Ensemble) train on (X_t, y_{t+1}),
+      so their `.predict()[h=0]` gives 1-step AHEAD from the input
+      row. Feeding test rows to .predict() and comparing to actuals
+      at the SAME date is off-by-one — caused us to see WMAPE 0.263
+      / MASE 1.27 on sample_start when the real ensemble accuracy
+      was much better. recursive_forecast handles BOTH single-step
+      (SKUForecaster) and multi-step (MIMO/Ensemble) semantics
+      correctly because it advances the lag/rolling/calendar state
+      per step and uses the model's own predict-time conventions.
 
     `model` can be:
-      - a model INSTANCE — re-used across folds (fit() is called repeatedly,
-        the instance is expected to overwrite its internal state). Backward
-        compatible with the old SKUForecaster usage.
-      - a callable factory — invoked once per fold to produce a fresh
-        instance. Required for stateful models like EnsembleForecaster
-        whose state from a prior fold would leak into the next.
-
-    Multi-step models (MIMO/Ensemble) return shape (N, H) from .predict();
-    we use the 1-step-ahead column (h=0) for fold metrics — the same step
-    walk-forward is testing.
-
-    Ensemble models also need the SKU column at predict time to look up
-    per-SKU blend weights; this function passes a feature matrix enriched
-    with the SKU column when it detects an `is_ensemble` marker on the
-    instance.
+      - a model INSTANCE — re-used across folds (backward compat
+        with the old SKUForecaster usage).
+      - a callable factory — invoked once per fold for a fresh
+        instance. Required for stateful models like Ensemble whose
+        per-SKU weights would otherwise leak between folds.
     """
     cfg_v = config["validation"]
     horizon = config["model"]["horizon"]
@@ -59,6 +63,10 @@ def walk_forward_validate(
     date_col = config["data"]["date_col"]
     sku_col = config["data"]["sku_col"]
     target_col = config["data"]["target_col"]
+
+    # Lazy import keeps inference_utils out of the validation module
+    # graph for callers that don't need it.
+    from src.pipeline.inference_utils import recursive_forecast
 
     dates = df[date_col].sort_values().unique()
     # Reserve the last n_splits * horizon days for testing
@@ -73,20 +81,15 @@ def walk_forward_validate(
             df[date_col] <= split_date + pd.Timedelta(days=horizon)
         )
 
-        train_df = df.loc[train_mask]
-        test_df  = df.loc[test_mask]
-        X_train = train_df[feature_cols]
-        y_train = train_df[target_col]
-        y_test  = test_df[target_col]
+        train_df = df.loc[train_mask].copy()
+        test_df  = df.loc[test_mask].copy()
 
         if len(test_df) == 0:
             logger.warning(f"Fold {fold_idx}: empty test set, skipping")
             continue
 
-        # Resolve the model for this fold — fresh instance via factory
-        # if callable, otherwise reuse the shared one.
         fold_model = model() if callable(model) else model
-        fold_model.fit(X_train, y_train)
+        fold_model.fit(train_df[feature_cols], train_df[target_col])
 
         # Stateful per-SKU blending (EnsembleForecaster) needs to be
         # primed for this fold's data before predicting.
@@ -101,28 +104,56 @@ def walk_forward_validate(
             except Exception as e:    # noqa: BLE001
                 logger.warning("Fold %d blend-weight estimation failed: %s", fold_idx, e)
 
-        # Ensemble.predict needs the SKU column to look up per-SKU
-        # weights. Single-model classes ignore extra columns.
-        is_ensemble = bool(getattr(fold_model, "is_ensemble", False))
-        if is_ensemble:
-            X_test = test_df[[*feature_cols, sku_col]]
-        else:
-            X_test = test_df[feature_cols]
+        # Per-SKU recursive forecast through the test window. Each SKU
+        # gets `horizon` predictions; we match them to that SKU's test
+        # rows by date.
+        fold_predictions: list[dict] = []
+        for sku, test_group in test_df.groupby(sku_col, sort=False):
+            sku_train = train_df[train_df[sku_col] == sku]
+            if len(sku_train) < 2:
+                # Not enough history to seed lag features — skip SKU
+                # for this fold rather than return zeros.
+                continue
+            try:
+                rows = recursive_forecast(
+                    model=fold_model,
+                    history=sku_train,
+                    feature_cols=feature_cols,
+                    horizon=horizon,
+                    sku=sku,
+                    sku_col=sku_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                )
+            except Exception as e:    # noqa: BLE001
+                logger.warning("recursive_forecast failed sku=%s fold=%d: %s", sku, fold_idx, e)
+                continue
 
-        raw_pred = fold_model.predict(X_test)
-        # Multi-step models (MIMO/Ensemble) return (N, H); take 1-step.
-        if hasattr(raw_pred, "ndim") and raw_pred.ndim > 1:
-            raw_pred = raw_pred[:, 0]
-        y_pred = np.clip(raw_pred, 0, None)
+            # Match on normalised date so timezone/precision diffs
+            # don't cause silent misses.
+            pred_by_date = {
+                pd.Timestamp(r[date_col]).normalize(): float(r["predicted_sales"])
+                for r in rows
+            }
+            for _, test_row in test_group.iterrows():
+                d = pd.Timestamp(test_row[date_col]).normalize()
+                if d in pred_by_date:
+                    fold_predictions.append({
+                        sku_col:    sku,
+                        date_col:   test_row[date_col],
+                        "actual":   float(test_row[target_col]),
+                        "predicted": pred_by_date[d],
+                        "fold":     fold_idx,
+                    })
 
-        fold_df = test_df[[sku_col, date_col]].copy()
-        fold_df["actual"] = y_test.values
-        fold_df["predicted"] = y_pred
-        fold_df["fold"] = fold_idx
+        if not fold_predictions:
+            logger.warning("Fold %d: no SKU predictions matched test rows", fold_idx)
+            continue
 
+        fold_df = pd.DataFrame(fold_predictions)
         # Attach training targets per SKU for MASE
         train_df_sku = (
-            df.loc[train_mask, [sku_col, target_col]]
+            train_df[[sku_col, target_col]]
             .groupby(sku_col)[target_col]
             .apply(np.array)
             .reset_index()

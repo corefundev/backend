@@ -197,10 +197,15 @@ def recursive_forecast(
             if c not in cur_df.columns:
                 cur_df[c] = last_row[c].iloc[0] if c in last_row.columns else 0.0
 
+        # Pass the FULL cur_df (with sku_col + carry cols), not just the
+        # feature slice — EnsembleForecaster needs the sku column to
+        # look up its per-SKU blend weights. SKUForecaster/MIMO each
+        # slice to their own self.feature_cols internally, so passing
+        # extra columns is harmless for them.
         if predict_fn is not None:
-            raw, source = predict_fn(cur_df[feature_cols])
+            raw, source = predict_fn(cur_df)
         else:
-            raw, source = model.predict(cur_df[feature_cols]), "primary"
+            raw, source = model.predict(cur_df), "primary"
         pred = float(np.clip(raw if np.ndim(raw) == 0 else raw.flat[0], 0, None))
 
         rows.append({

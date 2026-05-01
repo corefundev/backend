@@ -166,29 +166,25 @@ def run_training_pipeline(
         _progress(5, 9, "HPO пропущен")
 
     # ── 6. Walk-forward validation ────────────────────────────
-    # Always use SKUForecaster as the validator regardless of final
-    # model type. This gives a SEMANTICALLY CONSISTENT baseline —
-    # SKUForecaster predicts contemporaneously (model trained on
-    # (X_t, y_t)) so test rows align with predictions row-by-row.
-    #
-    # MIMO/Ensemble use direct multi-step forecasting where
-    # predict()[h=0] is a 1-step-AHEAD prediction (model trained on
-    # (X_t, y_{t+1})). Plugging them into walk-forward as-is creates
-    # an off-by-one-day mismatch: we'd compare tomorrow's prediction
-    # to today's actual, inflating WMAPE/MASE artificially. We saw
-    # exactly this regression after v0.8.17: ensemble walk-forward
-    # gave WMAPE 0.263 / MASE 1.27 vs SKUForecaster's 0.102 / 0.49,
-    # not because the ensemble was worse but because the comparison
-    # was misaligned.
-    #
-    # Honest ensemble validation needs proper recursive walk-forward
-    # (predict per-SKU starting from last train row and stepping
-    # `horizon` days forward through the test window). Tracked as
-    # roadmap item 2.2.2; until that lands, the SKUForecaster
-    # walk-forward is a representative architectural benchmark.
+    # walk_forward_validate now does PER-SKU recursive forecasting,
+    # so it correctly handles single-step (SKUForecaster) and multi-
+    # step (MIMO/Ensemble) models alike. Pass a factory so each fold
+    # gets a fresh instance — Ensemble's per-SKU weights would leak
+    # between folds otherwise.
     _progress(6, 9, "Walk-forward валидация")
-    val_model = SKUForecaster(config)
-    wf_result = walk_forward_validate(df, val_model, feature_cols, config)
+    objective_pre = str(config.get("model", {}).get("objective", "")).lower()
+    if objective_pre == "ensemble":
+        from src.models.ensemble import EnsembleForecaster
+        def _val_factory():
+            return EnsembleForecaster(config)
+        logger.info("  Walk-forward will use EnsembleForecaster (3 children per fold)")
+    elif config["model"].get("type") == "mimo":
+        def _val_factory():
+            return MIMOForecaster(config)
+    else:
+        def _val_factory():
+            return SKUForecaster(config)
+    wf_result = walk_forward_validate(df, _val_factory, feature_cols, config)
     agg = wf_result.aggregated
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
     storage.save_per_sku_metrics(wf_result.per_sku_metrics)
