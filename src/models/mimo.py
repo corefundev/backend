@@ -32,6 +32,13 @@ class MIMOForecaster:
     Eliminates recursive error accumulation.
     """
 
+    # Marker so walk-forward / batch-forecast know to use the
+    # direct multi-step prediction (one shot returns h=1..H) instead
+    # of recursing 1-step-at-a-time. The whole point of MIMO is to
+    # AVOID recursion's compounding errors — recursive use would
+    # defeat the architecture.
+    is_mimo = True
+
     def __init__(self, config: dict):
         self.config    = config
         self.horizon   = config["model"]["horizon"]

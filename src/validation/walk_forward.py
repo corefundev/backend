@@ -104,37 +104,58 @@ def walk_forward_validate(
             except Exception as e:    # noqa: BLE001
                 logger.warning("Fold %d blend-weight estimation failed: %s", fold_idx, e)
 
-        # Per-SKU recursive forecast through the test window. Each SKU
-        # gets `horizon` predictions; we match them to that SKU's test
-        # rows by date.
+        # Per-SKU forecast through the test window. Two paths:
+        #   • MIMO / Ensemble — DIRECT multi-step. One predict() on
+        #     the last train row returns shape (1, H) with h=1..H
+        #     predictions, each from its OWN model trained on
+        #     y_{t+h} ~ X_t. No recursion, no error compounding.
+        #     This is the whole point of using MIMO in the first
+        #     place; recursing it would throw that benefit away.
+        #   • SKUForecaster — single-step model, walk-forward must
+        #     recurse so each prediction's lag features come from
+        #     prior predictions (not test-row leakage).
+        is_direct_multistep = bool(
+            getattr(fold_model, "is_mimo", False)
+            or getattr(fold_model, "is_ensemble", False)
+        )
         fold_predictions: list[dict] = []
         for sku, test_group in test_df.groupby(sku_col, sort=False):
-            sku_train = train_df[train_df[sku_col] == sku]
+            sku_train = train_df[train_df[sku_col] == sku].sort_values(date_col)
             if len(sku_train) < 2:
-                # Not enough history to seed lag features — skip SKU
-                # for this fold rather than return zeros.
-                continue
-            try:
-                rows = recursive_forecast(
-                    model=fold_model,
-                    history=sku_train,
-                    feature_cols=feature_cols,
-                    horizon=horizon,
-                    sku=sku,
-                    sku_col=sku_col,
-                    date_col=date_col,
-                    target_col=target_col,
-                )
-            except Exception as e:    # noqa: BLE001
-                logger.warning("recursive_forecast failed sku=%s fold=%d: %s", sku, fold_idx, e)
                 continue
 
-            # Match on normalised date so timezone/precision diffs
-            # don't cause silent misses.
-            pred_by_date = {
-                pd.Timestamp(r[date_col]).normalize(): float(r["predicted_sales"])
-                for r in rows
-            }
+            try:
+                if is_direct_multistep:
+                    # Direct path: one shot, take h=1..H from row[0].
+                    last_train_row = sku_train.iloc[[-1]]
+                    raw = fold_model.predict(last_train_row)
+                    preds_h = np.clip(np.asarray(raw)[0], 0, None)
+                    last_train_date = pd.Timestamp(
+                        last_train_row[date_col].iloc[0]
+                    )
+                    pred_by_date = {}
+                    for h in range(1, len(preds_h) + 1):
+                        d = (last_train_date + pd.Timedelta(days=h)).normalize()
+                        pred_by_date[d] = float(preds_h[h - 1])
+                else:
+                    rows = recursive_forecast(
+                        model=fold_model,
+                        history=sku_train,
+                        feature_cols=feature_cols,
+                        horizon=horizon,
+                        sku=sku,
+                        sku_col=sku_col,
+                        date_col=date_col,
+                        target_col=target_col,
+                    )
+                    pred_by_date = {
+                        pd.Timestamp(r[date_col]).normalize(): float(r["predicted_sales"])
+                        for r in rows
+                    }
+            except Exception as e:    # noqa: BLE001
+                logger.warning("forecast failed sku=%s fold=%d: %s", sku, fold_idx, e)
+                continue
+
             for _, test_row in test_group.iterrows():
                 d = pd.Timestamp(test_row[date_col]).normalize()
                 if d in pred_by_date:
