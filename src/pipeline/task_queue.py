@@ -507,6 +507,24 @@ def get_job_status(job_id: str) -> dict:
     Return status of a queued job.
     Status values: queued | started | finished | failed | unknown
     """
+    from datetime import datetime, timezone
+
+    def _to_iso_utc(dt) -> str | None:
+        """
+        RQ stores enqueued_at/started_at/ended_at as naive UTC datetimes.
+        Without a TZ suffix the frontend's parseISO falls back to the
+        browser's LOCAL time, so a 21:40 UTC start gets rendered as
+        21:40 MSK (off by browser-offset hours). Force a +00:00 stamp so
+        the client converts correctly.
+        """
+        if dt is None:
+            return None
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        return str(dt)
+
     try:
         from rq.job import Job
         conn = get_redis_connection()
@@ -529,9 +547,9 @@ def get_job_status(job_id: str) -> dict:
             "status":   status_str,
             "result":   job.result if job.is_finished else None,
             "error":    str(job.exc_info) if job.is_failed else None,
-            "enqueued": str(job.enqueued_at),
-            "started":  str(job.started_at),
-            "ended":    str(job.ended_at),
+            "enqueued": _to_iso_utc(job.enqueued_at),
+            "started":  _to_iso_utc(job.started_at),
+            "ended":    _to_iso_utc(job.ended_at),
             "progress": progress,
         }
     except Exception as e:
