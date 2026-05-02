@@ -244,15 +244,43 @@ class TestEnsembleForecaster:
         preds = ens.predict(X)
         assert len(preds) == len(X)
 
-    def test_weights_sum_to_one(self):
+    def test_default_weights_sum_to_one(self):
+        # The current EnsembleForecaster blends 3 LightGBM children with
+        # different objectives (tweedie / regression_l1 / regression).
+        # Pre-blend-weights estimation, defaults are equal 1/N.
+        # `compute_blend_weights` then turns them into volume-weighted
+        # global weights, but the sum must always normalise to 1.
         ens, _ = self._fitted_ensemble()
-        assert abs(ens._weights.sum() - 1.0) < 1e-6
+        total = sum(ens.default_weights.values())
+        assert abs(total - 1.0) < 1e-6
+        assert set(ens.default_weights) == set(ens.objectives)
 
-    def test_individual_predictions(self):
+    def test_per_sku_weights_sum_to_one_after_blend(self):
+        # compute_blend_weights writes per-SKU weight dicts. Each dict
+        # must normalise to 1 so the predict() step's weighted sum is
+        # a proper convex combination of child outputs.
+        from src.features.engineering import build_features
+        df  = _sales_df(n_skus=2, n_days=80)
+        cfg = _config()
+        df  = build_features(df, cfg)
+        ens, _ = self._fitted_ensemble()
+        ens.compute_blend_weights(
+            df_full=df, sku_col="sku", date_col="date", target_col="sales",
+            lookback_days=14,
+        )
+        # At least one SKU should have learned weights (non-empty dict).
+        assert len(ens.weights_) >= 1
+        for sku, w in ens.weights_.items():
+            assert abs(sum(w.values()) - 1.0) < 1e-6, f"weights for {sku} not normalised"
+
+    def test_individual_children_accessible(self):
+        # Each child MIMOForecaster lives in models_[objective_name].
+        # The primary (tweedie) child also owns the quantile sub-models.
         ens, X = self._fitted_ensemble()
-        ind = ens.predict_individual(X)
-        assert "lgbm" in ind
-        assert "linear" in ind
+        for obj in ens.objectives:
+            assert obj in ens.models_, f"missing child {obj}"
+            child_pred = ens.models_[obj].predict(X)
+            assert child_pred.shape[0] == len(X)
 
     def test_save_load_roundtrip(self, tmp_path):
         from src.models.ensemble import EnsembleForecaster

@@ -55,12 +55,15 @@ def test_plan_limits_snapshot():
     free  = PLAN_SPECS[Plan.FREE]
     start = PLAN_SPECS[Plan.START]
     biz   = PLAN_SPECS[Plan.BUSINESS]
-    # Plan matrix v2 — SMB retail tuning
+    # Plan matrix v3 — current production tuning. Start horizon
+    # tightened to 30 days (was 90) and Business to 90 (was 365):
+    # LightGBM/MIMO accuracy degrades hard past those windows for
+    # retail. Free cooldown lowered to 12h to let beta testers iterate.
     assert free.max_skus == 30 and free.max_horizon_days == 7
-    assert free.training_cooldown_hours == 48
-    assert start.max_skus == 1500 and start.max_horizon_days == 90
+    assert free.training_cooldown_hours == 12
+    assert start.max_skus == 1500 and start.max_horizon_days == 30
     assert start.training_runs_per_month == 15
-    assert biz.max_skus is None and biz.max_horizon_days == 365
+    assert biz.max_skus is None and biz.max_horizon_days == 90
     assert biz.training_runs_per_month is None
 
 
@@ -89,14 +92,19 @@ def test_horizon_free_no_clip_when_already_within():
     assert h == 7 and clipped is False
 
 
-def test_horizon_start_clips_to_90():
+def test_horizon_start_clips_to_30():
     h, clipped = clip_horizon_to_plan(_rec(plan="start"), 365)
+    assert h == 30 and clipped is True
+
+
+def test_horizon_business_clips_to_90():
+    h, clipped = clip_horizon_to_plan(_rec(plan="business"), 365)
     assert h == 90 and clipped is True
 
 
-def test_horizon_business_allows_full_year():
-    h, clipped = clip_horizon_to_plan(_rec(plan="business"), 365)
-    assert h == 365 and clipped is False
+def test_horizon_business_no_clip_when_within():
+    h, clipped = clip_horizon_to_plan(_rec(plan="business"), 60)
+    assert h == 60 and clipped is False
 
 
 # ── SKU cap ──────────────────────────────────────────────────────────────────

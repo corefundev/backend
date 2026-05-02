@@ -96,12 +96,16 @@ class TestClientStorage:
         loaded = storage.load_predictions("2024-01-01")
         assert len(loaded) == 2
 
-    def test_s3_backend_requires_bucket_env(self):
-        """S3StorageBackend raises if S3_BUCKET not set."""
-        import os
-        os.environ.pop("S3_BUCKET", None)
+    def test_s3_backend_requires_bucket_env(self, monkeypatch):
+        """S3StorageBackend raises if neither bucket arg nor S3_BUCKET env is set.
+
+        Uses monkeypatch instead of os.environ.pop so the deletion is
+        scoped to this test — the old version leaked into sibling tests
+        and made them flake when run in different orders.
+        """
+        monkeypatch.delenv("S3_BUCKET", raising=False)
         from src.storage.backend import S3StorageBackend
-        with pytest.raises((KeyError, ImportError)):
+        with pytest.raises(RuntimeError, match="bucket"):
             S3StorageBackend()
 
     def test_get_storage_returns_local_by_default(self, tmp_path):
