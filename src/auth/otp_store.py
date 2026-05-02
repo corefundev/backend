@@ -105,20 +105,6 @@ class OtpStore:
 # ── Postgres implementation ──────────────────────────────────────────────
 
 class PostgresOtpStore(OtpStore):
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_otp_codes (
-        id          BIGSERIAL PRIMARY KEY,
-        email       TEXT NOT NULL,
-        purpose     TEXT NOT NULL,
-        code_hash   TEXT NOT NULL,
-        attempts    INT  NOT NULL DEFAULT 0,
-        expires_at  TIMESTAMPTZ NOT NULL,
-        used_at     TIMESTAMPTZ,
-        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_otp_email_purpose
-        ON sku_otp_codes (LOWER(email), purpose, created_at DESC);
-    """
 
     def __init__(self, database_url: str):
         try:
@@ -129,11 +115,7 @@ class PostgresOtpStore(OtpStore):
         except ImportError as e:
             raise ImportError("psycopg2-binary required") from e
         self._url = database_url
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self.DDL)
-            conn.commit()
-        logger.info("sku_otp_codes table ready")
+        # Schema lives in migrations/007_sku_otp_codes.sql.
 
     def _conn(self):
         return self._psycopg2.connect(self._url)

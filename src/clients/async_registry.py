@@ -65,28 +65,14 @@ class AsyncClientRegistry:
     All methods are coroutines — use with await.
     """
 
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_clients (
-        client_id        TEXT PRIMARY KEY,
-        config           JSONB DEFAULT '{}',
-        storage_path     TEXT DEFAULT '',
-        created_at       TEXT,
-        last_trained_at  TEXT,
-        last_wmape       FLOAT,
-        last_mase        FLOAT,
-        status           TEXT DEFAULT 'registered',
-        model_version    INT  DEFAULT 0,
-        horizon          INT  DEFAULT 14,
-        notes            TEXT
-    );
-    """
-
     def __init__(self, pool):
         self._pool = pool
 
     async def ensure_table(self) -> None:
-        async with self._pool.acquire() as conn:
-            await conn.execute(self.DDL)
+        # Schema lives in migrations/005_sku_clients.sql — applied by
+        # the `migrate` compose service. This method is a deliberate
+        # no-op kept for ABI compatibility with the lazy-init caller.
+        return
 
     async def register(self, record) -> None:
         from src.clients.registry import ClientRecord

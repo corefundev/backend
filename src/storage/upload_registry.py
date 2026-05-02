@@ -141,28 +141,6 @@ class UploadRegistry:
 # ── Postgres implementation ───────────────────────────────────────────────────
 
 class PostgresUploadRegistry(UploadRegistry):
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_uploads (
-        upload_id       TEXT PRIMARY KEY,
-        client_id       TEXT NOT NULL,
-        filename        TEXT NOT NULL,
-        size_bytes      BIGINT NOT NULL,
-        sha256          TEXT NOT NULL,
-        status          TEXT NOT NULL,
-        scan_result     TEXT,
-        error_message   TEXT,
-        processed_key   TEXT,
-        row_count       BIGINT,
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    -- Backfill-safe columns for features added after v1.0.
-    ALTER TABLE sku_uploads ADD COLUMN IF NOT EXISTS sku_count BIGINT;
-    CREATE INDEX IF NOT EXISTS idx_sku_uploads_client
-        ON sku_uploads (client_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_sku_uploads_status
-        ON sku_uploads (status);
-    """
 
     def __init__(self, database_url: str):
         try:
@@ -174,11 +152,7 @@ class PostgresUploadRegistry(UploadRegistry):
             raise ImportError("psycopg2-binary required. pip install psycopg2-binary") from e
 
         self._url = database_url
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self.DDL)
-            conn.commit()
-        logger.info("sku_uploads table ready")
+        # Schema lives in migrations/006_sku_uploads.sql.
 
     def _conn(self):
         return self._psycopg2.connect(self._url)

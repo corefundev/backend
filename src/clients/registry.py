@@ -111,47 +111,6 @@ class PostgresClientRegistry(ClientRegistry):
     Table: sku_clients (auto-created on first use).
     """
 
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_clients (
-        client_id        TEXT PRIMARY KEY,
-        config           JSONB NOT NULL,
-        storage_path     TEXT NOT NULL,
-        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        last_trained_at  TIMESTAMPTZ,
-        last_mlflow_run_id TEXT,
-        last_wmape       FLOAT,
-        last_mase        FLOAT,
-        status           TEXT NOT NULL DEFAULT 'registered',
-        model_version    INT  NOT NULL DEFAULT 0,
-        horizon          INT  NOT NULL DEFAULT 14,
-        notes            TEXT
-    );
-    -- Plan + quota columns are added with ALTER ... IF NOT EXISTS so
-    -- deployments upgrading from a previous schema pick them up without
-    -- a separate migration step.
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS plan                       TEXT NOT NULL DEFAULT 'free';
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS training_runs_this_month   INT  NOT NULL DEFAULT 0;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS training_runs_window_start TIMESTAMPTZ;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS trained_sku_count          INT;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS api_key_hash               TEXT;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS email                      TEXT;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS email_canonical            TEXT;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS email_verified_at          TIMESTAMPTZ;
-    -- UNIQUE on canonical form (anti-multi-account). Partial index
-    -- because pre-existing rows have NULL.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sku_clients_email_canonical
-        ON sku_clients (email_canonical) WHERE email_canonical IS NOT NULL;
-    -- Lookup index on the display email for the email-login flow.
-    CREATE INDEX IF NOT EXISTS idx_sku_clients_email_lookup
-        ON sku_clients (LOWER(email)) WHERE email IS NOT NULL;
-    -- OAuth columns + UNIQUE on (provider, subject)
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS oauth_provider TEXT;
-    ALTER TABLE sku_clients ADD COLUMN IF NOT EXISTS oauth_subject  TEXT;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sku_clients_oauth
-        ON sku_clients (oauth_provider, oauth_subject)
-        WHERE oauth_provider IS NOT NULL AND oauth_subject IS NOT NULL;
-    """
-
     def __init__(self, database_url: str):
         try:
             import psycopg2
@@ -162,17 +121,12 @@ class PostgresClientRegistry(ClientRegistry):
             raise ImportError("psycopg2-binary required. pip install psycopg2-binary")
 
         self._url = database_url
-        self._init_db()
+        # Schema lives in migrations/005_sku_clients.sql — applied by
+        # the `migrate` compose service.
+        logger.info("PostgreSQL client registry ready")
 
     def _conn(self):
         return self._psycopg2.connect(self._url)
-
-    def _init_db(self) -> None:
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self.DDL)
-            conn.commit()
-        logger.info("PostgreSQL client registry ready")
 
     def register(self, record: ClientRecord) -> None:
         """
