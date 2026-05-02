@@ -226,6 +226,20 @@ def _training_job(
     except Exception as e:    # noqa: BLE001
         logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
 
+    # ── Persist last-90-days anomalies for the forecast viewer ───
+    # The detector ran during training to set sample weights; we
+    # rerun it on the same data here so the (sku, date) flags can
+    # be persisted into sku_anomalies. Cheap (~seconds for 60×3y).
+    try:
+        _detect_and_store_anomalies(
+            client_id=client_id,
+            data_path=effective_data_path,
+            config_path=config_path,
+            run_id=run_id or "",
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("post-training anomaly detection failed: %s", e, exc_info=True)
+
     # Tidy up the temp merged parquet now that both training and
     # post-training forecasts have read it.
     if merged_cleanup:
@@ -382,6 +396,74 @@ def _generate_and_store_forecasts(
     logger.info(
         "post-training forecasts: client=%s sku=%d horizon=%d rows=%d",
         client_id, forecasts["sku"].nunique(), horizon, len(rows),
+    )
+
+
+def _detect_and_store_anomalies(
+    client_id:   str,
+    data_path:   str,
+    config_path: str,
+    run_id:      str,
+    lookback_days: int = 90,
+) -> None:
+    """
+    Run SalesAnomalyDetector on the just-trained dataset and persist
+    flagged (sku, date) rows from the last `lookback_days` into
+    sku_anomalies. The forecast viewer reads from there to surface a
+    "recent anomalies" panel — alongside the forecast for the same
+    SKU it shows which past days were considered outliers, so the
+    user can sanity-check whether the model learned through noise.
+    """
+    from src.clients.registry import get_registry
+    from src.clients.config_manager import get_config_manager
+    from src.data.anomaly_detection import SalesAnomalyDetector
+    from src.data.loader import load_data, validate_data
+    from src.features.engineering import build_features
+    from src.storage.anomalies import get_anomalies_registry
+    import pandas as _pd
+
+    registry = get_registry()
+    config = get_config_manager(config_path).get_effective(client_id, registry)
+    sku_col    = config["data"]["sku_col"]
+    date_col   = config["data"]["date_col"]
+    target_col = config["data"]["target_col"]
+
+    df = load_data(data_path, config)
+    df = validate_data(df, config)
+    # Build features so IsolationForest has lag/rolling cols available.
+    df = build_features(df, config)
+
+    detector = SalesAnomalyDetector()
+    df_flagged, _ = detector.fit_detect(
+        df, sku_col=sku_col, target_col=target_col, date_col=date_col,
+    )
+
+    anomalies = df_flagged[df_flagged["is_anomaly"] == True]   # noqa: E712
+    if anomalies.empty:
+        get_anomalies_registry().replace_for_client(
+            client_id=client_id, run_id=run_id, rows=[],
+        )
+        logger.info("anomalies: none flagged for client=%s", client_id)
+        return
+
+    cutoff = _pd.Timestamp(df[date_col].max()) - _pd.Timedelta(days=lookback_days)
+    anomalies = anomalies[anomalies[date_col] >= cutoff]
+
+    rows: list[tuple[str, str, float]] = []
+    for _, r in anomalies.iterrows():
+        d = r[date_col]
+        if hasattr(d, "strftime"):
+            adate = d.strftime("%Y-%m-%d")
+        else:
+            adate = str(_pd.Timestamp(d).date())
+        rows.append((str(r[sku_col]), adate, float(r[target_col])))
+
+    get_anomalies_registry().replace_for_client(
+        client_id=client_id, run_id=run_id, rows=rows,
+    )
+    logger.info(
+        "anomalies: client=%s last_%dd rows=%d",
+        client_id, lookback_days, len(rows),
     )
 
 

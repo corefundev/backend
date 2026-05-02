@@ -176,6 +176,11 @@ async def lifespan(app: FastAPI):
         get_forecasts_registry()
     except Exception as e:
         logger.warning("forecasts registry not initialised: %s", e)
+    try:
+        from src.storage.anomalies import get_anomalies_registry
+        get_anomalies_registry()
+    except Exception as e:
+        logger.warning("anomalies registry not initialised: %s", e)
 
     # ── Telegram long-polling background task ─────────────────
     # Telegram's resolver intermittently can't see api.testcore.ru
@@ -1729,6 +1734,27 @@ async def list_forecasts(
         "horizon_days":  len(all_dates),
         "count":         len(skus_payload),
         "skus":          skus_payload,
+    }
+
+
+@app.get("/clients/{client_id}/anomalies", tags=["inference"])
+async def list_anomalies(
+    client_id: str,
+    sku: Optional[str] = None,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Return historical anomalies (per-SKU IQR + global IsolationForest)
+    flagged during the latest training run. Capped to the last 90 days
+    of dataset history — older anomalies aren't actionable.
+    """
+    require_client_access(client_id, auth)
+    from src.storage.anomalies import get_anomalies_registry
+    rows = get_anomalies_registry().list_for_client(client_id, sku=sku)
+    return {
+        "client_id": client_id,
+        "count":     len(rows),
+        "anomalies": rows,
     }
 
 
