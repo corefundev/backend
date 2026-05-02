@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Generator, Optional
+from typing import Generator
 
 logger = logging.getLogger(__name__)
 

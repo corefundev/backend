@@ -53,7 +53,7 @@ class RateLimiter:
                 self._redis.ping()
                 logger.info("RateLimiter: using Redis")
             except Exception as e:
-                logger.debug(f"RateLimiter: Redis unavailable, using in-memory")
+                logger.debug(f"RateLimiter: Redis unavailable ({e}), using in-memory")
 
     def check(
         self,

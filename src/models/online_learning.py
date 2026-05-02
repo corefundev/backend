@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import logging
 import pickle
-from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -201,7 +199,6 @@ def run_incremental_update(
 
     # Use only last n_new_days per SKU
     sku_col  = config["data"]["sku_col"]
-    date_col = config["data"]["date_col"]
     df_new   = df.groupby(sku_col).tail(n_new_days)
 
     X_new = df_new[fc]

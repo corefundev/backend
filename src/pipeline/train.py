@@ -23,7 +23,7 @@ from src.models.mimo import MIMOForecaster
 from src.models.fallback import SeasonalNaiveModel
 from src.models.cold_start import ColdStartRouter, ClusterBasedForecaster
 from src.models.explainer import SKUExplainer
-from src.storage.backend import ClientStorage, get_storage
+from src.storage.backend import ClientStorage
 from src.validation.walk_forward import walk_forward_validate
 
 logging.basicConfig(
@@ -149,9 +149,13 @@ def run_training_pipeline(
     X = df[feature_cols]
     y = df[target_col]
 
-    # Align sample weights to feature-engineered rows
+    # Align sample weights to feature-engineered rows. The downstream
+    # ensemble/MIMO fit doesn't currently accept sample_weight; this
+    # block is a no-op until that wire-up lands. Keep the alignment
+    # so once we do plumb sample_weight through, the dataframe index
+    # math is already verified.
     if anom_cfg.get("enabled", True) and "is_anomaly" in df.columns:
-        sample_weights = sample_weights_full[df.index] if hasattr(sample_weights_full, '__getitem__') else None
+        _ = sample_weights_full[df.index] if hasattr(sample_weights_full, '__getitem__') else None
 
     # ── 5. HPO (optional) ─────────────────────────────────────
     hpo_cfg = config.get("hpo", {})
@@ -229,24 +233,31 @@ def run_training_pipeline(
         final_model.fit(X, y)
 
     # ── 8. Cold-start model ───────────────────────────────────
-    cs_cfg  = config.get("cold_start", {})
-    router  = ColdStartRouter(min_history_days=cs_cfg.get("min_history_days", 28))
-    cluster = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
+    # ColdStartRouter is built but not yet wired into the inference path
+    # — kept here to exercise the import + ensure the cluster fits.
+    # Underscored to mark "intentional unused" until /predict starts
+    # consulting it for unseen SKUs.
+    cs_cfg   = config.get("cold_start", {})
+    _router  = ColdStartRouter(min_history_days=cs_cfg.get("min_history_days", 28))
+    cluster  = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
     cluster.fit(df, sku_col, target_col)
 
     # ── 9. SHAP explainer ─────────────────────────────────────
+    # Same story — explainer is constructed for forward-compat with the
+    # /explain endpoint that's on the roadmap; the object isn't persisted
+    # yet. Underscored for the same reason as _router above.
     if is_ensemble:
         # Use the primary (first) child's first MIMO model for SHAP.
         primary = final_model.models_[final_model.primary_objective]
         lgbm_inner = primary.models_[0] if primary.models_ else None
-        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
     elif model_type == "lgbm":
         lgbm_inner = getattr(final_model, "model", None)
-        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
     else:
         # Use first MIMO model for SHAP
         lgbm_inner = final_model.models_[0] if final_model.models_ else None
-        explainer  = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
 
     # ── Save fallback ─────────────────────────────────────────
     fallback = SeasonalNaiveModel(seasonality=7)

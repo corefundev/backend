@@ -21,7 +21,7 @@ from __future__ import annotations
 # Vault загружает секреты в os.environ → все последующие
 # импорты видят переменные как если бы они были в .env.
 # ══════════════════════════════════════════════════════════════
-import os as _os
+import os
 
 def _early_bootstrap() -> None:
     """Bootstrap secrets before any other import reads os.environ."""
@@ -57,7 +57,7 @@ from src.auth.jwt_auth import (
     AuthContext, create_access_token, get_current_client, require_client_access,
 )
 from src.clients.registry import ClientRecord, get_registry
-from src.pipeline.inference_utils import get_config as _get_cfg, invalidate_config_cache
+from src.pipeline.inference_utils import get_config as _get_cfg
 from src.features.engineering import build_features, get_feature_columns
 from src.models.fallback import ForecastingService
 from src.pipeline.task_queue import enqueue_training, get_job_status
@@ -1003,8 +1003,7 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     """
     from src.auth.oauth.registry import get_provider
     from src.auth.oauth.state import verify_state, COOKIE_NAME, StateError
-    from src.auth.oauth.google import OAuthError, OAuthIdentity
-    from src.auth.oauth.yandex import YandexOAuth
+    from src.auth.oauth.google import OAuthError
     from src.auth.email_normalize import canonical_email
     from src.auth.api_keys import generate_api_key, hash_api_key
     from src.auth.signup_rate_limit import (

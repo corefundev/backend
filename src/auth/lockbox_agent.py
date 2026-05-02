@@ -49,7 +49,6 @@ import os
 import time
 import urllib.request
 import urllib.error
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

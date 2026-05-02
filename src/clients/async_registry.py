@@ -75,7 +75,6 @@ class AsyncClientRegistry:
         return
 
     async def register(self, record) -> None:
-        from src.clients.registry import ClientRecord
         d = asdict(record) if hasattr(record, '__dataclass_fields__') else vars(record)
         async with self._pool.acquire() as conn:
             await conn.execute("""

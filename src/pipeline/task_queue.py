@@ -42,7 +42,6 @@ def get_redis_connection():
     """Return a Redis connection. Raises ImportError if redis not installed."""
     try:
         from redis import Redis
-        from redis.exceptions import ConnectionError as RedisConnectionError
         conn = Redis.from_url(REDIS_URL, decode_responses=False, socket_connect_timeout=3)
         conn.ping()  # test connection
         return conn
@@ -476,7 +475,7 @@ def _batch_inference_job(
     """Batch inference job executed inside an rq worker."""
     from datetime import date
     from src.pipeline.batch_inference import run_batch_inference
-    from src.storage.backend import get_storage, ClientStorage
+    from src.storage.backend import ClientStorage
 
     storage   = ClientStorage(client_id)
     out_date  = output_date or date.today().isoformat()

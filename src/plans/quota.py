@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.clients.registry import ClientRecord, ClientRegistry
-from src.plans.plans import Plan, PLAN_SPECS, PlanSpec, get_plan_spec
+from src.plans.plans import get_plan_spec
 
 
 # ── Parsed timestamps (tolerant to registry backend variance) ─────────────────

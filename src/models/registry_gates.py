@@ -152,9 +152,8 @@ class ModelRegistryGate:
     def get_current_stage(self, client_id: str, run_id: str) -> ModelStage:
         """Return current stage of a run."""
         try:
-            c          = self._client()
-            model_name = f"sku-forecasting-{client_id}"
-            versions   = c.search_model_versions(f"run_id='{run_id}'")
+            c        = self._client()
+            versions = c.search_model_versions(f"run_id='{run_id}'")
             if versions:
                 stage = versions[0].current_stage
                 return ModelStage(stage)

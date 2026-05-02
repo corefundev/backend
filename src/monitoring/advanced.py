@@ -238,7 +238,6 @@ def evaluate_retraining_need(
       - Business bias > 30%                  → scheduled
       - Revenue impact > 15%                 → scheduled
     """
-    cfg     = (config or {}).get("monitoring", {})
     reasons = []
     urgency = "none"
     drift_score     = 0.0

@@ -20,14 +20,11 @@ Proto schema: src/api/proto/forecasting.proto
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
 import time
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Iterator
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)

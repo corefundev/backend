@@ -116,7 +116,12 @@ def _apply_one(conn, path: Path) -> None:
 
 
 def main() -> int:
-    bootstrap_secrets()
+    # Skip Lockbox when DATABASE_URL is already set (CI runner injects
+    # it directly, no SA key on the runner). Vault bootstrap is only
+    # needed when running inside the prod compose where envs come from
+    # Yandex Lockbox.
+    if not os.environ.get("DATABASE_URL"):
+        bootstrap_secrets()
 
     conn = _connect()
     try:

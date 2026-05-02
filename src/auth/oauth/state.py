@@ -42,7 +42,6 @@ import json
 import os
 import secrets
 import time
-from typing import Optional
 
 DEFAULT_TTL_SEC = 600
 

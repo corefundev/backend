@@ -138,7 +138,6 @@ class ForecastingService:
     @retry(max_attempts=3, backoff_sec=1.0)
     def load_primary(self, storage) -> None:
         """Load primary model from storage with retry."""
-        from src.models.forecaster import SKUForecaster
         state = storage.load_model()
         self.primary = state
         logger.info("Primary model loaded successfully")

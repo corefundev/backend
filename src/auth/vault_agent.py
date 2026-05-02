@@ -225,7 +225,7 @@ def bootstrap_secrets() -> bool:
     """
     # ── Источник 0: Yandex Lockbox ────────────────────────────
     try:
-        from src.auth.lockbox_agent import load_from_lockbox, LockboxError
+        from src.auth.lockbox_agent import load_from_lockbox
         if load_from_lockbox():
             logger.info("Bootstrap: secrets from Yandex Lockbox")
             return True
