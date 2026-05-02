@@ -38,7 +38,7 @@ def validate_with_great_expectations(
     If raise_on_failure=True, raises DataValidationError on any critical failure.
     """
     try:
-        import great_expectations as ge
+        import great_expectations as ge        # noqa: F401  (availability probe)
     except ImportError:
         logger.warning(
             "great_expectations not installed. "

@@ -21,7 +21,7 @@ from src.features.engineering import build_features, get_feature_columns
 from src.models.forecaster import SKUForecaster, log_to_mlflow
 from src.models.mimo import MIMOForecaster
 from src.models.fallback import SeasonalNaiveModel
-from src.models.cold_start import ColdStartRouter, ClusterBasedForecaster
+from src.models.cold_start import ClusterBasedForecaster
 from src.models.explainer import SKUExplainer
 from src.storage.backend import ClientStorage
 from src.validation.walk_forward import walk_forward_validate
@@ -123,7 +123,6 @@ def run_training_pipeline(
 
     # ── 3. Anomaly detection ──────────────────────────────────
     _progress(3, 9, "Поиск аномалий")
-    sample_weights = None
     anom_cfg = config.get("anomaly_detection", {})
     if anom_cfg.get("enabled", True):
         detector = SalesAnomalyDetector(
@@ -205,8 +204,8 @@ def run_training_pipeline(
     if is_ensemble:
         # 3 MIMO children with different objectives, blended per SKU.
         # Adds ~3× training time and memory for a meaningful per-SKU
-        # accuracy gain on mixed catalogs.
-        from src.models.ensemble import EnsembleForecaster
+        # accuracy gain on mixed catalogs. EnsembleForecaster was
+        # already imported in step 6 for the validator factory.
         final_model = EnsembleForecaster(config)
         final_model.fit(X, y, groups=df[sku_col])
         final_model.fit_quantiles(X, y, groups=df[sku_col])
@@ -232,32 +231,26 @@ def run_training_pipeline(
         final_model = SKUForecaster(config)
         final_model.fit(X, y)
 
-    # ── 8. Cold-start model ───────────────────────────────────
-    # ColdStartRouter is built but not yet wired into the inference path
-    # — kept here to exercise the import + ensure the cluster fits.
-    # Underscored to mark "intentional unused" until /predict starts
-    # consulting it for unseen SKUs.
-    cs_cfg   = config.get("cold_start", {})
-    _router  = ColdStartRouter(min_history_days=cs_cfg.get("min_history_days", 28))
-    cluster  = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
+    # ── 8. Cold-start cluster fit ─────────────────────────────
+    # Only the cluster forecaster is fit here; the cold-start router
+    # itself isn't wired into /predict yet (tracked separately under
+    # the cold-start integration roadmap), so we don't construct it
+    # at training time.
+    cs_cfg  = config.get("cold_start", {})
+    cluster = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
     cluster.fit(df, sku_col, target_col)
 
-    # ── 9. SHAP explainer ─────────────────────────────────────
-    # Same story — explainer is constructed for forward-compat with the
-    # /explain endpoint that's on the roadmap; the object isn't persisted
-    # yet. Underscored for the same reason as _router above.
+    # SHAP explainer is constructed here only for forward-compat with
+    # the /explain endpoint on the roadmap. Drop it once that endpoint
+    # actually uses it; until then the import smoke-tests the wiring.
     if is_ensemble:
-        # Use the primary (first) child's first MIMO model for SHAP.
         primary = final_model.models_[final_model.primary_objective]
         lgbm_inner = primary.models_[0] if primary.models_ else None
-        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
     elif model_type == "lgbm":
         lgbm_inner = getattr(final_model, "model", None)
-        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
     else:
-        # Use first MIMO model for SHAP
         lgbm_inner = final_model.models_[0] if final_model.models_ else None
-        _explainer = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None
+    _ = SKUExplainer(lgbm_inner, feature_cols) if lgbm_inner else None    # noqa: F841
 
     # ── Save fallback ─────────────────────────────────────────
     fallback = SeasonalNaiveModel(seasonality=7)

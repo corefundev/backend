@@ -127,7 +127,7 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Apply migrations
-        run: python scripts/migrate.py
+        run: PYTHONPATH=. python scripts/migrate.py
       - run: |
           python -m pytest tests/integration/ \
             -v --tb=short \
