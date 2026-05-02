@@ -228,7 +228,8 @@ jobs:
           tags: sku-forecasting-api:scan
           cache-from: type=gha
       - name: Run Trivy on API image
-        uses: aquasecurity/trivy-action@0.24.0
+        # 0.24.0 was retracted upstream; track v0.x latest minor.
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: sku-forecasting-api:scan
           format: sarif
