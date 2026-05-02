@@ -45,6 +45,11 @@ class PostgresForecastsRegistry:
     );
     CREATE INDEX IF NOT EXISTS idx_sku_forecasts_client_date
         ON sku_forecasts (client_id, forecast_date);
+    -- P10/P90 added in v0.8.26 for the confidence ribbon on the
+    -- forecast chart. Idempotent so existing tables are migrated
+    -- transparently on next API boot.
+    ALTER TABLE sku_forecasts ADD COLUMN IF NOT EXISTS p10 DOUBLE PRECISION;
+    ALTER TABLE sku_forecasts ADD COLUMN IF NOT EXISTS p90 DOUBLE PRECISION;
     """
 
     def __init__(self, database_url: str):
@@ -69,7 +74,10 @@ class PostgresForecastsRegistry:
         self,
         client_id: str,
         run_id:    str,
-        rows:      list[tuple[str, str, float]],   # (sku, forecast_date, value)
+        rows:      list[tuple[str, str, float, Optional[float], Optional[float]]],
+        # Tuple shape: (sku, forecast_date, value, p10, p90).
+        # p10/p90 may be None when the model has no quantile sub-models
+        # (e.g. fallback SeasonalNaiveModel) — the ribbon hides itself.
     ) -> int:
         """
         Atomically replace this client's forecasts with the given rows.
@@ -93,11 +101,16 @@ class PostgresForecastsRegistry:
                 self._extras.execute_values(
                     cur,
                     "INSERT INTO sku_forecasts "
-                    "(client_id, sku, forecast_date, value, run_id, generated_at) "
+                    "(client_id, sku, forecast_date, value, p10, p90, run_id, generated_at) "
                     "VALUES %s",
                     [
-                        (client_id, sku, fdate, float(v), run_id, ts)
-                        for (sku, fdate, v) in rows
+                        (
+                            client_id, sku, fdate, float(v),
+                            None if p10 is None else float(p10),
+                            None if p90 is None else float(p90),
+                            run_id, ts,
+                        )
+                        for (sku, fdate, v, p10, p90) in rows
                     ],
                 )
                 inserted = cur.rowcount
@@ -113,7 +126,10 @@ class PostgresForecastsRegistry:
         Return rows for a client, optionally filtered by SKU. Sorted by
         (sku, forecast_date) so the caller can group easily.
         """
-        sql = "SELECT sku, forecast_date, value, run_id, generated_at FROM sku_forecasts WHERE client_id = %s"
+        sql = (
+            "SELECT sku, forecast_date, value, p10, p90, run_id, generated_at "
+            "FROM sku_forecasts WHERE client_id = %s"
+        )
         params: list = [client_id]
         if sku:
             sql += " AND sku = %s"
@@ -129,6 +145,8 @@ class PostgresForecastsRegistry:
                 "sku":           r["sku"],
                 "forecast_date": r["forecast_date"].isoformat(),
                 "value":         float(r["value"]),
+                "p10":           None if r["p10"] is None else float(r["p10"]),
+                "p90":           None if r["p90"] is None else float(r["p90"]),
                 "run_id":        r["run_id"],
                 "generated_at":  r["generated_at"].isoformat(),
             })

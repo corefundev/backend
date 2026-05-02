@@ -208,10 +208,48 @@ def recursive_forecast(
             raw, source = model.predict(cur_df), "primary"
         pred = float(np.clip(raw if np.ndim(raw) == 0 else raw.flat[0], 0, None))
 
+        # Quantile bands (p10/p90) for the confidence ribbon on the
+        # forecast chart. Only the primary child of the ensemble carries
+        # quantile sub-models, so this delegates through the same path
+        # as predict_quantiles. Recursive caveat: at step h>1 we feed
+        # the median prediction back as lag_1, so the band reflects
+        # uncertainty CONDITIONAL on the prior median — strictly less
+        # honest than a probabilistic recursion (e.g., particle filter
+        # over the lag distribution) but enough to communicate "this
+        # SKU is jumpy" vs "this SKU is steady".
+        p10_val: float | None = None
+        p90_val: float | None = None
+        try:
+            if hasattr(model, "predict_quantiles"):
+                q = model.predict_quantiles(cur_df)
+                # MIMO returns shape (N, H); recursive uses h=1 column.
+                # SKUForecaster (single-step) returns shape (N,).
+                p10_arr = q.get("p10")
+                p90_arr = q.get("p90")
+                if p10_arr is not None:
+                    val = p10_arr if np.ndim(p10_arr) == 0 else (
+                        p10_arr.flat[0] if np.ndim(p10_arr) == 1 else p10_arr[0, 0]
+                    )
+                    p10_val = float(np.clip(val, 0, None))
+                if p90_arr is not None:
+                    val = p90_arr if np.ndim(p90_arr) == 0 else (
+                        p90_arr.flat[0] if np.ndim(p90_arr) == 1 else p90_arr[0, 0]
+                    )
+                    p90_val = float(np.clip(val, 0, None))
+                # Sanity: enforce p10 ≤ pred ≤ p90 so the ribbon never
+                # collapses to a backward range when LightGBM quantile
+                # models cross over at low-volume rows.
+                if p10_val is not None and p90_val is not None and p10_val > p90_val:
+                    p10_val, p90_val = p90_val, p10_val
+        except Exception as e:
+            logger.debug("quantile predict failed at step %d: %s", step, e)
+
         rows.append({
             sku_col:           sku,
             date_col:          forecast_date,
             "predicted_sales": pred,
+            "p10":             p10_val,
+            "p90":             p90_val,
             "step":            step,
             "source":          source,
         })

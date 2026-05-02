@@ -359,15 +359,22 @@ def _generate_and_store_forecasts(
         return
 
     # Normalise columns: forecast_all_skus returns sku/date/predicted_sales
-    rows: list[tuple[str, str, float]] = []
+    # plus p10/p90 (added in v0.8.26 for the confidence ribbon). Models
+    # without quantile sub-models leave those columns as NaN/missing —
+    # we surface that as None so the frontend can hide the ribbon.
+    rows: list[tuple[str, str, float, "float | None", "float | None"]] = []
     import pandas as _pd
+    has_p10 = "p10" in forecasts.columns
+    has_p90 = "p90" in forecasts.columns
     for _, r in forecasts.iterrows():
         d = r["date"]
         if hasattr(d, "strftime"):
             fdate = d.strftime("%Y-%m-%d")
         else:
             fdate = str(_pd.Timestamp(d).date())
-        rows.append((str(r["sku"]), fdate, float(r["predicted_sales"])))
+        p10 = float(r["p10"]) if has_p10 and _pd.notna(r["p10"]) else None
+        p90 = float(r["p90"]) if has_p90 and _pd.notna(r["p90"]) else None
+        rows.append((str(r["sku"]), fdate, float(r["predicted_sales"]), p10, p90))
 
     get_forecasts_registry().replace_for_client(
         client_id=client_id, run_id=run_id, rows=rows,
