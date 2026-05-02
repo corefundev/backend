@@ -9,13 +9,16 @@ data:
   min_rows: 30
 
 features:
-  # Daily lags up to 90 days — model sees yesterday/last week/last
-  # month/quarter. Adds ~10-15 features but lets LightGBM pick the
-  # signal from any horizon.
-  lags: [1, 2, 3, 7, 14, 21, 28, 60, 90]
+  # Daily lags. Includes long-term yearly/half-yearly references
+  # (180/365) — critical for direct multi-step forecasts that need
+  # to see "what happened a year ago this day" to learn seasonal
+  # cycles. Lags wider than the dataset's history get auto-dropped
+  # by feature engineering, so this list stays safe for short series.
+  lags: [1, 2, 3, 7, 14, 21, 28, 60, 90, 180, 365]
   # Rolling stats over the same scale of windows. Each builds 4
-  # features (mean/std/max/min) so 4 windows = 16 features.
-  rolling_windows: [7, 14, 28, 60, 90]
+  # features (mean/std/max/min). 180-day window captures the
+  # half-yearly trend that helps with cross-season generalisation.
+  rolling_windows: [7, 14, 28, 60, 90, 180]
   calendar: true
   price: true
   promo: true

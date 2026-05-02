@@ -24,11 +24,37 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     df = df.copy()
     df = df.sort_values([sku_col, date_col]).reset_index(drop=True)
 
+    # Auto-drop lags / rolling windows that exceed available history.
+    # Each SKU needs the lag's worth of past rows or the lag column is
+    # all-NaN for that SKU and the dropna() at the end wipes the SKU out.
+    # The shortest-history SKU is the binding constraint. Keep a 30-day
+    # safety margin so the model still has SOMETHING to fit on after
+    # warm-up rows are removed.
+    min_history = int(df.groupby(sku_col).size().min())
+    safety = 30
+    raw_lags = list(cfg_f["lags"])
+    eff_lags = [l for l in raw_lags if l < min_history - safety]
+    skipped_lags = sorted(set(raw_lags) - set(eff_lags))
+    if skipped_lags:
+        logger.info(
+            f"Skipping lags {skipped_lags} — shortest-SKU history {min_history}d "
+            f"can't support them safely"
+        )
+    raw_rw = list(cfg_f["rolling_windows"])
+    eff_rw = [w for w in raw_rw if w < min_history - safety]
+    skipped_rw = sorted(set(raw_rw) - set(eff_rw))
+    if skipped_rw:
+        logger.info(f"Skipping rolling windows {skipped_rw} — history too short")
+    if not eff_lags:
+        # Floor to lag_1 so the model still has *some* recency signal.
+        eff_lags = [1]
+        logger.warning("All configured lags exceed history; falling back to [1]")
+
     # ── Per-SKU time-series features ─────────────────────────
     parts = []
     for _, group in df.groupby(sku_col, sort=False):
-        group = _build_lag_features(group, target_col, cfg_f["lags"])
-        group = _build_rolling_features(group, target_col, cfg_f["rolling_windows"])
+        group = _build_lag_features(group, target_col, eff_lags)
+        group = _build_rolling_features(group, target_col, eff_rw)
         group = _build_calendar_features(group, date_col)
         if cfg_f.get("price")  and "price"  in group.columns:
             group = _build_price_features(group)
@@ -62,7 +88,7 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     df["sku_encoded"] = pd.factorize(df[sku_col])[0]
 
     # ── Drop warm-up rows ─────────────────────────────────────
-    max_lag = max(cfg_f["lags"])
+    max_lag = max(eff_lags)
     df = df.dropna(subset=[f"lag_{max_lag}"]).reset_index(drop=True)
 
     logger.info(f"Features built: {df.shape[1]} columns, {len(df)} rows")

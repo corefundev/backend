@@ -73,7 +73,12 @@ class EnsembleForecaster:
 
     # ── Training ──────────────────────────────────────────────
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "EnsembleForecaster":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        groups: pd.Series | None = None,
+    ) -> "EnsembleForecaster":
         """Train one MIMO per objective on the same (X, y)."""
         self.feature_cols = list(X.columns)
         self.models_ = {}
@@ -83,7 +88,7 @@ class EnsembleForecaster:
             cfg_copy["model"]["objective"] = obj
             child = MIMOForecaster(cfg_copy)
             logger.info(f"Ensemble: fitting child objective={obj}")
-            child.fit(X, y)
+            child.fit(X, y, groups=groups)
             self.models_[obj] = child
         logger.info(
             f"Ensemble: fitted {len(self.models_)} child models, "
@@ -96,11 +101,12 @@ class EnsembleForecaster:
         X:         pd.DataFrame,
         y:         pd.Series,
         quantiles: list[float] | None = None,
+        groups:    pd.Series | None = None,
     ) -> "EnsembleForecaster":
         """Quantile sub-models live only on the primary child."""
         if not self.models_:
             raise RuntimeError("Call fit() before fit_quantiles()")
-        self.models_[self.primary_objective].fit_quantiles(X, y, quantiles)
+        self.models_[self.primary_objective].fit_quantiles(X, y, quantiles, groups=groups)
         return self
 
     def compute_blend_weights(

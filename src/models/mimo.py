@@ -69,10 +69,22 @@ class MIMOForecaster:
             p.update(extra)
         return p
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "MIMOForecaster":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        groups: pd.Series | None = None,
+    ) -> "MIMOForecaster":
         """
         Fit H direct models. For step h, target = sales shifted h steps back.
         X must already be the feature matrix (no future leakage).
+
+        groups: optional per-row SKU labels (same index as X/y). When provided,
+        target shifts respect SKU boundaries — `y.groupby(groups).shift(-h)`
+        keeps "h days ahead" within the same SKU and turns boundary rows into
+        NaN that get dropped. Without it the global `y.shift(-h)` smears the
+        end of one SKU's series into the start of the next, polluting H≈14
+        rows per SKU boundary with cross-SKU targets.
         """
         self.feature_cols = list(X.columns)
         self.models_ = []
@@ -87,7 +99,10 @@ class MIMOForecaster:
 
         # Build targets for each horizon step using historical shifts
         for h in range(1, self.horizon + 1):
-            y_h = y.shift(-h)           # target is h steps ahead
+            if groups is None:
+                y_h = y.shift(-h)
+            else:
+                y_h = y.groupby(groups).shift(-h)
             mask = y_h.notna()
             X_h  = X[mask]
             y_h  = y_h[mask]
@@ -98,7 +113,7 @@ class MIMOForecaster:
 
         logger.info(
             f"MIMO: fitted {self.horizon} direct models on {len(X)} rows "
-            f"(objective={params['objective']})"
+            f"(objective={params['objective']}, per_sku_shift={groups is not None})"
         )
         return self
 
@@ -107,6 +122,7 @@ class MIMOForecaster:
         X: pd.DataFrame,
         y: pd.Series,
         quantiles: list[float] | None = None,
+        groups: pd.Series | None = None,
     ) -> "MIMOForecaster":
         """Fit quantile models for interval forecasts (p10/p50/p90)."""
         if quantiles is None:
@@ -118,7 +134,10 @@ class MIMOForecaster:
             q_models = []
             key = f"p{int(q*100)}"
             for h in range(1, self.horizon + 1):
-                y_h  = y.shift(-h)
+                if groups is None:
+                    y_h = y.shift(-h)
+                else:
+                    y_h = y.groupby(groups).shift(-h)
                 mask = y_h.notna()
                 model = lgb.LGBMRegressor(
                     **self._base_params({"objective": "quantile", "alpha": q})

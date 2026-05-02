@@ -44,24 +44,26 @@ sys.path.insert(0, str(HERE))
 from generate_sample_data import generate_sales_data  # noqa: E402
 
 # Tier-specific shapes. n_days is the HISTORY window passed to the
-# generator (NOT the prediction horizon). Training quality plateaus
-# after ~6 months of daily history, so Free/Start get less than the
-# generator's default 365d to keep the file tiny while still being
-# trainable; Business gets a full year to demonstrate longer trends.
+# generator (NOT the prediction horizon). We give every tier multiple
+# years so walk-forward folds keep prior-year seasonal context — without
+# it, the per-fold ensemble drops ~14 days of recent context out of a
+# single year and direct multi-step metrics blow up. SKU counts are
+# tuned to keep file sizes reasonable while still demonstrating per-SKU
+# blend learning on a heterogeneous catalog.
 TIERS: dict[str, dict] = {
     "free": {
-        "n_skus":      25,
-        "n_days":      120,        # 4 months — enough for weekly + monthly seasonality
+        "n_skus":      20,
+        "n_days":      730,        # 2 years — covers a full Q4 cycle plus a comparison year
         "seed":        101,
     },
     "start": {
-        "n_skus":      300,
-        "n_days":      270,        # ~9 months
+        "n_skus":      60,
+        "n_days":      1095,       # 3 years — main honest-validation testbed
         "seed":        202,
     },
     "business": {
-        "n_skus":      1500,
-        "n_days":      365,
+        "n_skus":      200,
+        "n_days":      1095,       # 3 years × 200 SKUs ≈ 219k rows
         "seed":        303,
     },
 }
