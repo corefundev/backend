@@ -160,7 +160,15 @@ async def lifespan(app: FastAPI):
     # rather than on the first request that happens to hit it.
     try:
         from src.storage.training_runs import get_training_runs_registry
-        get_training_runs_registry()
+        registry = get_training_runs_registry()
+        # Reap stale `running`/`queued` rows from previous worker
+        # incarnations (redeploy, OOM, timeout). Without this, the
+        # frontend's resume-active-job logic re-attaches to dead jobs
+        # and the user sees a red error frame they can never dismiss.
+        try:
+            registry.reap_stale_runs(stale_after_minutes=240)
+        except Exception as e:
+            logger.warning("reap_stale_runs at startup failed: %s", e)
     except Exception as e:
         logger.warning("training_runs registry not initialised: %s", e)
     try:

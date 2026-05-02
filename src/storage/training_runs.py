@@ -157,6 +157,40 @@ class PostgresTrainingRunsRegistry:
                 row = cur.fetchone()
         return None if row is None else self._row_to_record(dict(row))
 
+    def reap_stale_runs(self, stale_after_minutes: int = 240) -> int:
+        """
+        Mark `running` and `queued` rows older than `stale_after_minutes`
+        as failed. Called at API startup.
+
+        Why: workers can die mid-run (container redeploy, OOM, RQ timeout)
+        before the in-process FAILED update fires. The DB row stays in
+        `running` forever, the frontend's resume-active-job effect picks
+        it up on every load and re-shows the red error frame even after
+        the user dismisses it. A periodic reap during boot is the
+        cheapest source of truth: any run that hasn't progressed in 4+
+        hours is dead.
+        """
+        sql = """
+        UPDATE sku_training_runs
+           SET status      = 'failed',
+               ended_at    = NOW(),
+               error       = COALESCE(error,
+                             'Worker died before completion (auto-reaped at startup)')
+         WHERE status IN ('running', 'queued')
+           AND enqueued_at < NOW() - (%s || ' minutes')::interval
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (str(stale_after_minutes),))
+                affected = cur.rowcount
+            conn.commit()
+        if affected:
+            logger.info(
+                "reap_stale_runs: marked %d stale run(s) as failed (older than %d min)",
+                affected, stale_after_minutes,
+            )
+        return affected
+
     def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
