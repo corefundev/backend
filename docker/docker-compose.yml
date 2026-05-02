@@ -56,6 +56,24 @@ x-common-env: &common-env
 
 services:
 
+  # ── DB migrations (one-shot, runs before everything else) ─────
+  # Applies pending SQL files from /app/migrations/ via the script
+  # at /app/scripts/migrate.py. Exits 0 on success, non-zero on first
+  # failure; api/worker/scan-worker/process-worker block on
+  # service_completed_successfully so they never start against an
+  # outdated schema. Replaces in-process DDL that used to race on
+  # pg_type during multi-worker startup.
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["python", "scripts/migrate.py"]
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
   # ── Inference API ─────────────────────────────────────────────
   api:
     build:
@@ -70,6 +88,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -90,6 +109,7 @@ services:
     depends_on:
       redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
     restart: unless-stopped
     # Healthcheck: worker has no HTTP endpoint, so we verify it can reach
     # Redis (its only hard dependency). If Redis is gone, the worker is
@@ -115,6 +135,7 @@ services:
       postgres: { condition: service_healthy }
       clamav:   { condition: service_healthy }
       minio:    { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
     restart: unless-stopped
     # Scan worker additionally needs ClamAV; we probe both.
     healthcheck:
@@ -149,6 +170,7 @@ services:
       redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
       minio:    { condition: service_healthy }
+      migrate:  { condition: service_completed_successfully }
     restart: unless-stopped
     # Process worker checks: Redis + Docker socket reachability.
     healthcheck:

@@ -75,6 +75,15 @@ x-lockbox-blanks: &lockbox-blanks
   OAUTH_YANDEX_CLIENT_SECRET:      ""
 
 services:
+  # Migration init-job needs the same Lockbox secrets (DATABASE_URL +
+  # the YC SA key for vault_agent.bootstrap_secrets) so the migrate
+  # script can connect.
+  migrate:
+    environment:
+      <<: *lockbox-blanks
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
   api:
     environment:
       <<: *lockbox-blanks

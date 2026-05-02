@@ -33,24 +33,6 @@ class ForecastPoint:
 
 
 class PostgresForecastsRegistry:
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_forecasts (
-        client_id      TEXT        NOT NULL,
-        sku            TEXT        NOT NULL,
-        forecast_date  DATE        NOT NULL,
-        value          DOUBLE PRECISION NOT NULL,
-        run_id         TEXT,
-        generated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (client_id, sku, forecast_date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_sku_forecasts_client_date
-        ON sku_forecasts (client_id, forecast_date);
-    -- P10/P90 added in v0.8.26 for the confidence ribbon on the
-    -- forecast chart. Idempotent so existing tables are migrated
-    -- transparently on next API boot.
-    ALTER TABLE sku_forecasts ADD COLUMN IF NOT EXISTS p10 DOUBLE PRECISION;
-    ALTER TABLE sku_forecasts ADD COLUMN IF NOT EXISTS p90 DOUBLE PRECISION;
-    """
 
     def __init__(self, database_url: str):
         try:
@@ -61,11 +43,7 @@ class PostgresForecastsRegistry:
         except ImportError as e:
             raise ImportError("psycopg2-binary required") from e
         self._url = database_url
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self.DDL)
-            conn.commit()
-        logger.info("sku_forecasts table ready")
+        # Schema lives in migrations/ — applied by the `migrate` service.
 
     def _conn(self):
         return self._psycopg2.connect(self._url)

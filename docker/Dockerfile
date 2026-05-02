@@ -22,6 +22,8 @@ RUN pip uninstall -y multipart && pip install --no-cache-dir python-multipart
 # Исходный код
 COPY src/ src/
 COPY configs/ configs/
+COPY scripts/ scripts/
+COPY migrations/ migrations/
 
 # Права
 RUN chown -R sku:sku /app

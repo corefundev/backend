@@ -153,34 +153,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.debug(f"Tracing not configured: {e}")
 
-    # ── Eagerly create training_runs + forecasts tables ───────
-    # The registries are otherwise lazily initialised on first use;
-    # doing it here means the DDL is run once at boot under the
-    # api process (which has DATABASE_URL set by vault bootstrap),
-    # rather than on the first request that happens to hit it.
+    # ── Reap stale `running`/`queued` training rows ──────────
+    # Schema is owned by migrations/ and applied by the dedicated
+    # `migrate` compose service before api/worker start. Here we
+    # just clean up dead training runs from previous incarnations
+    # (redeploy, OOM, timeout) so the frontend doesn't re-attach to
+    # them and show an undismissable error frame.
     try:
         from src.storage.training_runs import get_training_runs_registry
         registry = get_training_runs_registry()
-        # Reap stale `running`/`queued` rows from previous worker
-        # incarnations (redeploy, OOM, timeout). Without this, the
-        # frontend's resume-active-job logic re-attaches to dead jobs
-        # and the user sees a red error frame they can never dismiss.
         try:
             registry.reap_stale_runs(stale_after_minutes=240)
         except Exception as e:
             logger.warning("reap_stale_runs at startup failed: %s", e)
     except Exception as e:
-        logger.warning("training_runs registry not initialised: %s", e)
-    try:
-        from src.storage.forecasts import get_forecasts_registry
-        get_forecasts_registry()
-    except Exception as e:
-        logger.warning("forecasts registry not initialised: %s", e)
-    try:
-        from src.storage.anomalies import get_anomalies_registry
-        get_anomalies_registry()
-    except Exception as e:
-        logger.warning("anomalies registry not initialised: %s", e)
+        logger.warning("training_runs registry not reachable: %s", e)
 
     # ── Telegram long-polling background task ─────────────────
     # Telegram's resolver intermittently can't see api.testcore.ru

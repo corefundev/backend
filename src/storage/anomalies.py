@@ -28,19 +28,6 @@ logger = logging.getLogger(__name__)
 
 
 class PostgresAnomaliesRegistry:
-    DDL = """
-    CREATE TABLE IF NOT EXISTS sku_anomalies (
-        client_id      TEXT        NOT NULL,
-        sku            TEXT        NOT NULL,
-        anomaly_date   DATE        NOT NULL,
-        value          DOUBLE PRECISION NOT NULL,
-        run_id         TEXT,
-        detected_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (client_id, sku, anomaly_date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_sku_anomalies_client_date
-        ON sku_anomalies (client_id, anomaly_date DESC);
-    """
 
     def __init__(self, database_url: str):
         try:
@@ -51,11 +38,7 @@ class PostgresAnomaliesRegistry:
         except ImportError as e:
             raise ImportError("psycopg2-binary required") from e
         self._url = database_url
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self.DDL)
-            conn.commit()
-        logger.info("sku_anomalies table ready")
+        # Schema lives in migrations/ — applied by the `migrate` service.
 
     def _conn(self):
         return self._psycopg2.connect(self._url)
