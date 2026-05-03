@@ -261,7 +261,14 @@ jobs:
             --ignore-unfixed \
             --exit-code 1 \
             sku-forecasting-api:scan
+      # SARIF upload writes to GitHub's code-scanning tab. That feature
+      # is gated by GitHub Advanced Security on private repos — and
+      # we're a private repo without GHAS, so the upload returns
+      # "Resource not accessible by integration". Make it best-effort:
+      # the trivy *scan* itself is the gate; the SARIF upload is just
+      # nicer formatting in a tab we don't actually use today.
       - uses: github/codeql-action/upload-sarif@v3
         if: always() && hashFiles('trivy-api.sarif') != ''
+        continue-on-error: true
         with:
           sarif_file: trivy-api.sarif
