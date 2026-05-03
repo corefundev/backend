@@ -236,8 +236,11 @@ jobs:
         # Wrapper actions (aquasecurity/trivy-action) keep retracting
         # versions; the upstream binary is more stable. Pin to a
         # current release; bump intentionally.
+        env:
+          TRIVY_VERSION: 0.70.0
         run: |
-          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v0.55.2/trivy_0.55.2_Linux-64bit.deb" -o trivy.deb
+          curl -fsSL -o trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
           sudo dpkg -i trivy.deb
           trivy --version
       - name: Run Trivy on API image
