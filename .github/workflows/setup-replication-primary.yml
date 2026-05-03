@@ -96,7 +96,7 @@ jobs:
           echo "    postgres container: \$PG_CONTAINER"
           echo "[1/6] role"
           docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting -v ON_ERROR_STOP=1 <<'PSQL'
-          DO \\\$\\\$
+          DO \$\$
           BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${REPL_USER}') THEN
               CREATE ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
@@ -105,7 +105,7 @@ jobs:
               ALTER ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
               RAISE NOTICE 'Updated role ${REPL_USER}';
             END IF;
-          END \\\$\\\$;
+          END \$\$;
           PSQL
 
           echo "[2/6] pg_hba"
