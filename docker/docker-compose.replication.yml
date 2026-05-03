@@ -1,0 +1,22 @@
+# Re-publishes the primary's postgres port for streaming replication.
+#
+# docker-compose.minimal.yml does `ports: !reset []` to keep postgres
+# off the public network in the standard prod stack. With a replica
+# online, we need the WAL stream to reach it — so this overlay puts
+# the port back. Append this file LAST in the compose -f chain.
+#
+# Defence-in-depth (since the port is now reachable):
+#   • pg_hba.conf restricts `replication` to the replica CIDR only —
+#     no other host can authenticate as `replicator`.
+#   • scram-sha-256 + a 32-char random password.
+#   • Application roles (`sku`) are NOT exposed to the new pg_hba rule;
+#     only the replication-specific user is.
+#   • TODO: add an iptables DOCKER-USER chain rule to drop 5432 from
+#     anything other than REPLICA_CIDR. Tracked as a follow-up — Docker
+#     publishes via NAT and bypasses UFW, so plain UFW rules don't
+#     close this surface.
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"

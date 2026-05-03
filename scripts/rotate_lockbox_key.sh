@@ -69,7 +69,7 @@ KEEP_KEYS="${KEEP_KEYS:-2}"
 # Compose overlays that need restart. --env-file is required because the
 # project root from -f flags is the docker/ subdir, so .env at /srv/backend
 # is not auto-loaded.
-COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
+COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
 
 # Sanity checks
 for cmd in yc jq ssh scp curl; do

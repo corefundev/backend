@@ -64,6 +64,45 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
+      - name: Push replication overlay to primary
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # Drop the overlay file into /srv/backend/docker/. The next
+          # `docker compose up -d postgres` step picks it up via -f.
+          scp -q docker/docker-compose.replication.yml \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/docker-compose.replication.yml"
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              "ls -la /srv/backend/docker/docker-compose.replication.yml"
+
+      - name: Recreate postgres with port published
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # `up -d postgres` with the new overlay re-publishes 5432.
+          # Compose only recreates the container if config differs, which
+          # IS the case when we add a port mapping — brief downtime
+          # (seconds), data dir untouched.
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+          docker compose $COMPOSE_ARGS up -d postgres
+          # Wait for healthcheck.
+          for i in $(seq 1 30); do
+              S=$(docker compose $COMPOSE_ARGS ps --format '{{.Health}}' postgres 2>/dev/null || true)
+              [ "$S" = "healthy" ] && { echo "postgres healthy after ${i}s"; exit 0; }
+              sleep 1
+          done
+          echo "postgres did not become healthy in 30s" >&2
+          docker compose $COMPOSE_ARGS logs --tail=50 postgres >&2
+          exit 1
+          EOF
+
       - name: Configure primary
         env:
           VPS_HOST:        ${{ secrets.VPS_HOST }}
@@ -97,7 +136,7 @@ jobs:
           SLOT_NAME="$5"
 
           cd "$VPS_COMPOSE_DIR"
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
           PG_CONTAINER=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null || true)
           if [ -z "$PG_CONTAINER" ]; then
               PG_CONTAINER=$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
