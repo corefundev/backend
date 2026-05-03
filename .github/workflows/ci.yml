@@ -243,7 +243,17 @@ jobs:
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
           sudo dpkg -i trivy.deb
           trivy --version
-      - name: Run Trivy on API image
+      # First pass: print findings to stdout so the CI log shows them.
+      # Second pass: emit SARIF for the GitHub Security tab. Same image
+      # is hit twice but Trivy caches the vuln-DB so it's quick.
+      - name: Trivy scan (human-readable summary)
+        run: |
+          trivy image \
+            --format table \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            sku-forecasting-api:scan
+      - name: Trivy scan (SARIF for code-scanning)
         run: |
           trivy image \
             --format sarif --output trivy-api.sarif \
