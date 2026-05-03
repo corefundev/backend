@@ -1,0 +1,21 @@
+# Dependabot keeps the SHA-pinned actions current.
+#
+# Why SHA-pinning at all: a tag like `actions/checkout@v4` is mutable —
+# the maintainer (or an attacker who compromises the repo) can re-point
+# v4 at a new commit and steal CI secrets on the next run. Pinning to a
+# 40-char commit SHA freezes the exact code the runner executes; supply
+# chain attacks now require a SHA collision, not a tag move.
+#
+# Dependabot raises a PR when a pinned SHA falls behind, with the new
+# SHA + a diff against the prior pin. We review and merge — the upgrade
+# is intentional and visible, not silent.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
