@@ -103,6 +103,29 @@ jobs:
           exit 1
           EOF
 
+      - name: Dump current pg_hba.conf (pre-config diagnostic)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+          PG=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null \
+              || docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
+          HBA=$(docker exec "$PG" sh -c 'echo $PGDATA')/pg_hba.conf
+          echo "--- pg_hba.conf path: $HBA ---"
+          echo "--- file contents (last 30 lines) ---"
+          docker exec "$PG" tail -30 "$HBA" | cat -A
+          echo "--- replication-related lines ---"
+          docker exec "$PG" grep -nE 'replication' "$HBA" || echo "(none)"
+          echo "--- pg_hba_file_rules (server's parsed view) ---"
+          docker exec -i "$PG" psql -U sku -d sku_forecasting -c \
+              "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules ORDER BY line_number;"
+          EOF
+
       - name: Configure primary
         env:
           VPS_HOST:        ${{ secrets.VPS_HOST }}
