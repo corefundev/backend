@@ -54,3 +54,37 @@ def test_list_for_client_returns_empty_on_db_failure(monkeypatch):
 def test_recent_failed_logins_returns_zero_on_db_failure(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert recent_failed_logins("alice@example.com") == 0
+
+
+def test_event_type_constants_are_stable_strings():
+    """
+    Event-type taxonomy is a contract between the writer (record_event
+    at the call site) and the reader (Grafana queries, support panels,
+    audit_log indexes). Renaming any of these orphans historical data.
+    Pin the strings explicitly so a typo or refactor is caught here.
+    """
+    from src.audit import (
+        EVT_LOGIN, EVT_LOGOUT, EVT_OTP_SEND, EVT_OTP_VERIFY,
+        EVT_OAUTH_CALLBACK, EVT_SIGNUP, EVT_PASSWORD_CHANGE,
+        EVT_PLAN_CHANGE, EVT_EMAIL_CHANGE,
+        EVT_MODEL_TRAIN, EVT_MODEL_DELETE, EVT_UPLOAD_DELETE,
+        EVT_SECRET_ROTATION, EVT_ADMIN_ACTION,
+    )
+    expected = {
+        EVT_LOGIN: "login",
+        EVT_LOGOUT: "logout",
+        EVT_OTP_SEND: "otp_send",
+        EVT_OTP_VERIFY: "otp_verify",
+        EVT_OAUTH_CALLBACK: "oauth_callback",
+        EVT_SIGNUP: "signup",
+        EVT_PASSWORD_CHANGE: "password_change",
+        EVT_PLAN_CHANGE: "plan_change",
+        EVT_EMAIL_CHANGE: "email_change",
+        EVT_MODEL_TRAIN: "model_train",
+        EVT_MODEL_DELETE: "model_delete",
+        EVT_UPLOAD_DELETE: "upload_delete",
+        EVT_SECRET_ROTATION: "secret_rotation",
+        EVT_ADMIN_ACTION: "admin_action",
+    }
+    for const_value, expected_str in expected.items():
+        assert const_value == expected_str

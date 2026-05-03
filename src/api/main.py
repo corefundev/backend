@@ -134,6 +134,71 @@ def _get_service(client_id: str) -> ForecastingService:
         return service
 
 
+def _emit_secret_rotation_event_if_changed() -> None:
+    """
+    Detect Lockbox SA-key rotation by comparing the file's `id` field
+    against the last `secret_rotation` event in audit_log. Emit a fresh
+    event only when the id has changed.
+
+    Why audit_log itself is the state store: avoids a separate
+    "previous_fingerprint" file that would need its own rotation
+    discipline. Reading the latest matching event is a single indexed
+    query (idx_audit_log_event_ts).
+
+    Quiet on missing config (Vault path / dev env) — only the Lockbox
+    path ships an SA key file.
+    """
+    sa_key_file = os.environ.get("YC_SA_KEY_FILE")
+    if not sa_key_file or not os.path.exists(sa_key_file):
+        return
+    import json as _json
+    try:
+        with open(sa_key_file) as f:
+            sa_key = _json.load(f)
+    except Exception:
+        return
+    current_id = sa_key.get("id")
+    if not current_id:
+        return
+
+    # Look up most recent secret_rotation event's target_id.
+    last_id: Optional[str] = None
+    try:
+        import psycopg2
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            return
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target_id FROM audit_log "
+                    "WHERE event_type = 'secret_rotation' "
+                    "ORDER BY ts DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    last_id = row[0]
+    except Exception:
+        return
+
+    if last_id == current_id:
+        return       # no rotation since last boot — quiet
+
+    from src.audit import record_event, EVT_SECRET_ROTATION
+    record_event(
+        event_type=EVT_SECRET_ROTATION, event_subtype="lockbox_sa_key",
+        target_type="yc_sa_key", target_id=current_id,
+        metadata={
+            "sa_id":           sa_key.get("service_account_id"),
+            "previous_key_id": last_id,
+            "detected_at":     "api_startup",
+        },
+    )
+    logger.info(
+        "secret_rotation detected: SA key id %s (was %s)", current_id, last_id,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Vault bootstrap already done at module level (before imports) ──
@@ -167,6 +232,17 @@ async def lifespan(app: FastAPI):
             logger.warning("reap_stale_runs at startup failed: %s", e)
     except Exception as e:
         logger.warning("training_runs registry not reachable: %s", e)
+
+    # ── Lockbox SA-key rotation detection ────────────────────
+    # Read the SA key id; compare against the most recent
+    # secret_rotation event in audit_log. Emit a NEW event only when
+    # the id changed — this turns the audit timeline into the source
+    # of truth for "when was the last rotation" without a separate
+    # state file. Quiet on every other startup.
+    try:
+        _emit_secret_rotation_event_if_changed()
+    except Exception as e:
+        logger.debug("secret_rotation startup probe skipped: %s", e)
 
     # ── Telegram long-polling background task ─────────────────
     # Telegram's resolver intermittently can't see api.testcore.ru
@@ -830,6 +906,12 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     Step 2 of email login. Verifies OTP, returns a JWT under the client_id
     bound to that email. No api_key here — login by email is meant to be
     used INSTEAD of the api_key path, not in addition.
+
+    Brute-force defence: counts failed attempts for this canonical email
+    over a sliding 15-minute window via audit_log; locks out at LOCKOUT_THRESHOLD.
+    The OTP store has its own per-row attempt cap, but it only protects a
+    SINGLE OTP — a credential-stuffer can issue a fresh OTP, fail max-attempts,
+    issue another, repeat. The audit_log window catches that pattern.
     """
     email = _validate_email_or_400(req.email)
     from src.auth.email_normalize import canonical_email
@@ -838,6 +920,37 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid email format")
 
+    from src.audit import record_event, recent_failed_logins, EVT_LOGIN
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    _audit_ip = _client_ip(http_req)
+    _audit_ua = http_req.headers.get("user-agent")
+
+    # ── Brute-force lockout (fail-closed when enabled, fail-open if
+    # the audit DB is unavailable: recent_failed_logins returns 0). ──
+    LOCKOUT_THRESHOLD = int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10"))
+    LOCKOUT_WINDOW_MIN = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
+    if LOCKOUT_THRESHOLD > 0:
+        recent_fails = recent_failed_logins(canonical, window_minutes=LOCKOUT_WINDOW_MIN)
+        if recent_fails >= LOCKOUT_THRESHOLD:
+            record_event(
+                event_type=EVT_LOGIN, event_subtype="locked_out",
+                actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+                success=False,
+                metadata={
+                    "recent_fails":  recent_fails,
+                    "window_min":    LOCKOUT_WINDOW_MIN,
+                    "threshold":     LOCKOUT_THRESHOLD,
+                },
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Too many failed login attempts; try again in "
+                    f"{LOCKOUT_WINDOW_MIN} minutes."
+                ),
+                headers={"Retry-After": str(LOCKOUT_WINDOW_MIN * 60)},
+            )
+
     from src.auth.otp import verify_otp
     from src.auth.otp_store import get_otp_store, otp_max_attempts, PURPOSE_LOGIN
 
@@ -845,11 +958,6 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     # OTP rows for this purpose were stored under canonical email by /auth/login
     record = store.find_active(canonical, PURPOSE_LOGIN)
     is_match = verify_otp(req.code, record.code_hash if record else None)
-
-    from src.audit import record_event, EVT_LOGIN
-    from src.auth.signup_rate_limit import client_ip as _client_ip
-    _audit_ip = _client_ip(http_req)
-    _audit_ua = http_req.headers.get("user-agent")
 
     if not is_match:
         if record is not None:
@@ -1375,6 +1483,7 @@ async def register_client(
 @app.post("/clients/{client_id}/api-key/rotate", tags=["clients"])
 async def rotate_api_key(
     client_id: str,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -1393,12 +1502,23 @@ async def rotate_api_key(
     from src.auth.api_keys import generate_api_key, hash_api_key
 
     registry = get_registry()
-    if registry.get(client_id) is None:
+    record   = registry.get(client_id)
+    if record is None:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
 
     new_key  = generate_api_key()
     new_hash = hash_api_key(new_key)
     registry.update(client_id, api_key_hash=new_hash)
+
+    from src.audit import record_event, EVT_PASSWORD_CHANGE
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    record_event(
+        event_type=EVT_PASSWORD_CHANGE, event_subtype="api_key_rotate",
+        client_id=client_id, actor_email=record.email_canonical or record.email,
+        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="api_key", target_id=client_id,
+        metadata={"actor_role": ",".join(auth.roles or [])},
+    )
 
     return {
         "client_id": client_id,
@@ -1432,6 +1552,7 @@ class UpdateClientRequest(BaseModel):
 async def update_client(
     client_id: str,
     req: UpdateClientRequest,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -1459,7 +1580,8 @@ async def update_client(
         raise HTTPException(status_code=422, detail="No fields to update")
 
     registry = get_registry()
-    if registry.get(client_id) is None:
+    existing = registry.get(client_id)
+    if existing is None:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
 
     registry.update(client_id, **updates)
@@ -1467,6 +1589,26 @@ async def update_client(
     # Invalidate any cached model for this client — plan change might
     # affect horizon cap baked into the model cache.
     _services.pop(client_id, None)
+
+    from src.audit import record_event, EVT_ADMIN_ACTION
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    # Snapshot of changed fields with old/new values (notes truncated to
+    # avoid bloating the audit table with multi-paragraph operator notes).
+    changes = {}
+    for k, new_v in updates.items():
+        old_v = getattr(existing, k, None)
+        if k == "notes" and isinstance(old_v, str):
+            old_v = old_v[:120]
+        if k == "notes" and isinstance(new_v, str):
+            new_v = new_v[:120]
+        changes[k] = {"old": old_v, "new": new_v}
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_update",
+        client_id=client_id, actor_email=auth.client_id,
+        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+        metadata={"changes": changes},
+    )
     return updated.__dict__
 
 # ══════════════════════════════════════════════════════════════════
@@ -1477,6 +1619,7 @@ async def update_client(
 async def trigger_training(
     client_id: str,
     req: TrainRequest,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -1620,6 +1763,22 @@ async def trigger_training(
             get_training_runs_registry().update(run_id, job_id=job_id)
         except Exception:    # noqa: BLE001
             pass
+
+    from src.audit import record_event, EVT_MODEL_TRAIN
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    record_event(
+        event_type=EVT_MODEL_TRAIN,
+        event_subtype="enqueued" if job_id else "completed_sync",
+        client_id=client_id, actor_email=record.email_canonical or record.email,
+        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="model", target_id=run_id or client_id,
+        metadata={
+            "run_id":     run_id,
+            "job_id":     job_id,
+            "upload_id":  req.upload_id,
+            "plan":       record.plan,
+        },
+    )
 
     if job_id:
         return TrainResponse(
