@@ -1,22 +1,9 @@
 # One-shot setup of streaming replication on the PRIMARY postgres.
 #
-# Idempotent — safe to re-run. Steps:
-#   1. CREATE / ALTER `replication` role with the password from
-#      ${{ secrets.REPLICATION_PASSWORD }}.
-#   2. Add a pg_hba.conf rule allowing the role from REPLICA_CIDR
-#      using scram-sha-256.
-#   3. Reload postgres (no restart — pg_hba changes apply via SIGHUP).
-#   4. Create physical replication slot if missing.
-#   5. Print wal_level / max_wal_senders for sanity.
-#   6. Open UFW for 5432 from REPLICA_CIDR (no-op if UFW inactive).
-#
-# Triggered manually only (workflow_dispatch). Uses the same SSH-secret
-# convention as the rotate-lockbox-key workflow (VPS_*).
-#
-# Implementation: the remote script is a single-quoted heredoc fed to
-# `ssh ... bash -s` via stdin, with values passed as POSITIONAL args.
-# That means zero escaping inside the heredoc — what you see is what
-# remote bash sees.
+# All actual logic lives in scripts/setup_replication_primary.sh — the
+# workflow is a thin wrapper that scp's the script + the compose
+# overlay, recreates postgres with port 5432 published, then runs the
+# script via ssh.
 
 name: Setup PG Replication (Primary)
 
@@ -64,18 +51,19 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Push replication overlay to primary
+      - name: Push replication overlay + setup script to primary
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          # Drop the overlay file into /srv/backend/docker/. The next
-          # `docker compose up -d postgres` step picks it up via -f.
           scp -q docker/docker-compose.replication.yml \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/docker-compose.replication.yml"
+          scp -q scripts/setup_replication_primary.sh \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/scripts/setup_replication_primary.sh"
           ssh -q "${VPS_USER}@${VPS_HOST}" \
-              "ls -la /srv/backend/docker/docker-compose.replication.yml"
+              "chmod +x /srv/backend/scripts/setup_replication_primary.sh && \
+               ls -la /srv/backend/docker/docker-compose.replication.yml /srv/backend/scripts/setup_replication_primary.sh"
 
       - name: Recreate postgres with port published
         env:
@@ -83,157 +71,39 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          # `up -d postgres` with the new overlay re-publishes 5432.
-          # Compose only recreates the container if config differs, which
-          # IS the case when we add a port mapping — brief downtime
-          # (seconds), data dir untouched.
-          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          ssh -q "${VPS_USER}@${VPS_HOST}" '
           set -e
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
           docker compose $COMPOSE_ARGS up -d postgres
-          # Wait for healthcheck.
           for i in $(seq 1 30); do
-              S=$(docker compose $COMPOSE_ARGS ps --format '{{.Health}}' postgres 2>/dev/null || true)
+              S=$(docker compose $COMPOSE_ARGS ps --format "{{.Health}}" postgres 2>/dev/null || true)
               [ "$S" = "healthy" ] && { echo "postgres healthy after ${i}s"; exit 0; }
               sleep 1
           done
           echo "postgres did not become healthy in 30s" >&2
           docker compose $COMPOSE_ARGS logs --tail=50 postgres >&2
           exit 1
-          EOF
+          '
 
-      - name: Dump current pg_hba.conf (pre-config diagnostic)
+      - name: Run setup script on primary
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-        run: |
-          set -euo pipefail
-          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
-          set -e
-          cd /srv/backend
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
-          PG=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null \
-              || docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
-          HBA=$(docker exec "$PG" sh -c 'echo $PGDATA')/pg_hba.conf
-          echo "--- pg_hba.conf path: $HBA ---"
-          echo "--- file contents (last 30 lines) ---"
-          docker exec "$PG" tail -30 "$HBA" | cat -A
-          echo "--- replication-related lines ---"
-          docker exec "$PG" grep -nE 'replication' "$HBA" || echo "(none)"
-          echo "--- pg_hba_file_rules (server's parsed view) ---"
-          docker exec -i "$PG" psql -U sku -d sku_forecasting -c \
-              "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules ORDER BY line_number;"
-          EOF
-
-      - name: Configure primary
-        env:
-          VPS_HOST:        ${{ secrets.VPS_HOST }}
-          VPS_USER:        ${{ secrets.VPS_USER }}
-          VPS_COMPOSE_DIR: /srv/backend
-          REPL_PW:         ${{ secrets.REPLICATION_PASSWORD }}
-          REPL_USER:       ${{ inputs.replication_user }}
-          REPL_CIDR:       ${{ inputs.replica_cidr }}
-          SLOT_NAME:       ${{ inputs.slot_name }}
+          VPS_HOST:   ${{ secrets.VPS_HOST }}
+          VPS_USER:   ${{ secrets.VPS_USER }}
+          REPL_PW:    ${{ secrets.REPLICATION_PASSWORD }}
+          REPL_USER:  ${{ inputs.replication_user }}
+          REPL_CIDR:  ${{ inputs.replica_cidr }}
+          SLOT_NAME:  ${{ inputs.slot_name }}
         run: |
           set -euo pipefail
           if [ -z "$REPL_PW" ]; then
             echo "ERROR: secrets.REPLICATION_PASSWORD is empty" >&2
             exit 1
           fi
-          # bash -s + positional args: VAR_* on remote are populated from
-          # $1..$N.  Heredoc is single-quoted ('REMOTE') so it's verbatim
-          # — no $-expansion on the runner, no escaping inside.
-          ssh -q "${VPS_USER}@${VPS_HOST}" \
-              bash -s -- \
-              "$VPS_COMPOSE_DIR" \
-              "$REPL_USER" \
-              "$REPL_PW" \
-              "$REPL_CIDR" \
-              "$SLOT_NAME" <<'REMOTE'
-          set -e
-          VPS_COMPOSE_DIR="$1"
-          REPL_USER="$2"
-          REPL_PW="$3"
-          REPL_CIDR="$4"
-          SLOT_NAME="$5"
-
-          cd "$VPS_COMPOSE_DIR"
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
-          PG_CONTAINER=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null || true)
-          if [ -z "$PG_CONTAINER" ]; then
-              PG_CONTAINER=$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
-          fi
-          if [ -z "$PG_CONTAINER" ]; then
-              echo "ERROR: postgres container not found" >&2
-              exit 1
-          fi
-          echo "    postgres container: $PG_CONTAINER"
-
-          # Helper: run psql, with role/db pre-baked.
-          run_sql() {
-              docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting -v ON_ERROR_STOP=1 "$@"
-          }
-
-          echo "[1/6] role"
-          # Existence check via -tAc (tuples-only, unaligned). Idempotent
-          # via bash branching — avoids PL/pgSQL DO $$ entirely.
-          # Quote literals with PG's standard ''-doubling rule.
-          REPL_USER_LIT="'$(printf '%s' "$REPL_USER" | sed "s/'/''/g")'"
-          REPL_PW_LIT="'$(printf '%s' "$REPL_PW"   | sed "s/'/''/g")'"
-          SLOT_LIT="'$(printf '%s' "$SLOT_NAME"   | sed "s/'/''/g")'"
-          # Identifier — double-quote and double any embedded ".
-          REPL_USER_ID='"'"$(printf '%s' "$REPL_USER" | sed 's/"/""/g')"'"'
-          if run_sql -tAc "SELECT 1 FROM pg_roles WHERE rolname = $REPL_USER_LIT" | grep -q '^1$'; then
-              run_sql -c "ALTER ROLE $REPL_USER_ID WITH REPLICATION LOGIN PASSWORD $REPL_PW_LIT;"
-              echo "    altered role"
-          else
-              run_sql -c "CREATE ROLE $REPL_USER_ID WITH REPLICATION LOGIN PASSWORD $REPL_PW_LIT;"
-              echo "    created role"
-          fi
-
-          echo "[2/6] pg_hba"
-          HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
-          # Idempotent rewrite: strip any line we manage, append a fresh,
-          # explicitly-marked entry. Sed runs inside the container.
-          docker exec "$PG_CONTAINER" sh -c \
-              "sed -i -e '/# pg-replication-managed/d' -e '/host[[:space:]]\\+replication[[:space:]]\\+'\"$REPL_USER\"'/d' '$HBA_PATH'"
-          HBA_LINE="host    replication    $REPL_USER    $REPL_CIDR    scram-sha-256    # pg-replication-managed"
-          docker exec "$PG_CONTAINER" sh -c "printf '%s\\n' \"$HBA_LINE\" >> '$HBA_PATH'"
-          echo "    wrote: $HBA_LINE"
-          echo "    --- replication lines now in pg_hba.conf ---"
-          docker exec "$PG_CONTAINER" grep -E '^[[:space:]]*host[[:space:]]+replication' "$HBA_PATH" \
-              || echo "    (none — that's a problem)"
-
-          echo "[3/6] reload + verify"
-          run_sql -c "SELECT pg_reload_conf();"
-          # pg_hba_file_rules is the parsed-in-memory view; if reload
-          # picked up the line, it shows up here. Errors (e.g. typo) also
-          # appear in the `error` column.
-          run_sql -c "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules WHERE database @> ARRAY['replication'];"
-
-          echo "[4/6] slot"
-          if run_sql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = $SLOT_LIT" | grep -q '^1$'; then
-              echo "    slot $SLOT_NAME already exists"
-          else
-              run_sql -c "SELECT pg_create_physical_replication_slot($SLOT_LIT);"
-              echo "    created slot $SLOT_NAME"
-          fi
-          run_sql -c "SELECT slot_name, slot_type, active, restart_lsn FROM pg_replication_slots WHERE slot_name = $SLOT_LIT;"
-
-          echo "[5/6] WAL settings"
-          run_sql -c "SELECT name, setting FROM pg_settings WHERE name IN ('wal_level','max_wal_senders','max_replication_slots');"
-
-          echo "[6/6] UFW"
-          if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
-              if sudo ufw status numbered | grep -qE "5432.*$REPL_CIDR"; then
-                  echo "    UFW already permits 5432 from $REPL_CIDR"
-              else
-                  sudo ufw allow from "$REPL_CIDR" to any port 5432 proto tcp comment "pg-replication"
-                  echo "    allowed 5432 from $REPL_CIDR"
-              fi
-          else
-              echo "    UFW not active — Docker iptables governs port exposure"
-          fi
-          echo "DONE"
-          REMOTE
+          # Pass values via SSH SendEnv requires server-side AcceptEnv,
+          # which we don't have. Just inline them into the remote env on
+          # the command line — the script then reads them via env var.
+          ssh -q \
+              -o "SendEnv=REPL_PW REPL_USER REPL_CIDR SLOT_NAME" \
+              "${VPS_USER}@${VPS_HOST}" \
+              "REPL_PW='$REPL_PW' REPL_USER='$REPL_USER' REPL_CIDR='$REPL_CIDR' SLOT_NAME='$SLOT_NAME' bash /srv/backend/scripts/setup_replication_primary.sh"
