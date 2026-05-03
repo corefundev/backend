@@ -21,11 +21,10 @@ scipy==1.13.0
 pyarrow==15.0.2            # 15.x: совместим с mlflow 2.14 и pyarrow API нашего кода
 
 # ── API ───────────────────────────────────────────────
-# FastAPI 0.115.x pins Starlette to a range that allows 0.38.6;
-# we override it explicitly to ≥0.40 to clear CVE-2024-47874 (DoS
-# via multipart). Backward compatible — Starlette 0.40 is what
-# every modern FastAPI in active maintenance ships against.
-fastapi==0.115.0
+# FastAPI 0.118 is the first in the line that requires Starlette
+# ≥0.40; earlier 0.115.x explicitly capped at <0.39 and conflicted
+# with our security pin below. 0.118 is API-compatible with 0.111.
+fastapi==0.118.0
 starlette==0.40.0          # CVE-2024-47874 (DoS via multipart) fixed
 uvicorn[standard]==0.29.0
 pydantic==2.7.1
