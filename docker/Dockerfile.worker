@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc g++ libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Same bake-fix as docker/Dockerfile — overwrite old wheel +
+# jaraco.context that the base python:3.11-slim ships before
+# pulling the rest. Trivy scans the worker image too on real CD.
+RUN pip install --no-cache-dir --upgrade pip wheel==0.46.2 jaraco.context==6.1.0
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

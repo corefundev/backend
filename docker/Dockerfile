@@ -14,6 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc g++ libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Bake-fix: the python:3.11-slim base ships old wheel + jaraco.context
+# that Trivy flags (CVE-2026-24049 wheel priv-esc, CVE-2026-23949
+# jaraco path traversal). Upgrade them BEFORE the rest so the new
+# versions overwrite the layer; pinning them in requirements.txt
+# alone isn't enough because pip's resolver leaves the existing
+# .dist-info around when versions are equal.
+RUN pip install --no-cache-dir --upgrade pip wheel==0.46.2 jaraco.context==6.1.0
+
 # Зависимости Python (отдельный слой — кэшируется)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
