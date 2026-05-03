@@ -227,18 +227,23 @@ jobs:
           load: true
           tags: sku-forecasting-api:scan
           cache-from: type=gha
+      - name: Install Trivy
+        # Wrapper actions (aquasecurity/trivy-action) keep retracting
+        # versions; the upstream binary is more stable. Pin to a
+        # current release; bump intentionally.
+        run: |
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v0.55.2/trivy_0.55.2_Linux-64bit.deb" -o trivy.deb
+          sudo dpkg -i trivy.deb
+          trivy --version
       - name: Run Trivy on API image
-        # Tags carry the v-prefix (v0.36.0); 0.24.0 had it omitted in
-        # the original config and that's why GHA "couldn't find" it.
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: sku-forecasting-api:scan
-          format: sarif
-          output: trivy-api.sarif
-          severity: "HIGH,CRITICAL"
-          exit-code: "1"
-          ignore-unfixed: true
+        run: |
+          trivy image \
+            --format sarif --output trivy-api.sarif \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            sku-forecasting-api:scan
       - uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-api.sarif') != ''
         with:
           sarif_file: trivy-api.sarif
