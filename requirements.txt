@@ -21,9 +21,12 @@ scipy==1.13.0
 pyarrow==15.0.2            # 15.x: совместим с mlflow 2.14 и pyarrow API нашего кода
 
 # ── API ───────────────────────────────────────────────
-# FastAPI 0.115.x pulls Starlette ≥0.40 (fixes CVE-2024-47874 DoS).
-# 0.115 is the latest 0.x line, fully backward-compat with 0.111.
+# FastAPI 0.115.x pins Starlette to a range that allows 0.38.6;
+# we override it explicitly to ≥0.40 to clear CVE-2024-47874 (DoS
+# via multipart). Backward compatible — Starlette 0.40 is what
+# every modern FastAPI in active maintenance ships against.
 fastapi==0.115.0
+starlette==0.40.0          # CVE-2024-47874 (DoS via multipart) fixed
 uvicorn[standard]==0.29.0
 pydantic==2.7.1
 httpx==0.27.0
@@ -104,3 +107,13 @@ flake8==7.1.0
 mypy==1.10.0
 types-PyYAML==6.0.12.20240311
 types-redis==4.6.0.20241004
+
+# ── Build-tool security pins ──────────────────────────
+# These come baked into the Python image and aren't direct deps of
+# our code; we pin newer versions only to clear Trivy CVEs found
+# in the resulting layer (CVE-2026-24049 wheel priv-esc,
+# CVE-2026-23949 jaraco.context path traversal). Both are pulled
+# by pip itself — overriding via requirements.txt is the simplest
+# way to bump them.
+wheel==0.46.2
+jaraco.context==6.1.0
