@@ -300,7 +300,9 @@ services:
 
   # ── MLflow tracking server ────────────────────────────────────
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.13.0
+    # v3.x clears the 2.x CVE bundle (path traversal, command exec,
+    # auth bypass) — see requirements.txt for the matching client pin.
+    image: ghcr.io/mlflow/mlflow:v3.11.1
     ports:
       - "5000:5000"
     environment:

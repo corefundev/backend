@@ -12,7 +12,7 @@
 # ══════════════════════════════════════════════════════
 
 # ── Ядро ML ──────────────────────────────────────────
-lightgbm==4.3.0
+lightgbm==4.6.0            # CVE-2024-43598 (RCE) fixed in 4.6
 catboost==1.2.10
 pandas==2.2.2
 numpy==1.26.4
@@ -21,13 +21,15 @@ scipy==1.13.0
 pyarrow==15.0.2            # 15.x: совместим с mlflow 2.14 и pyarrow API нашего кода
 
 # ── API ───────────────────────────────────────────────
-fastapi==0.111.0
+# FastAPI 0.115.x pulls Starlette ≥0.40 (fixes CVE-2024-47874 DoS).
+# 0.115 is the latest 0.x line, fully backward-compat with 0.111.
+fastapi==0.115.0
 uvicorn[standard]==0.29.0
 pydantic==2.7.1
 httpx==0.27.0
 
 # ── Аутентификация и безопасность ────────────────────
-PyJWT==2.8.0
+PyJWT==2.12.0              # CVE-2026-32597 fixed in 2.12
 hvac==2.3.0
 
 # ── Хранилище ─────────────────────────────────────────
@@ -37,7 +39,12 @@ boto3==1.34.100
 great-expectations==0.18.15
 
 # ── ML трекинг ────────────────────────────────────────
-mlflow==2.14.3             # 2.14+ снимает ограничение pyarrow<16
+# Bumped to 3.11 to clear the bundle of CVEs the 2.14 line carried
+# (CVE-2025-15036 path traversal, CVE-2025-15379 / CVE-2025-14287
+# command execution, CVE-2025-11200 auth bypass, etc).
+# Client API (start_run / log_metric / log_artifact) is unchanged
+# from 2.x; the major-version bump is mostly server-side.
+mlflow==3.11.1
 
 # ── Очередь задач ─────────────────────────────────────
 redis==5.0.4
