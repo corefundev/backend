@@ -79,14 +79,21 @@ jobs:
           # the GHA log is readable. Heredoc expands $REPL_* on the
           # local runner — quoted single-EOF would defer expansion to
           # the remote, where REPL_* aren't defined.
+          # Multi-file compose stack — same args pattern as rotate_lockbox_key.sh.
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
           ssh -q "${VPS_USER}@${VPS_HOST}" bash <<EOF
           set -e
           cd ${VPS_COMPOSE_DIR}
-          PG_CONTAINER=\$(docker compose ps -q postgres)
+          PG_CONTAINER=\$(docker compose ${COMPOSE_ARGS} ps -q postgres)
           if [ -z "\$PG_CONTAINER" ]; then
-            echo "ERROR: postgres container not running" >&2
+            # Fallback: image-based discovery (in case compose project name shifted).
+            PG_CONTAINER=\$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
+          fi
+          if [ -z "\$PG_CONTAINER" ]; then
+            echo "ERROR: postgres container not found" >&2
             exit 1
           fi
+          echo "    postgres container: \$PG_CONTAINER"
           echo "[1/6] role"
           docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting -v ON_ERROR_STOP=1 <<'PSQL'
           DO \\\$\\\$
