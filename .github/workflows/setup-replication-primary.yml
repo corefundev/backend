@@ -1,0 +1,128 @@
+# One-shot setup of streaming replication on the PRIMARY postgres.
+#
+# What this workflow does (idempotent — safe to re-run):
+#   1. Ensures `replication` role exists with the password from
+#      ${{ secrets.REPLICATION_PASSWORD }}. Re-runs are no-ops.
+#   2. Adds a pg_hba.conf rule allowing the role from REPLICA_CIDR
+#      (default 212.8.226.233/32) using scram-sha-256.
+#   3. Reloads postgres so the rule takes effect (no restart needed —
+#      pg_hba changes work via SIGHUP).
+#   4. Creates physical replication slot REPLICATION_SLOT_NAME if missing.
+#   5. Adjusts wal_level / max_wal_senders if needed (postgres:16-alpine
+#      already has wal_level=replica + max_wal_senders=10 by default,
+#      so this is a no-op in the common case).
+#   6. Opens UFW for port 5432 from REPLICA_CIDR (fails open if UFW
+#      is not in use on this host).
+#
+# Trigger: workflow_dispatch only — never on push. Replication setup is
+# a one-time operation that should be reviewed before running.
+
+name: Setup PG Replication (Primary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      replica_cidr:
+        description: "Replica IP in CIDR notation"
+        required: true
+        default: "212.8.226.233/32"
+      replication_user:
+        description: "Replication role name"
+        required: true
+        default: "replicator"
+      slot_name:
+        description: "Physical replication slot name"
+        required: true
+        default: "replica_1"
+
+jobs:
+  setup-primary:
+    name: Configure primary for replication
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: SSH to primary and configure replication
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          REPL_PW:    ${{ secrets.REPLICATION_PASSWORD }}
+          REPL_USER:  ${{ inputs.replication_user }}
+          REPL_CIDR:  ${{ inputs.replica_cidr }}
+          SLOT_NAME:  ${{ inputs.slot_name }}
+        with:
+          host:     ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key:      ${{ secrets.PROD_SSH_KEY }}
+          envs:     REPL_PW,REPL_USER,REPL_CIDR,SLOT_NAME
+          script: |
+            set -e
+            cd /srv/backend
+
+            PG_CONTAINER=$(docker compose ps -q postgres)
+            if [ -z "$PG_CONTAINER" ]; then
+              echo "ERROR: postgres container not running" >&2
+              exit 1
+            fi
+            echo "Primary postgres container: $PG_CONTAINER"
+
+            # ── 1. CREATE OR ALTER replication role ──────────────
+            # ALTER ... PASSWORD updates idempotently; if role doesn't
+            # exist yet, the DO block creates it.
+            docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting <<SQL
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${REPL_USER}') THEN
+                CREATE ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
+                RAISE NOTICE 'Created role ${REPL_USER}';
+              ELSE
+                ALTER ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
+                RAISE NOTICE 'Updated role ${REPL_USER}';
+              END IF;
+            END \$\$;
+            SQL
+
+            # ── 2. pg_hba.conf — allow replication from REPLICA_CIDR ──
+            HBA_LINE="host    replication    ${REPL_USER}    ${REPL_CIDR}    scram-sha-256"
+            HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
+            if docker exec "$PG_CONTAINER" grep -qF "${REPL_CIDR}" "$HBA_PATH" 2>/dev/null; then
+              echo "pg_hba already has entry for ${REPL_CIDR}"
+            else
+              docker exec "$PG_CONTAINER" sh -c "echo '${HBA_LINE}' >> $HBA_PATH"
+              echo "Added pg_hba entry: ${HBA_LINE}"
+            fi
+
+            # ── 3. Reload — applies pg_hba without restart ─────────
+            docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting -c "SELECT pg_reload_conf();"
+
+            # ── 4. Physical replication slot ───────────────────────
+            docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting <<SQL
+            SELECT pg_create_physical_replication_slot('${SLOT_NAME}')
+            WHERE NOT EXISTS (
+              SELECT 1 FROM pg_replication_slots WHERE slot_name = '${SLOT_NAME}'
+            );
+            SELECT slot_name, slot_type, active, restart_lsn
+              FROM pg_replication_slots
+             WHERE slot_name = '${SLOT_NAME}';
+            SQL
+
+            # ── 5. Sanity probe: WAL settings ──────────────────────
+            docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting -c \
+              "SHOW wal_level; SHOW max_wal_senders; SHOW max_replication_slots;"
+
+            # ── 6. UFW: open 5432 to replica only ──────────────────
+            if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
+              if sudo ufw status numbered | grep -qE "5432.*${REPL_CIDR}"; then
+                echo "UFW already permits 5432 from ${REPL_CIDR}"
+              else
+                sudo ufw allow from "${REPL_CIDR}" to any port 5432 proto tcp comment "pg-replication"
+                echo "UFW: allowed 5432 from ${REPL_CIDR}"
+              fi
+            else
+              echo "UFW not active — skipping firewall step (Docker iptables already governs port exposure)"
+            fi
+
+            echo "═══════════════════════════════════════════════════════"
+            echo "  Primary configured for replication."
+            echo "  Next step: bootstrap replica via scripts/bootstrap_replica.sh"
+            echo "═══════════════════════════════════════════════════════"

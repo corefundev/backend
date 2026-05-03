@@ -1,0 +1,55 @@
+# Standby PostgreSQL — streaming replica of api.testcore.ru's primary.
+#
+# Bring-up flow (run scripts/bootstrap_replica.sh once):
+#   1. pg_basebackup from primary into the named volume (binds host
+#      dir /srv/postgres-replica/data → /var/lib/postgresql/data).
+#   2. Bootstrap script writes standby.signal + postgresql.auto.conf with
+#      primary_conninfo + primary_slot_name into the data dir.
+#   3. `docker compose -f docker-compose.replica.yml up -d` starts this
+#      service. The container detects standby.signal and enters recovery
+#      mode, pulling WAL via the streaming connection from the primary.
+#
+# Promotion (DR scenario, primary is gone for good):
+#   docker exec -it postgres-replica pg_ctl promote
+#   The replica becomes a standalone primary; standby.signal is removed.
+#   Then point app's DATABASE_URL at the replica and ALTER existing slot.
+#
+# Why no `ports: ["5432:5432"]`:
+#   The replica is read-only and consumed by app code that lives on the
+#   PRIMARY VPS via DATABASE_URL_REPLICA — so it's reached over the
+#   internet on the docker host port. We bind to 127.0.0.1 only at the
+#   host level and rely on UFW + Docker iptables for outside exposure.
+#   When (if) we wire a read-only path, expose 5432 explicitly with a
+#   tightly-scoped UFW rule allowing only the primary VPS.
+
+services:
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: postgres-replica
+    restart: unless-stopped
+    # Standby mode is signaled by the presence of standby.signal in the
+    # data directory — the bootstrap script writes that file. The image's
+    # entrypoint sees the file and skips initdb.
+    environment:
+      # POSTGRES_PASSWORD is required by the entrypoint script even though
+      # we restored the data dir from pg_basebackup (entrypoint validates
+      # env presence before checking PGDATA contents). Set it to anything;
+      # it's not actually applied because the cluster is already initialized.
+      POSTGRES_PASSWORD: ignored-already-initialized
+    volumes:
+      - /srv/postgres-replica/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sku -d sku_forecasting"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Bind only to localhost on the replica VPS for now. Add a second
+    # ports rule (or change to 0.0.0.0:5432:5432) when the primary VPS
+    # needs to query us — guarded by UFW.
+    ports:
+      - "127.0.0.1:5432:5432"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
