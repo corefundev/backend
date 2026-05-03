@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Generator
+from typing import Generator, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class ChaosExperiment:
         logger.info(f"[CHAOS] Hypothesis: {self.hypothesis}")
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> "Literal[False]":
         elapsed = time.perf_counter() - self._start
 
         if exc_type is not None:

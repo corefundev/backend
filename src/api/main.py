@@ -43,7 +43,7 @@ _early_bootstrap()
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -1040,16 +1040,22 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
         logger.warning("OAuth %s exchange failed: %s", provider, e)
         raise HTTPException(502, detail="Provider token exchange failed")
 
+    # Identity flow differs by provider. The runtime branch on the
+    # provider string narrows down to a specific Protocol shape; cast
+    # so mypy resolves the right method against OidcProvider or
+    # UserinfoProvider rather than the broad common-surface Provider.
     if provider == "google":
         id_token = tokens.get("id_token")
         if not id_token:
             raise HTTPException(502, detail="Google did not return id_token")
-        identity = p.verify_id_token(id_token)
+        from src.auth.oauth.registry import OidcProvider
+        identity = cast(OidcProvider, p).verify_id_token(id_token)
     elif provider == "yandex":
         access = tokens.get("access_token")
         if not access:
             raise HTTPException(502, detail="Yandex did not return access_token")
-        identity = p.fetch_userinfo(access)
+        from src.auth.oauth.registry import UserinfoProvider
+        identity = cast(UserinfoProvider, p).fetch_userinfo(access)
     else:                       # defensive
         raise HTTPException(404, detail=f"Unknown provider {provider}")
 

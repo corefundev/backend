@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from typing import Any, Callable
 
 
 from src.data.loader import load_config, load_data, validate_data
@@ -179,6 +180,11 @@ def run_training_pipeline(
     # from prior folds shouldn't leak into new ones.
     _progress(6, 9, "Walk-forward валидация")
     objective_cfg = str(config.get("model", {}).get("objective", "")).lower()
+    # Three different forecaster classes can fit the validator slot;
+    # walk_forward_validate accepts any of them via its callable
+    # interface. Annotate with the broad Callable type so reassignment
+    # across branches doesn't trip mypy.
+    val_factory: Callable[[], Any]
     if objective_cfg == "ensemble":
         from src.models.ensemble import EnsembleForecaster
         val_factory = lambda: EnsembleForecaster(config)
@@ -201,6 +207,9 @@ def run_training_pipeline(
     objective  = str(config.get("model", {}).get("objective", "")).lower()
     is_ensemble = objective == "ensemble"
 
+    # Same shape as val_factory above — three classes can land here,
+    # so use a single broad annotation rather than an if-else union.
+    final_model: Any
     if is_ensemble:
         # 3 MIMO children with different objectives, blended per SKU.
         # Adds ~3× training time and memory for a meaningful per-SKU

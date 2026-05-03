@@ -173,6 +173,9 @@ class SmtpEmailSender:
         ssl_at_connect = (self.port == 465)
 
         try:
+            # Type annotation widens the union — first-branch inference
+            # locked it to SMTP_SSL and rejected the SMTP fallback.
+            smtp_cls: type[smtplib.SMTP]
             if ssl_at_connect:
                 smtp_cls = smtplib.SMTP_SSL
             else:

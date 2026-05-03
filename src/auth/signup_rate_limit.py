@@ -57,10 +57,10 @@ def _success_limit() -> int:
     return int(os.environ.get("SIGNUP_SUCCESS_PER_DAY_PER_SUBNET", "3"))
 
 
-def _trusted_proxies() -> list[ipaddress._BaseNetwork]:
+def _trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     """CIDRs we trust as our own reverse proxy (nginx in our compose)."""
     raw = os.environ.get("TRUSTED_PROXIES", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
-    out = []
+    out: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     for c in raw.split(","):
         c = c.strip()
         if c:

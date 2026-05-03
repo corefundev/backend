@@ -177,6 +177,11 @@ class SalesStreamProcessor:
             logger.warning("Cannot start stream processor — Kafka unavailable")
             return 0
 
+        # _connect() returning truthy means _consumer is populated; assert
+        # so mypy narrows the Optional and the iteration / .close() below
+        # type-check cleanly.
+        assert self._consumer is not None
+
         self._running = True
         count = 0
         logger.info("Stream processor started")

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 from .google import GoogleOAuth, OAuthError
 from .yandex import YandexOAuth
@@ -31,11 +31,31 @@ from .yandex import YandexOAuth
 logger = logging.getLogger(__name__)
 
 
-# Type alias for "either provider class". Providers don't share an ABC
-# yet because their internals differ (id_token vs userinfo); they share
-# a duck-typed surface: NAME, authorize_url(state), exchange_code(code),
-# and (verify_id_token | fetch_userinfo).
-Provider = object
+class Provider(Protocol):
+    """
+    Structural type for the OAuth provider surface that EVERY provider
+    implements (GoogleOAuth, YandexOAuth, future ones). The id_token
+    vs userinfo split is intentional — Google does OIDC with verify_id_
+    token, Yandex does OAuth2 with fetch_userinfo. The caller in
+    src/api/main.py branches on `provider == "google"` and casts to the
+    specific shape inside each branch.
+    """
+    NAME: str
+
+    def authorize_url(self, *, state: str) -> str: ...
+    def exchange_code(self, code: str) -> dict: ...
+
+
+class OidcProvider(Provider, Protocol):
+    """Google-shaped: identity resolved via id_token verification."""
+
+    def verify_id_token(self, id_token: str) -> Any: ...
+
+
+class UserinfoProvider(Provider, Protocol):
+    """Yandex-shaped: identity resolved via userinfo endpoint."""
+
+    def fetch_userinfo(self, access_token: str) -> Any: ...
 
 
 _FACTORIES: dict[str, Callable[[], Provider]] = {

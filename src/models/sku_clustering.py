@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -200,7 +200,11 @@ class ClusteredForecaster:
         self.config      = config
         self.n_clusters  = n_clusters
         self.clusterer:  Optional[SKUClusterer] = None
-        self.models:     dict[int, object]      = {}
+        # LGBMRegressor in practice; typed Any so mypy doesn't trip on
+        # .predict() at the polymorphic call sites below. We can't pin
+        # to a single concrete class because tests stub this with a
+        # SeasonalNaive when lightgbm isn't loadable.
+        self.models:     dict[int, Any]          = {}
         self.feature_cols: list[str]            = []
 
     def fit(

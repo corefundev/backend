@@ -51,14 +51,13 @@ jobs:
             --exclude=__pycache__,.venv
 
   # ── 2. Type check ──────────────────────────────────────────
-  # Currently advisory (41 errors of legacy debt — OAuth provider
-  # protocol types, chaos.py, etc.). Continue-on-error so the gate
-  # surfaces type drift without blocking unrelated merges. Full
-  # cleanup tracked separately under "enterprise hardening".
+  # Mypy is now a hard gate — the legacy 41-error backlog was cleared
+  # in the type-cleanup commit (OAuth provider Protocols, chaos.py
+  # __exit__ Literal[False], train.py val_factory Union, etc).
+  # Re-introducing a type error in a PR fails CI.
   typecheck:
-    name: Type check (mypy, advisory)
+    name: Type check (mypy)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

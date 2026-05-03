@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,7 +32,10 @@ class IncrementalForecaster:
 
     def __init__(self, config: dict):
         self.config      = config
-        self.model       = None
+        # Set by fit() / partial_fit() / load(). LGBMRegressor at runtime
+        # but typed Any so mypy lets predictors and partial_fit go through
+        # without spurious "None has no attribute" errors at every call.
+        self.model: Any  = None
         self.feature_cols: list[str] = []
         self._wmape_history: list[float] = []
         self._n_updates  = 0
@@ -217,8 +221,10 @@ def run_incremental_update(
     current_wmape = float(compute_wmape(y_new.values, preds))
     existing.record_wmape(current_wmape)
 
-    # Save updated model
-    storage.save_pickle(existing, "models/incremental.pkl")
+    # Save updated model. ClientStorage delegates blob writes through
+    # `.backend` (LocalStorageBackend / S3StorageBackend); save_pickle
+    # lives on the backend with the HMAC-signed envelope wrapper.
+    storage.backend.save_pickle(existing, f"{client_id}/models/incremental.pkl")
 
     elapsed = time.perf_counter() - t0
     logger.info(

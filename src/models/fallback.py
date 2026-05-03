@@ -131,7 +131,10 @@ class ForecastingService:
 
     def __init__(self, config: dict):
         self.config = config
-        self.primary  = None
+        # Initialised None, populated by load_primary() / fit_primary().
+        # Annotated as Any so the chaos test can stuff a stub object in
+        # without mypy complaining about None-only inference.
+        self.primary: object = None
         self.fallback = SeasonalNaiveModel(seasonality=7)
         self._using_fallback = False
 

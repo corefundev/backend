@@ -139,11 +139,19 @@ class SKUForecaster:
 def log_to_mlflow(
     config: dict,
     metrics: dict,
-    model: SKUForecaster,
+    model: object,            # SKUForecaster | MIMOForecaster | EnsembleForecaster
     model_path: str,
     client_id: str = "default",
 ) -> str:
-    """Log run to MLflow and return run_id."""
+    """
+    Log run to MLflow and return run_id.
+
+    The `model` parameter is accepted as `object` because the function
+    only logs its serialised artefact path, not any forecaster-specific
+    attribute — supporting three concrete classes through a single
+    permissive type instead of a Union avoids forecaster.py needing to
+    know about ensemble.py / mimo.py at import time.
+    """
     mlflow.set_tracking_uri(config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(config["mlflow"]["experiment_name"])
 

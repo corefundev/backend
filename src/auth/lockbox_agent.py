@@ -105,9 +105,19 @@ def _build_jwt(sa_key: dict, now: int) -> str:
     payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode())
     signing_in  = header_b64 + b"." + payload_b64
 
+    # YC service-account keys are RSA-2048 by spec; narrow the union
+    # the loader returns so .sign() resolves to the RSA overload that
+    # accepts (data, padding, algorithm). Other key types (Ed25519,
+    # DH, etc.) have a different .sign() signature and are rejected
+    # at runtime by Lockbox anyway.
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
     priv = serialization.load_pem_private_key(
         sa_key["private_key"].encode(), password=None
     )
+    if not isinstance(priv, RSAPrivateKey):
+        raise LockboxError(
+            f"YC SA key must be RSA, got {type(priv).__name__}"
+        )
     sig = priv.sign(
         signing_in,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),

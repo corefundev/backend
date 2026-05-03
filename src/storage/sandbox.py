@@ -99,7 +99,9 @@ class DockerSandbox:
         try:
             import docker
             self._docker = docker
-            self._client = docker.from_env()
+            # `docker` package ships no PEP 561 stubs, so mypy treats
+            # the module as `object`; from_env is real at runtime.
+            self._client = docker.from_env()    # type: ignore[attr-defined]
         except ImportError as e:
             raise ImportError("docker SDK required. pip install docker") from e
         except Exception as e:

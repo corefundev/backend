@@ -131,8 +131,6 @@ class _NoOpSpan:
 
 
 class _NoOpTracer:
-    from contextlib import contextmanager as _cm
-
     @contextmanager
     def start_as_current_span(self, name: str, **kw):
         yield _NoOpSpan()
