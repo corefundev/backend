@@ -214,6 +214,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-docker]
     permissions:
+      # Setting any explicit permissions disables the default bundle —
+      # actions/checkout then can't fetch the repo. Re-grant `contents:
+      # read` so checkout works alongside the SARIF upload's
+      # security-events scope.
+      contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
