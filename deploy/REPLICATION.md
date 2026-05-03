@@ -49,14 +49,26 @@ GitHub Actions → "Setup PG Replication (Primary)" → Run workflow
   slot_name:        replica_1
 ```
 
-What it does (idempotent — safe to re-run):
+The workflow is a thin wrapper:
 
-- Creates / updates `replicator` role with the password from
-  `REPLICATION_PASSWORD` secret
-- Adds a pg_hba.conf line allowing the role from the replica CIDR
-- Reloads postgres (no restart)
-- Creates physical replication slot
-- Opens UFW for 5432 from the replica CIDR (if UFW is active)
+1. scp's `docker/docker-compose.replication.yml` overlay (re-publishes
+   port 5432, since `docker-compose.minimal.yml` does `ports: !reset []`)
+   and `scripts/setup_replication_primary.sh` to `/srv/backend/`.
+2. `docker compose ... up -d postgres` to recreate postgres with the
+   port published (data volume preserved, brief downtime).
+3. SSHs and runs `setup_replication_primary.sh` with REPL_USER /
+   REPL_PW / REPL_CIDR / SLOT_NAME from env. The script is idempotent
+   and does:
+   - CREATE / ALTER `replicator` role with the password from
+     `REPLICATION_PASSWORD` secret.
+   - Strips any prior managed pg_hba line and writes a fresh one
+     marked `# pg-replication-managed` (so subsequent runs find and
+     replace it cleanly).
+   - `SELECT pg_reload_conf()` + verifies via `pg_hba_file_rules`.
+   - Creates the physical replication slot if missing.
+   - Tries to open UFW for 5432 from the replica CIDR (no-op when
+     UFW is inactive — Docker iptables governs port exposure in our
+     stack, see follow-up #165).
 
 ### 3. Bootstrap the replica
 
@@ -168,7 +180,41 @@ from a fresh `pg_basebackup`, it will pick up where the slot left off.
 | Path                                              | Lives on  | Purpose                      |
 |---------------------------------------------------|-----------|------------------------------|
 | `.github/workflows/setup-replication-primary.yml` | repo      | One-shot primary config      |
-| `docker/docker-compose.replica.yml`               | repo      | Replica compose definition   |
+| `scripts/setup_replication_primary.sh`            | repo→primary | Logic the workflow runs   |
+| `docker/docker-compose.replication.yml`           | repo→primary | Re-publishes pg port 5432 |
+| `docker/docker-compose.replica.yml`               | repo→replica | Replica standby compose   |
 | `scripts/bootstrap_replica.sh`                    | repo      | Local → replica bootstrap    |
 | `/srv/postgres-replica/data`                      | replica   | postgres data dir            |
 | `/srv/postgres-replica/docker-compose.replica.yml`| replica   | runtime copy                 |
+
+## Verifying replication health (live commands)
+
+From your local box, against the replica VPS:
+
+```bash
+# 1. Replica is in standby mode + WAL receiver streaming.
+ssh deploy@db-replica.testcore.ru \
+  'docker exec postgres-replica psql -U sku -d sku_forecasting -c \
+   "SELECT status, sender_host, written_lsn, latest_end_lsn FROM pg_stat_wal_receiver;"'
+
+# 2. Replay lag (how far behind the primary the replica is).
+ssh deploy@db-replica.testcore.ru \
+  'docker exec postgres-replica psql -U sku -d sku_forecasting -c \
+   "SELECT pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(),
+           now() - pg_last_xact_replay_timestamp() AS replay_lag;"'
+```
+
+Healthy state:
+- `status = streaming`
+- `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()` (no replay backlog)
+- `replay_lag` close to zero
+
+## Known limitations / follow-ups
+
+| # | Issue | Why it matters | Tracked |
+|---|-------|----------------|---------|
+| 1 | Plaintext WAL stream over public internet | WAL contains all writes — credentials, audit events, etc. Sniffable by anyone on path. | TODO: `hostssl` rule + cert |
+| 2 | UFW does not gate 5432 (Docker NAT bypasses it) | Anyone can reach 5432 even if pg_hba refuses; brute-force surface. | #165 |
+| 3 | Async replication only | A primary failure + lag at that moment = data loss. Acceptable for our SLAs. | — |
+| 4 | Manual promote required | DR runbook is human-driven. Patroni/repmgr would automate. | TODO |
+| 5 | No postgres-exporter on replica VPS | Can't see lag in Grafana. | TODO |
