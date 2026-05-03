@@ -734,6 +734,14 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         # roll it back (audit-ugly), but we log loudly.
         logger.warning("signup: post-create rate-limit hit for ip=%s", ip)
 
+    from src.audit import record_event, EVT_SIGNUP
+    record_event(
+        event_type=EVT_SIGNUP,
+        client_id=desired_cid, actor_email=canonical,
+        ip=ip, user_agent=http_req.headers.get("user-agent"),
+        metadata={"plan": Plan.FREE.value, "method": "email_otp"},
+    )
+
     token = create_access_token(client_id=desired_cid, roles=["forecast"])
     return SignupVerifyResponse(
         client_id=desired_cid,
@@ -745,7 +753,7 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
 
 
 @app.post("/auth/login", response_model=SignupAcceptedResponse, tags=["auth"])
-async def auth_login_email(req: LoginEmailRequest):
+async def auth_login_email(req: LoginEmailRequest, http_req: Request):
     """
     Email-OTP login (claude.ai-style). Step 1: send OTP if user exists.
 
@@ -789,6 +797,20 @@ async def auth_login_email(req: LoginEmailRequest):
             # returning 503 selectively. Better the user sees "email
             # never arrived" once than enumeration becomes possible.
 
+    # Audit: only the user-facing intent — we don't audit the "user does
+    # not exist" branch to keep the enumeration story consistent.
+    from src.audit import record_event, EVT_OTP_SEND
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    record_event(
+        event_type=EVT_OTP_SEND,
+        actor_email=canonical,
+        client_id=record.client_id if record else None,
+        ip=_client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        success=record is not None and record.email_verified_at is not None,
+        metadata={"purpose": "login"},
+    )
+
     return SignupAcceptedResponse(
         status="otp_sent",
         email=email,
@@ -803,7 +825,7 @@ class LoginVerifyResponse(BaseModel):
 
 
 @app.post("/auth/login/verify", response_model=LoginVerifyResponse, tags=["auth"])
-async def auth_login_verify(req: VerifyOtpRequest):
+async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     """
     Step 2 of email login. Verifies OTP, returns a JWT under the client_id
     bound to that email. No api_key here — login by email is meant to be
@@ -824,14 +846,31 @@ async def auth_login_verify(req: VerifyOtpRequest):
     record = store.find_active(canonical, PURPOSE_LOGIN)
     is_match = verify_otp(req.code, record.code_hash if record else None)
 
+    from src.audit import record_event, EVT_LOGIN
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    _audit_ip = _client_ip(http_req)
+    _audit_ua = http_req.headers.get("user-agent")
+
     if not is_match:
         if record is not None:
             new_attempts = store.increment_attempts(record.id)
             if new_attempts >= otp_max_attempts():
                 store.mark_used(record.id)
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "invalid_otp"},
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     if record is None or record.attempts >= otp_max_attempts():
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "expired_or_no_otp"},
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     registry = get_registry()
@@ -840,6 +879,12 @@ async def auth_login_verify(req: VerifyOtpRequest):
         # The email had a valid OTP but the user is gone (deleted between
         # /auth/login and /auth/login/verify). Don't leak this — keep the
         # response indistinguishable from a wrong-code path.
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "client_gone"},
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     store.mark_used(record.id)
@@ -847,6 +892,12 @@ async def auth_login_verify(req: VerifyOtpRequest):
     # Email-login → forecast role. Admin role is reserved for the
     # ADMIN_API_KEY path; you don't get to be admin via email-OTP.
     token = create_access_token(client_id=client.client_id, roles=["forecast"])
+    record_event(
+        event_type=EVT_LOGIN, event_subtype="success",
+        client_id=client.client_id, actor_email=canonical,
+        ip=_audit_ip, user_agent=_audit_ua, success=True,
+        metadata={"method": "email_otp"},
+    )
     return LoginVerifyResponse(
         client_id=client.client_id,
         access_token=token,
@@ -1158,6 +1209,23 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
 
     # ── Step 5: redirect to frontend with JWT ────────────────────────
     token = create_access_token(client_id=record.client_id, roles=["forecast"])
+
+    from src.audit import record_event, EVT_OAUTH_CALLBACK, EVT_SIGNUP
+    _audit_ip = client_ip(request)
+    _audit_ua = request.headers.get("user-agent")
+    record_event(
+        event_type=EVT_OAUTH_CALLBACK, event_subtype="success",
+        client_id=record.client_id, actor_email=record.email_canonical or record.email,
+        ip=_audit_ip, user_agent=_audit_ua,
+        metadata={"provider": identity.provider, "is_new_user": is_new_user},
+    )
+    if is_new_user:
+        record_event(
+            event_type=EVT_SIGNUP,
+            client_id=record.client_id, actor_email=record.email_canonical or record.email,
+            ip=_audit_ip, user_agent=_audit_ua,
+            metadata={"plan": Plan.FREE.value, "method": f"oauth:{identity.provider}"},
+        )
 
     return_url = _frontend_return_url()
     qs = {
@@ -2155,6 +2223,7 @@ class PlanUpgradeRequest(BaseModel):
 async def upgrade_client_plan(
     client_id: str,
     req: PlanUpgradeRequest,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     require_client_access(client_id, auth)
@@ -2182,7 +2251,70 @@ async def upgrade_client_plan(
         "plan upgrade: client=%s %s → %s (auth_role=%s)",
         client_id, record.plan, target.value, ",".join(auth.roles or []),
     )
+
+    from src.audit import record_event, EVT_PLAN_CHANGE
+    from src.auth.signup_rate_limit import client_ip as _client_ip
+    # "upgrade" subtype only when moving to a higher tier; index uses
+    # FREE < START < BUSINESS ordering implicit in the enum definition.
+    plan_order = {Plan.FREE.value: 0, Plan.START.value: 1, Plan.BUSINESS.value: 2}
+    subtype = "upgrade" if plan_order.get(target.value, 0) > plan_order.get(record.plan, 0) else "downgrade"
+    record_event(
+        event_type=EVT_PLAN_CHANGE, event_subtype=subtype,
+        client_id=client_id, actor_email=record.email_canonical or record.email,
+        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="plan", target_id=target.value,
+        metadata={"old_plan": record.plan, "new_plan": target.value},
+    )
     return {"plan": target.value, "display_name": spec.display_name, "changed": True}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Audit log read API — user's own security timeline
+# ──────────────────────────────────────────────────────────────────
+
+@app.get("/clients/{client_id}/audit", tags=["audit"])
+async def list_audit_events(
+    client_id: str,
+    limit:  int = 100,
+    offset: int = 0,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Recent security events for the caller's account: logins, OAuth,
+    plan changes, password changes. Backs the "Security" tab in the
+    UI. Caller can only see their own events — admin role can read
+    any client's via the same endpoint.
+
+    Bounded params (limit ≤ 500) so a malicious caller can't DOS the
+    DB with a huge OFFSET scan.
+    """
+    require_client_access(client_id, auth)
+    if limit < 1 or limit > 500:
+        raise HTTPException(422, detail="limit must be between 1 and 500")
+    if offset < 0:
+        raise HTTPException(422, detail="offset must be ≥ 0")
+    from src.audit import list_for_client
+    events = list_for_client(client_id, limit=limit, offset=offset)
+    return {
+        "client_id": client_id,
+        "count":     len(events),
+        "events":    [
+            {
+                "id":            e.id,
+                "ts":            e.ts,
+                "event_type":    e.event_type,
+                "event_subtype": e.event_subtype,
+                "actor_email":   e.actor_email,
+                "target_type":   e.target_type,
+                "target_id":     e.target_id,
+                "ip":            e.ip,
+                "user_agent":    e.user_agent,
+                "success":       e.success,
+                "metadata":      e.metadata,
+            }
+            for e in events
+        ],
+    }
 
 
 # ──────────────────────────────────────────────────────────────────

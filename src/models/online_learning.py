@@ -140,7 +140,7 @@ class IncrementalForecaster:
                 f"recent WMAPE={recent:.3f} vs earlier={earlier:.3f} "
                 f"(+{(recent-earlier)/earlier:.1%} > {threshold_pct:.0%} threshold)"
             )
-        return degrading
+        return bool(degrading)
 
     # ── Persistence ───────────────────────────────────────────
 
