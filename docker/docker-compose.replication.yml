@@ -1,4 +1,6 @@
-# Re-publishes the primary's postgres port for streaming replication.
+# Re-publishes the primary's postgres port for streaming replication
+# AND ships a privileged sidecar that locks 5432 down to the replica
+# IP via DOCKER-USER iptables rules.
 #
 # docker-compose.minimal.yml does `ports: !reset []` to keep postgres
 # off the public network in the standard prod stack. With a replica
@@ -6,17 +8,73 @@
 # the port back. Append this file LAST in the compose -f chain.
 #
 # Defence-in-depth (since the port is now reachable):
+#   • pg-firewall sidecar — DOCKER-USER chain rule that drops 5432
+#     traffic from anywhere except REPLICA_CIDR + localhost. Survives
+#     dockerd / host restart via `restart: always`.
 #   • pg_hba.conf restricts `replication` to the replica CIDR only —
 #     no other host can authenticate as `replicator`.
 #   • scram-sha-256 + a 32-char random password.
-#   • Application roles (`sku`) are NOT exposed to the new pg_hba rule;
-#     only the replication-specific user is.
-#   • TODO: add an iptables DOCKER-USER chain rule to drop 5432 from
-#     anything other than REPLICA_CIDR. Tracked as a follow-up — Docker
-#     publishes via NAT and bypasses UFW, so plain UFW rules don't
-#     close this surface.
+#
+# Why a sidecar instead of OS-level iptables-persistent: the deploy
+# user on this VPS doesn't have NOPASSWD sudo, so `apt-get install
+# iptables-persistent` and `netfilter-persistent save` fail under
+# automation. Running iptables inside a privileged --net=host
+# container needs only docker-group membership, which deploy already
+# has. Idempotent, self-healing, no manual sudoers edit.
 
 services:
   postgres:
     ports:
       - "5432:5432"
+
+  pg-firewall:
+    image: alpine:3.20
+    container_name: pg-firewall
+    # privileged + network_mode: host gives the container CAP_NET_ADMIN
+    # against the HOST's iptables (not its own netns). That's the
+    # documented escape-hatch for this kind of bootstrap.
+    privileged: true
+    network_mode: host
+    restart: always
+    environment:
+      REPLICA_CIDR: "${REPLICA_CIDR:-212.8.226.233/32}"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache iptables >/dev/null
+        ensure_rule() {
+            while iptables -C DOCKER-USER "$$@" 2>/dev/null; do
+                iptables -D DOCKER-USER "$$@"
+            done
+            iptables -I DOCKER-USER 1 "$$@"
+        }
+        # Insert in REVERSE final order — first inserted ends up last
+        # (top-of-chain insert pushes earlier rules down). Final order:
+        #   1. ACCEPT replica
+        #   2. ACCEPT localhost
+        #   3. DROP everyone
+        ensure_rule -p tcp --dport 5432 -j DROP \
+            -m comment --comment "pg-fw-deny"
+        ensure_rule -p tcp --dport 5432 -s 127.0.0.1/8 -j ACCEPT \
+            -m comment --comment "pg-fw-localhost"
+        ensure_rule -p tcp --dport 5432 -s "$$REPLICA_CIDR" -j ACCEPT \
+            -m comment --comment "pg-fw-replica"
+        echo "pg-firewall: rules applied for REPLICA_CIDR=$$REPLICA_CIDR"
+        iptables -L DOCKER-USER -n -v --line-numbers | head -10
+        # Sleep so the container stays alive — `restart: always` would
+        # otherwise treat exit-0 as "completed" and not restart on
+        # dockerd reload, leaving the rules un-managed. Periodic re-
+        # apply (every hour) heals against any external table flush.
+        while true; do
+            sleep 3600
+            ensure_rule -p tcp --dport 5432 -j DROP -m comment --comment "pg-fw-deny"
+            ensure_rule -p tcp --dport 5432 -s 127.0.0.1/8 -j ACCEPT -m comment --comment "pg-fw-localhost"
+            ensure_rule -p tcp --dport 5432 -s "$$REPLICA_CIDR" -j ACCEPT -m comment --comment "pg-fw-replica"
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"

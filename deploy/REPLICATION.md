@@ -214,7 +214,7 @@ Healthy state:
 | # | Issue | Why it matters | Tracked |
 |---|-------|----------------|---------|
 | 1 | Plaintext WAL stream over public internet | WAL contains all writes — credentials, audit events, etc. Sniffable by anyone on path. | TODO: `hostssl` rule + cert |
-| 2 | UFW does not gate 5432 (Docker NAT bypasses it) | ~~Anyone can reach 5432 even if pg_hba refuses; brute-force surface.~~ Closed via DOCKER-USER iptables rules. | shipped (workflow `Setup PG Firewall (Primary)`) |
+| 2 | UFW does not gate 5432 (Docker NAT bypasses it) | ~~Anyone can reach 5432 even if pg_hba refuses; brute-force surface.~~ Closed via privileged `pg-firewall` sidecar in `docker-compose.replication.yml` — manages DOCKER-USER chain rules without OS-level sudo. | shipped |
 | 3 | Async replication only | A primary failure + lag at that moment = data loss. Acceptable for our SLAs. | — |
 | 4 | Manual promote required | DR runbook is human-driven. Patroni/repmgr would automate. | TODO |
 | 5 | No postgres-exporter on replica VPS | Can't see lag in Grafana. | TODO |

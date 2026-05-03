@@ -65,26 +65,47 @@ jobs:
               "chmod +x /srv/backend/scripts/setup_replication_primary.sh && \
                ls -la /srv/backend/docker/docker-compose.replication.yml /srv/backend/scripts/setup_replication_primary.sh"
 
-      - name: Recreate postgres with port published
+      - name: Recreate postgres + bring up firewall sidecar
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST:     ${{ secrets.VPS_HOST }}
+          VPS_USER:     ${{ secrets.VPS_USER }}
+          REPLICA_CIDR: ${{ inputs.replica_cidr }}
         run: |
           set -euo pipefail
-          ssh -q "${VPS_USER}@${VPS_HOST}" '
+          # `up -d` (no service args) brings up everything declared,
+          # including the pg-firewall sidecar from the replication
+          # overlay. REPLICA_CIDR is exported into the remote shell so
+          # the overlay's ${REPLICA_CIDR:-...} sees the real value.
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              "REPLICA_CIDR='$REPLICA_CIDR' bash -s" <<'EOF'
           set -e
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
-          docker compose $COMPOSE_ARGS up -d postgres
+          docker compose $COMPOSE_ARGS up -d postgres pg-firewall
+
           for i in $(seq 1 30); do
               S=$(docker compose $COMPOSE_ARGS ps --format "{{.Health}}" postgres 2>/dev/null || true)
-              [ "$S" = "healthy" ] && { echo "postgres healthy after ${i}s"; exit 0; }
+              [ "$S" = "healthy" ] && { echo "postgres healthy after ${i}s"; break; }
               sleep 1
           done
-          echo "postgres did not become healthy in 30s" >&2
-          docker compose $COMPOSE_ARGS logs --tail=50 postgres >&2
-          exit 1
-          '
+          if [ "$S" != "healthy" ]; then
+              echo "postgres did not become healthy in 30s" >&2
+              docker compose $COMPOSE_ARGS logs --tail=50 postgres >&2
+              exit 1
+          fi
+
+          echo "--- pg-firewall sidecar status ---"
+          docker compose $COMPOSE_ARGS ps pg-firewall
+          # Wait briefly for the sidecar's first iptables-apply pass.
+          for i in $(seq 1 10); do
+              if docker logs pg-firewall 2>&1 | grep -q "rules applied"; then
+                  echo "firewall rules applied after ${i}s"
+                  break
+              fi
+              sleep 1
+          done
+          docker logs pg-firewall 2>&1 | tail -15
+          EOF
 
       - name: Run setup script on primary
         env:
