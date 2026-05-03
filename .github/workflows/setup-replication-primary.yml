@@ -171,16 +171,23 @@ jobs:
 
           echo "[2/6] pg_hba"
           HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
-          HBA_LINE="host    replication    $REPL_USER    $REPL_CIDR    scram-sha-256"
-          if docker exec "$PG_CONTAINER" grep -qF "$REPL_CIDR" "$HBA_PATH" 2>/dev/null; then
-              echo "    pg_hba already has entry for $REPL_CIDR"
-          else
-              docker exec "$PG_CONTAINER" sh -c "echo \"$HBA_LINE\" >> $HBA_PATH"
-              echo "    added: $HBA_LINE"
-          fi
+          # Idempotent rewrite: strip any line we manage, append a fresh,
+          # explicitly-marked entry. Sed runs inside the container.
+          docker exec "$PG_CONTAINER" sh -c \
+              "sed -i -e '/# pg-replication-managed/d' -e '/host[[:space:]]\\+replication[[:space:]]\\+'\"$REPL_USER\"'/d' '$HBA_PATH'"
+          HBA_LINE="host    replication    $REPL_USER    $REPL_CIDR    scram-sha-256    # pg-replication-managed"
+          docker exec "$PG_CONTAINER" sh -c "printf '%s\\n' \"$HBA_LINE\" >> '$HBA_PATH'"
+          echo "    wrote: $HBA_LINE"
+          echo "    --- replication lines now in pg_hba.conf ---"
+          docker exec "$PG_CONTAINER" grep -E '^[[:space:]]*host[[:space:]]+replication' "$HBA_PATH" \
+              || echo "    (none — that's a problem)"
 
-          echo "[3/6] reload"
+          echo "[3/6] reload + verify"
           run_sql -c "SELECT pg_reload_conf();"
+          # pg_hba_file_rules is the parsed-in-memory view; if reload
+          # picked up the line, it shows up here. Errors (e.g. typo) also
+          # appear in the `error` column.
+          run_sql -c "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules WHERE database @> ARRAY['replication'];"
 
           echo "[4/6] slot"
           if run_sql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = $SLOT_LIT" | grep -q '^1$'; then
