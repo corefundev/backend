@@ -12,6 +12,11 @@
 #
 # Triggered manually only (workflow_dispatch). Uses the same SSH-secret
 # convention as the rotate-lockbox-key workflow (VPS_*).
+#
+# Implementation: the remote script is a single-quoted heredoc fed to
+# `ssh ... bash -s` via stdin, with values passed as POSITIONAL args.
+# That means zero escaping inside the heredoc — what you see is what
+# remote bash sees.
 
 name: Setup PG Replication (Primary)
 
@@ -74,79 +79,92 @@ jobs:
             echo "ERROR: secrets.REPLICATION_PASSWORD is empty" >&2
             exit 1
           fi
-
-          # Composite remote command. Each step prints what it did so
-          # the GHA log is readable. Heredoc expands $REPL_* on the
-          # local runner — quoted single-EOF would defer expansion to
-          # the remote, where REPL_* aren't defined.
-          # Multi-file compose stack — same args pattern as rotate_lockbox_key.sh.
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
-          ssh -q "${VPS_USER}@${VPS_HOST}" bash <<EOF
+          # bash -s + positional args: VAR_* on remote are populated from
+          # $1..$N.  Heredoc is single-quoted ('REMOTE') so it's verbatim
+          # — no $-expansion on the runner, no escaping inside.
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              bash -s -- \
+              "$VPS_COMPOSE_DIR" \
+              "$REPL_USER" \
+              "$REPL_PW" \
+              "$REPL_CIDR" \
+              "$SLOT_NAME" <<'REMOTE'
           set -e
-          cd ${VPS_COMPOSE_DIR}
-          PG_CONTAINER=\$(docker compose ${COMPOSE_ARGS} ps -q postgres)
-          if [ -z "\$PG_CONTAINER" ]; then
-            # Fallback: image-based discovery (in case compose project name shifted).
-            PG_CONTAINER=\$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
+          VPS_COMPOSE_DIR="$1"
+          REPL_USER="$2"
+          REPL_PW="$3"
+          REPL_CIDR="$4"
+          SLOT_NAME="$5"
+
+          cd "$VPS_COMPOSE_DIR"
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml"
+          PG_CONTAINER=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null || true)
+          if [ -z "$PG_CONTAINER" ]; then
+              PG_CONTAINER=$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}' | head -1)
           fi
-          if [ -z "\$PG_CONTAINER" ]; then
-            echo "ERROR: postgres container not found" >&2
-            exit 1
+          if [ -z "$PG_CONTAINER" ]; then
+              echo "ERROR: postgres container not found" >&2
+              exit 1
           fi
-          echo "    postgres container: \$PG_CONTAINER"
+          echo "    postgres container: $PG_CONTAINER"
+
+          # Helper: run psql, with role/db pre-baked.
+          run_sql() {
+              docker exec -i "$PG_CONTAINER" psql -U sku -d sku_forecasting -v ON_ERROR_STOP=1 "$@"
+          }
+
           echo "[1/6] role"
-          docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting -v ON_ERROR_STOP=1 <<'PSQL'
-          DO \$\$
-          BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${REPL_USER}') THEN
-              CREATE ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
-              RAISE NOTICE 'Created role ${REPL_USER}';
-            ELSE
-              ALTER ROLE ${REPL_USER} WITH REPLICATION LOGIN PASSWORD '${REPL_PW}';
-              RAISE NOTICE 'Updated role ${REPL_USER}';
-            END IF;
-          END \$\$;
-          PSQL
+          # Existence check via -tAc (tuples-only, unaligned). Idempotent
+          # via bash branching — avoids PL/pgSQL DO $$ entirely.
+          # Quote literals with PG's standard ''-doubling rule.
+          REPL_USER_LIT="'$(printf '%s' "$REPL_USER" | sed "s/'/''/g")'"
+          REPL_PW_LIT="'$(printf '%s' "$REPL_PW"   | sed "s/'/''/g")'"
+          SLOT_LIT="'$(printf '%s' "$SLOT_NAME"   | sed "s/'/''/g")'"
+          # Identifier — double-quote and double any embedded ".
+          REPL_USER_ID='"'"$(printf '%s' "$REPL_USER" | sed 's/"/""/g')"'"'
+          if run_sql -tAc "SELECT 1 FROM pg_roles WHERE rolname = $REPL_USER_LIT" | grep -q '^1$'; then
+              run_sql -c "ALTER ROLE $REPL_USER_ID WITH REPLICATION LOGIN PASSWORD $REPL_PW_LIT;"
+              echo "    altered role"
+          else
+              run_sql -c "CREATE ROLE $REPL_USER_ID WITH REPLICATION LOGIN PASSWORD $REPL_PW_LIT;"
+              echo "    created role"
+          fi
 
           echo "[2/6] pg_hba"
-          HBA_LINE="host    replication    ${REPL_USER}    ${REPL_CIDR}    scram-sha-256"
-          HBA_PATH=\$(docker exec "\$PG_CONTAINER" sh -c 'echo \$PGDATA')/pg_hba.conf
-          if docker exec "\$PG_CONTAINER" grep -qF "${REPL_CIDR}" "\$HBA_PATH" 2>/dev/null; then
-            echo "    pg_hba already has entry for ${REPL_CIDR}"
+          HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
+          HBA_LINE="host    replication    $REPL_USER    $REPL_CIDR    scram-sha-256"
+          if docker exec "$PG_CONTAINER" grep -qF "$REPL_CIDR" "$HBA_PATH" 2>/dev/null; then
+              echo "    pg_hba already has entry for $REPL_CIDR"
           else
-            docker exec "\$PG_CONTAINER" sh -c "echo '\$HBA_LINE' >> \$HBA_PATH"
-            echo "    added: \$HBA_LINE"
+              docker exec "$PG_CONTAINER" sh -c "echo \"$HBA_LINE\" >> $HBA_PATH"
+              echo "    added: $HBA_LINE"
           fi
 
           echo "[3/6] reload"
-          docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting -c "SELECT pg_reload_conf();"
+          run_sql -c "SELECT pg_reload_conf();"
 
           echo "[4/6] slot"
-          docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting <<PSQL2
-          SELECT pg_create_physical_replication_slot('${SLOT_NAME}')
-          WHERE NOT EXISTS (
-            SELECT 1 FROM pg_replication_slots WHERE slot_name = '${SLOT_NAME}'
-          );
-          SELECT slot_name, slot_type, active, restart_lsn
-            FROM pg_replication_slots
-           WHERE slot_name = '${SLOT_NAME}';
-          PSQL2
+          if run_sql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = $SLOT_LIT" | grep -q '^1$'; then
+              echo "    slot $SLOT_NAME already exists"
+          else
+              run_sql -c "SELECT pg_create_physical_replication_slot($SLOT_LIT);"
+              echo "    created slot $SLOT_NAME"
+          fi
+          run_sql -c "SELECT slot_name, slot_type, active, restart_lsn FROM pg_replication_slots WHERE slot_name = $SLOT_LIT;"
 
           echo "[5/6] WAL settings"
-          docker exec -i "\$PG_CONTAINER" psql -U sku -d sku_forecasting -c \\
-            "SELECT name, setting FROM pg_settings WHERE name IN ('wal_level','max_wal_senders','max_replication_slots');"
+          run_sql -c "SELECT name, setting FROM pg_settings WHERE name IN ('wal_level','max_wal_senders','max_replication_slots');"
 
           echo "[6/6] UFW"
           if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
-            if sudo ufw status numbered | grep -qE "5432.*${REPL_CIDR}"; then
-              echo "    UFW already permits 5432 from ${REPL_CIDR}"
-            else
-              sudo ufw allow from "${REPL_CIDR}" to any port 5432 proto tcp comment "pg-replication"
-              echo "    allowed 5432 from ${REPL_CIDR}"
-            fi
+              if sudo ufw status numbered | grep -qE "5432.*$REPL_CIDR"; then
+                  echo "    UFW already permits 5432 from $REPL_CIDR"
+              else
+                  sudo ufw allow from "$REPL_CIDR" to any port 5432 proto tcp comment "pg-replication"
+                  echo "    allowed 5432 from $REPL_CIDR"
+              fi
           else
-            echo "    UFW not active — Docker iptables governs port exposure"
+              echo "    UFW not active — Docker iptables governs port exposure"
           fi
-
           echo "DONE"
-          EOF
+          REMOTE
