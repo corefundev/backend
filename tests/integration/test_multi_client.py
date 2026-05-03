@@ -301,12 +301,6 @@ class TestMultiClientConcurrent:
 
 class TestConfigIsolationMultiClient:
 
-    @pytest.mark.skip(
-        reason="Known test-isolation bug — passes in isolation, fails when "
-               "run after sibling integration tests due to shared "
-               "/tmp/artifacts pickle artefacts. Tracked as task #157; "
-               "re-enable once fixtures get root-isolated ARTIFACTS_DIR."
-    )
     def test_different_horizons_produce_different_result_lengths(self, three_clients, tmp_path):
         """
         client_a: horizon=7, client_b: horizon=14

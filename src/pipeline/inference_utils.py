@@ -52,9 +52,18 @@ def load_model_any_format(model_path: str, config: dict):
     - Any object with .predict() + .feature_cols
 
     This is the single source of truth for model loading.
+
+    HMAC envelope: ClientStorage.save_pickle wraps pickles in a SKUSIG1
+    envelope with an HMAC tag (defence against pickle RCE). Plain
+    pickle.load on those bytes produced a "STRING opcode" error and
+    flaked the integration suite that downloaded models to disk and
+    then re-read them through this function. Route every load through
+    backend._verify so signed and unsigned blobs both work.
     """
+    from src.storage.backend import _verify
     with open(model_path, "rb") as f:
-        obj = pickle.load(f)
+        data = f.read()
+    obj = pickle.loads(_verify(data))
 
     # Already a model object
     if hasattr(obj, "predict") and hasattr(obj, "feature_cols"):

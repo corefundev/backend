@@ -420,12 +420,6 @@ class TestFeatureStoreIsolation:
 
 class TestConfigIsolation:
 
-    @pytest.mark.skip(
-        reason="Known test-isolation bug — passes in isolation, fails when "
-               "run after sibling integration tests due to shared "
-               "/tmp/artifacts pickle artefacts. Tracked as task #157; "
-               "re-enable once fixtures get root-isolated ARTIFACTS_DIR."
-    )
     def test_each_client_uses_its_own_horizon(self, workspace):
         """Verify different horizons produce different forecast lengths."""
         from src.pipeline.train import run_training_pipeline
