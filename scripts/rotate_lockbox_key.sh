@@ -128,10 +128,23 @@ echo "[3/5] docker compose restart on VPS"
 ssh -q "${VPS_USER}@${VPS_HOST}" \
     "cd ${VPS_COMPOSE_DIR} && docker compose ${COMPOSE_ARGS} restart api worker scan-worker process-worker"
 
+# Reload the front-door nginx so it re-resolves the api upstream's IP.
+# `docker compose restart` is supposed to keep container IPs stable, but
+# in practice the brief window when the api isn't accepting connections
+# leaves nginx in a "no live upstream" state until its DNS cache (default
+# 30-300s) refreshes. A signal-based reload is instantaneous and harmless
+# if the IP hasn't moved.
+ssh -q "${VPS_USER}@${VPS_HOST}" \
+    "docker exec docker-nginx-1 nginx -s reload" || \
+    echo "       warning: nginx reload failed (continuing — readiness probe will tell)"
+
 # ── Step 4: post-check — verify API is healthy under the new key ────────
+# 18 attempts × 6s = ~108s upper bound. The previous 60s was tight when
+# the api had to bootstrap Lockbox secrets (~10-20s on cold start) plus
+# rebuild the OTel/Telegram poll loops.
 echo "[4/5] waiting for /readyz to pass"
 OK=0
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for attempt in $(seq 1 18); do
     sleep 6
     if curl -fsS --max-time 5 "$API_HEALTH_URL" >/dev/null 2>&1; then
         OK=1
