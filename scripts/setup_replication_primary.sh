@@ -35,6 +35,40 @@ COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-comp
 
 cd "$VPS_COMPOSE_DIR"
 
+# ── 0. SSL cert (idempotent generation via privileged docker) ──────
+# Deploy user lacks sudo for openssl + chown 70:70, so we run it in a
+# throwaway alpine container that mounts the secrets dir. The cert is
+# self-signed (this is internal infra), valid 1 year, with SANs for
+# both DNS hostname and primary's public IP. Replica trusts this cert
+# directly (acts as its own CA).
+SSL_DIR="$VPS_COMPOSE_DIR/secrets/pg-ssl"
+mkdir -p "$SSL_DIR"
+if [ ! -f "$SSL_DIR/server.crt" ] || [ ! -f "$SSL_DIR/server.key" ]; then
+    echo "[0/7] generating SSL cert (one-time)"
+    docker run --rm \
+        -v "$SSL_DIR:/out" \
+        alpine:3.20 \
+        sh -c '
+            apk add --no-cache openssl >/dev/null
+            openssl req -new -x509 -days 365 -nodes \
+                -keyout /out/server.key \
+                -out /out/server.crt \
+                -subj "/CN=api.testcore.ru" \
+                -addext "subjectAltName=DNS:api.testcore.ru,IP:62.217.181.157"
+            chown 70:70 /out/server.crt /out/server.key
+            chmod 644 /out/server.crt
+            chmod 600 /out/server.key
+        '
+    echo "    cert generated: $SSL_DIR/server.{crt,key}"
+else
+    echo "[0/7] SSL cert already present, leaving as-is"
+fi
+# Print public cert between markers so the operator can copy it to
+# the replica VPS. Private key never leaves primary.
+echo "===PG_REPLICATION_CERT_START==="
+cat "$SSL_DIR/server.crt"
+echo "===PG_REPLICATION_CERT_END==="
+
 # ── Find postgres container ────────────────────────────────────────
 PG_CONTAINER=$(docker compose $COMPOSE_ARGS ps -q postgres 2>/dev/null || true)
 if [ -z "$PG_CONTAINER" ]; then
@@ -67,23 +101,29 @@ fi
 # ── 2. pg_hba.conf — managed line, idempotent ─────────────────────
 echo "[2/6] pg_hba"
 HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
-# Build the sed program in a temp file so quoting is trivial.
+# Build the sed program in a temp file so quoting is trivial. Match
+# both the marker comment AND any prior line with the right shape so
+# old `host` lines (pre-TLS) are also stripped.
 SED_PROG=$(mktemp)
 cat > "$SED_PROG" <<EOF
 /# pg-replication-managed/d
 /host[[:space:]]\\+replication[[:space:]]\\+$REPL_USER[[:space:]]/d
+/hostssl[[:space:]]\\+replication[[:space:]]\\+$REPL_USER[[:space:]]/d
 EOF
 docker cp "$SED_PROG" "$PG_CONTAINER:/tmp/replication.sed"
 rm -f "$SED_PROG"
 docker exec "$PG_CONTAINER" sed -i -f /tmp/replication.sed "$HBA_PATH"
 docker exec "$PG_CONTAINER" rm -f /tmp/replication.sed
 
-HBA_LINE="host    replication    $REPL_USER    $REPL_CIDR    scram-sha-256    # pg-replication-managed"
+# `hostssl` (not `host`) requires SSL — plaintext attempts get rejected
+# at auth time. Combined with ssl=on + cert mount in the compose
+# overlay, this enforces encryption end-to-end.
+HBA_LINE="hostssl replication    $REPL_USER    $REPL_CIDR    scram-sha-256    # pg-replication-managed"
 # Append the line via a tee fed by stdin — avoids any quoting in shell.
 echo "$HBA_LINE" | docker exec -i "$PG_CONTAINER" tee -a "$HBA_PATH" >/dev/null
 echo "    wrote: $HBA_LINE"
 echo "    --- replication lines now in pg_hba.conf ---"
-docker exec "$PG_CONTAINER" grep -E '^[[:space:]]*host[[:space:]]+replication' "$HBA_PATH" \
+docker exec "$PG_CONTAINER" grep -E '^[[:space:]]*(host|hostssl)[[:space:]]+replication' "$HBA_PATH" \
     || echo "    (none — that's a problem)"
 
 # ── 3. Reload + verify ────────────────────────────────────────────

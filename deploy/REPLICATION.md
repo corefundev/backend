@@ -213,7 +213,7 @@ Healthy state:
 
 | # | Issue | Why it matters | Tracked |
 |---|-------|----------------|---------|
-| 1 | Plaintext WAL stream over public internet | WAL contains all writes — credentials, audit events, etc. Sniffable by anyone on path. | TODO: `hostssl` rule + cert |
+| 1 | Plaintext WAL stream over public internet | ~~WAL contains all writes — credentials, audit events, etc. Sniffable by anyone on path.~~ Closed via self-signed cert + ssl=on + hostssl pg_hba + sslmode=verify-ca on replica. | shipped (Phase A: workflow `Setup PG Replication (Primary)`, Phase B: `scripts/configure_replica_ssl.sh`) |
 | 2 | UFW does not gate 5432 (Docker NAT bypasses it) | ~~Anyone can reach 5432 even if pg_hba refuses; brute-force surface.~~ Closed via privileged `pg-firewall` sidecar in `docker-compose.replication.yml` — manages DOCKER-USER chain rules without OS-level sudo. | shipped |
 | 3 | Async replication only | A primary failure + lag at that moment = data loss. Acceptable for our SLAs. | — |
 | 4 | Manual promote required | DR runbook is human-driven. Patroni/repmgr would automate. | TODO |

@@ -38,6 +38,11 @@ services:
       POSTGRES_PASSWORD: ignored-already-initialized
     volumes:
       - /srv/postgres-replica/data:/var/lib/postgresql/data
+      # Public cert from primary, used to verify the WAL stream is
+      # really coming from our primary (sslmode=verify-ca). Populated
+      # by scripts/configure_replica_ssl.sh after the primary's TLS
+      # rollout. Read-only — replica never writes here.
+      - /srv/postgres-replica/ssl:/etc/ssl/pg:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sku -d sku_forecasting"]
       interval: 10s
