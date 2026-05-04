@@ -65,10 +65,21 @@ jobs:
               sleep 1
           done
 
-          # Verify the env var landed in the running container. Mask the
-          # password so the workflow log stays clean.
+          # Verify Lockbox-injected vars by running bootstrap_secrets()
+          # in a fresh Python process inside the container. `docker exec
+          # sh -c 'echo $VAR'` would only see compose-set env (Lockbox
+          # injects via Python's os.environ AFTER process start), so we
+          # need actual Python to introspect.
           API=$(docker compose $COMPOSE_ARGS ps -q api)
-          echo "--- DATABASE_URL_REPLICA presence in api container ---"
-          docker exec "$API" sh -c 'echo "${DATABASE_URL_REPLICA:-(unset)}"' \
-              | sed -E 's|://([^:]+):[^@]+@|://\1:***@|'
+          echo "--- DATABASE_URL_REPLICA presence (via bootstrap_secrets) ---"
+          docker exec "$API" python -c "
+          import os
+          from src.auth.vault_agent import bootstrap_secrets
+          bootstrap_secrets()
+          val = os.environ.get('DATABASE_URL_REPLICA', '(unset)')
+          # Mask password before printing.
+          import re
+          masked = re.sub(r'://([^:]+):[^@]+@', r'://\1:***@', val)
+          print(masked)
+          " 2>&1 | tail -5
           EOF
