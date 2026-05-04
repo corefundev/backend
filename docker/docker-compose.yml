@@ -447,6 +447,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # Bounded log rotation — without this Docker uses the unbounded
+    # default and historical config-parse errors stick around forever.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
 
   # ── RQ exporter (queue metrics) ────────────────────────────────
   # Polls Redis for RQ queue stats (jobs_total, queue_size, worker_count).
