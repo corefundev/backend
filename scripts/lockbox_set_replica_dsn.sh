@@ -13,6 +13,30 @@
 
 set -euo pipefail
 
+# Pick up yc from common install paths if it's not on PATH already.
+# YC's installer drops it in ~/yandex-cloud/bin and adds it to shell
+# rc, but a fresh non-login terminal might not have inherited that.
+if ! command -v yc >/dev/null 2>&1; then
+    for candidate in "$HOME/yandex-cloud/bin" /opt/homebrew/bin /usr/local/bin; do
+        if [ -x "$candidate/yc" ]; then
+            export PATH="$candidate:$PATH"
+            break
+        fi
+    done
+fi
+if ! command -v yc >/dev/null 2>&1; then
+    cat >&2 <<EOF
+ERROR: yc CLI not found on PATH or in ~/yandex-cloud/bin.
+
+Install:
+  curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+  exec \$SHELL -l
+
+Then re-run this script.
+EOF
+    exit 1
+fi
+
 SECRET_NAME="${SECRET_NAME:-sku-app-secrets}"
 REPLICA_HOST="${REPLICA_HOST:-db-replica.testcore.ru}"
 REPLICA_PORT="${REPLICA_PORT:-5432}"
