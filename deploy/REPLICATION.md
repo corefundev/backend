@@ -170,7 +170,15 @@ expiry).
 
 The Prometheus alert `PgReplicationCertExpiringSoon` fires when the
 cert is <30 days from expiry, surfacing this as a normal alert flow
-rather than a "we forgot and broke prod" incident.
+rather than a "we forgot and broke prod" incident. Backed by
+`ssl_cert_not_after` from `ssl-exporter` (in `docker/docker-compose.yml`),
+which probes `postgres:5432` via PostgreSQL StartTLS every 60s.
+
+Verify the metric is alive:
+```promql
+(ssl_cert_not_after{job="ssl-pg-tls"} - time()) / 86400
+```
+Expect ~365 right after rotation, decreasing 1/day.
 
 ### Rotation procedure (~5 min downtime on replica's WAL stream)
 
