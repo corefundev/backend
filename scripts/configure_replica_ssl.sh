@@ -76,18 +76,30 @@ for i in $(seq 1 18); do
 done
 
 # ── 3. Augment primary_conninfo with SSL params ────────────────────
-# We only ADD sslmode + sslrootcert. The host/user/password stay as
-# bootstrap_replica.sh originally wrote them. Idempotent: strip any
-# pre-existing ssl* params first, then append.
+# We only TWEAK sslmode (prefer→verify-ca) + ADD sslrootcert. The
+# host/user/password stay as bootstrap_replica.sh originally wrote
+# them. Idempotent: strip any pre-existing sslmode/sslrootcert tokens
+# first, then append fresh ones inside the closing quote.
+#
+# Build the sed program in a local file and `docker cp` it in — keeps
+# the host-bash escaping flat and avoids the multi-layer-quoting bog.
 echo "[3/5] augmenting primary_conninfo with SSL"
-ssh_remote "docker exec postgres-replica sh -c \"
-    sed -i \\
-        -e 's/ sslmode=[^ ']*//g' \\
-        -e 's/ sslrootcert=[^ ']*//g' \\
-        -e \\\"s|primary_conninfo = '\\\\(.*\\\\)'|primary_conninfo = '\\\\1 sslmode=verify-ca sslrootcert=/etc/ssl/pg/server.crt'|\\\" \\
-        $DATA_REMOTE/postgresql.auto.conf
-    grep ^primary_conninfo $DATA_REMOTE/postgresql.auto.conf
-\"" | sed 's/password=[^ ]*/password=***/'
+SED_PROG=$(mktemp)
+cat > "$SED_PROG" <<'SED'
+/^primary_conninfo/ {
+    s/ *sslmode=[^ ']*//g
+    s/ *sslrootcert=[^ ']*//g
+    s|'$| sslmode=verify-ca sslrootcert=/etc/ssl/pg/server.crt'|
+}
+SED
+scp -q "${SSH_OPTS[@]}" "$SED_PROG" "$REPLICA_HOST:/tmp/ssl-augment.sed"
+rm -f "$SED_PROG"
+ssh_remote "docker cp /tmp/ssl-augment.sed postgres-replica:/tmp/ssl-augment.sed"
+ssh_remote "docker exec postgres-replica sed -i -f /tmp/ssl-augment.sed /var/lib/postgresql/data/postgresql.auto.conf"
+ssh_remote "docker exec postgres-replica rm -f /tmp/ssl-augment.sed && rm -f /tmp/ssl-augment.sed"
+echo "    --- new primary_conninfo ---"
+ssh_remote "docker exec postgres-replica grep ^primary_conninfo /var/lib/postgresql/data/postgresql.auto.conf" \
+    | sed 's/password=[^ ]*/password=***/'
 
 # ── 4. Reload + force walreceiver to reconnect ─────────────────────
 echo "[4/5] reloading + restarting walreceiver"
