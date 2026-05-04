@@ -106,16 +106,24 @@ jobs:
           fi
           ls -la "$SSL_DIR"
 
-          docker compose $COMPOSE_ARGS up -d postgres pg-firewall
+          # --force-recreate wipes any stuck container from a previous
+          # failed run (e.g. SSL cert was missing → restart-loop with
+          # exponential backoff). Fresh container reads the now-present
+          # cert and starts cleanly.
+          docker compose $COMPOSE_ARGS up -d --force-recreate postgres pg-firewall
 
-          for i in $(seq 1 30); do
+          # Wait up to 60s — even a fresh start can take ~10s, and we
+          # want margin if the previous container's stale state needs
+          # to settle.
+          S=""
+          for i in $(seq 1 60); do
               S=$(docker compose $COMPOSE_ARGS ps --format "{{.Health}}" postgres 2>/dev/null || true)
               [ "$S" = "healthy" ] && { echo "postgres healthy after ${i}s"; break; }
               sleep 1
           done
           if [ "$S" != "healthy" ]; then
-              echo "postgres did not become healthy in 30s" >&2
-              docker compose $COMPOSE_ARGS logs --tail=50 postgres >&2
+              echo "postgres did not become healthy in 60s" >&2
+              docker compose $COMPOSE_ARGS logs --tail=80 postgres >&2
               exit 1
           fi
 
