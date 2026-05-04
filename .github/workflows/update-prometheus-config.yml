@@ -70,8 +70,12 @@ jobs:
           docker exec "$PROM" tail -25 /etc/prometheus/prometheus.yml
 
           echo "--- reload ---"
-          # Capture body and exit code so a config-parse error surfaces
-          RESP=$(docker exec "$PROM" wget -qO- --post-data= --content-on-error \
+          # BusyBox wget's --post-data= sends an empty POST body, which
+          # is what /-/reload expects. Capture both response body and
+          # transport status. A non-2xx response prints to stderr but
+          # wget still exits 0 for protocol errors → check by polling
+          # /api/v1/status/runtimeinfo afterwards.
+          RESP=$(docker exec "$PROM" wget -qSO- --post-data= \
               http://localhost:9090/-/reload 2>&1) || {
               echo "RELOAD FAILED:"; echo "$RESP"; exit 1
           }
