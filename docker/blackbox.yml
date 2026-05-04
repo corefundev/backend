@@ -1,0 +1,26 @@
+# blackbox-exporter modules — used by Prometheus to probe TLS endpoints
+# and emit `probe_ssl_earliest_cert_expiry` and friends.
+#
+# The pg_starttls module speaks the postgres SSLRequest handshake,
+# upgrades the connection to TLS, and lets blackbox introspect the
+# server cert. We use it to expose cert expiry for the replication
+# port (5432), so PgReplicationCertExpiringSoon can fire well before
+# the annual rotation deadline.
+
+modules:
+  pg_starttls:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      # PostgreSQL SSLRequest message: 8 bytes — length=8 + magic
+      # 80877103 (0x04d2162f). Server replies with single byte 'S'
+      # (0x53) to accept TLS; anything else means TLS not supported.
+      query_response:
+        - send: "\x00\x00\x00\x08\x04\xd2\x16\x2f"
+          expect: "^S$"
+      tls: true
+      tls_config:
+        # We're checking cert EXPIRY, not chain validity (the cert is
+        # self-signed; chain check would always fail). The expiry value
+        # comes from the cert blackbox sees during handshake.
+        insecure_skip_verify: true

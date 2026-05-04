@@ -426,6 +426,24 @@ services:
       retries: 3
       start_period: 10s
 
+  # blackbox-exporter — TLS endpoint probing for cert-expiry alerts.
+  # Used by the PgReplicationCertExpiringSoon alert to surface
+  # `probe_ssl_earliest_cert_expiry` for the replication TLS endpoint
+  # well before the annual self-signed cert needs rotating.
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    restart: unless-stopped
+    volumes:
+      - ./blackbox.yml:/config/blackbox.yml:ro
+    command:
+      - "--config.file=/config/blackbox.yml"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9115/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # ── RQ exporter (queue metrics) ────────────────────────────────
   # Polls Redis for RQ queue stats (jobs_total, queue_size, worker_count).
   # No secrets needed — just a Redis URL.

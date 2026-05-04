@@ -22,6 +22,11 @@ on:
         description: "Physical replication slot name"
         required: true
         default: "replica_1"
+      force_regen_cert:
+        description: "Force-regenerate the SSL cert (annual rotation)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   setup-primary:
@@ -67,17 +72,18 @@ jobs:
 
       - name: Recreate postgres + bring up firewall sidecar
         env:
-          VPS_HOST:     ${{ secrets.VPS_HOST }}
-          VPS_USER:     ${{ secrets.VPS_USER }}
-          REPLICA_CIDR: ${{ inputs.replica_cidr }}
+          VPS_HOST:         ${{ secrets.VPS_HOST }}
+          VPS_USER:         ${{ secrets.VPS_USER }}
+          REPLICA_CIDR:     ${{ inputs.replica_cidr }}
+          FORCE_REGEN_CERT: ${{ inputs.force_regen_cert }}
         run: |
           set -euo pipefail
           # `up -d` (no service args) brings up everything declared,
           # including the pg-firewall sidecar from the replication
-          # overlay. REPLICA_CIDR is exported into the remote shell so
-          # the overlay's ${REPLICA_CIDR:-...} sees the real value.
+          # overlay. REPLICA_CIDR + FORCE_REGEN_CERT are exported into
+          # the remote shell.
           ssh -q "${VPS_USER}@${VPS_HOST}" \
-              "REPLICA_CIDR='$REPLICA_CIDR' bash -s" <<'EOF'
+              "REPLICA_CIDR='$REPLICA_CIDR' FORCE_REGEN_CERT='$FORCE_REGEN_CERT' bash -s" <<'EOF'
           set -e
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
@@ -85,8 +91,17 @@ jobs:
           # Cert MUST exist before postgres starts — the new compose
           # overlay's `ssl=on -c ssl_cert_file=...` will fail-loop
           # otherwise. Generation is idempotent: skips if files present.
+          # FORCE_REGEN_CERT=true wipes the existing cert first — this
+          # is the rotation path (cert is valid 1 year, plan for rotation
+          # in March/April each year, well before the May expiry).
           SSL_DIR=/srv/backend/secrets/pg-ssl
           mkdir -p "$SSL_DIR"
+          if [ "$FORCE_REGEN_CERT" = "true" ]; then
+              echo "force-regen requested — removing existing cert"
+              # docker run as root to remove files owned by uid 70
+              docker run --rm -v "$SSL_DIR:/out" alpine:3.20 \
+                  sh -c 'rm -f /out/server.crt /out/server.key'
+          fi
           if [ ! -f "$SSL_DIR/server.crt" ] || [ ! -f "$SSL_DIR/server.key" ]; then
               echo "generating SSL cert (one-time)"
               docker run --rm -v "$SSL_DIR:/out" alpine:3.20 sh -c '

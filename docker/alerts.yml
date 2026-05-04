@@ -126,3 +126,58 @@ groups:
           team:     forecasting
         annotations:
           summary:     "Postgres connections >80% of max_connections"
+
+      # The self-signed cert that backs the primary→replica WAL TLS
+      # is valid 1 year. Fire well before expiry so rotation can be
+      # done in business hours, not at 3am when streaming dies.
+      - alert: PgReplicationCertExpiringSoon
+        expr: |
+          (probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"} - time()) / 86400 < 30
+        for:   1h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "PG replication TLS cert expires in <30 days ({{ $value | printf \"%.0f\" }} days left)"
+          description: "Self-signed cert at /srv/backend/secrets/pg-ssl/server.crt expires soon. Rotate via the Setup PG Replication (Primary) workflow with force_regen_cert=true; runbook in deploy/REPLICATION.md → 'SSL cert rotation'."
+
+      - alert: PgReplicationCertExpired
+        expr: |
+          (probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"} - time()) / 86400 < 0
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "PG replication TLS cert HAS EXPIRED — replica streaming will break on next reconnect"
+          description: "Rotate immediately. Runbook in deploy/REPLICATION.md."
+
+  - name: replication
+    rules:
+      - alert: PgReplicaLagHigh
+        # If the replica falls more than 60s behind primary, alert.
+        # Lag in seconds = now - last replayed transaction's timestamp.
+        expr: |
+          pg_replication_lag_seconds{job="postgres-replica"} > 60
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Replica is {{ $value | printf \"%.0f\" }}s behind primary"
+          description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. Network or WAL apply bottleneck."
+
+      - alert: PgReplicaWalReceiverDown
+        # Replica disconnected from primary's WAL stream entirely.
+        # pg_replication_is_replica=1 + pg_up=1 should always coincide
+        # with active wal_receiver. If pg_up flips to 0 here, the
+        # exporter itself is down (different alert: ReplicaExporterDown).
+        expr: |
+          pg_up{job="postgres-replica"} == 0
+        for:   2m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Replica's postgres-exporter unreachable for 2m"
+          description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."

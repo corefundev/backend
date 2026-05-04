@@ -1,16 +1,22 @@
-# Hot-reload Prometheus config on the primary VPS.
+# Hot-reload Prometheus config + ensure adjacent monitoring services
+# (alerts.yml rules, blackbox-exporter for TLS-cert probing) are in
+# sync with the repo.
 #
-# Trigger: workflow_dispatch — bumping prometheus.yml's scrape jobs is
-# infrequent and shouldn't auto-fire on every push.
+# Trigger: workflow_dispatch — bumping monitoring config is infrequent
+# and shouldn't auto-fire on every push.
 #
-# Mechanism: scp the current docker/prometheus.yml to
-# /srv/backend/docker/prometheus.yml (bind-mounted into the container),
-# then POST /-/reload via curl from inside the container. Prometheus
-# starts with --web.enable-lifecycle, so reload is supported.
+# Files synced (all bind-mounted into containers from /srv/backend/docker/):
+#   - prometheus.yml   → prometheus container, hot-reload via /-/reload
+#   - alerts.yml       → prometheus container, picked up by hot-reload
+#   - blackbox.yml     → blackbox-exporter, picked up on container restart
+#   - docker-compose.yml → ensures blackbox-exporter is defined
 #
-# The reload is no-restart, no-downtime, no-state-loss.
+# Then `docker compose up -d --no-deps prometheus blackbox-exporter`
+# brings up any missing service + restarts blackbox so it re-reads its
+# config. Prometheus reload happens last so the new scrape jobs land
+# after the targets they probe are up.
 
-name: Update Prometheus Config (Primary)
+name: Update Monitoring Config (Primary)
 
 on:
   workflow_dispatch:
@@ -43,19 +49,32 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Push prometheus.yml + reload
+      - name: Push monitoring config files + reload
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          # Repo's docker/prometheus.yml → /srv/backend/docker/prometheus.yml
-          # (the path the bind-mount in docker-compose.yml points at).
-          scp -q docker/prometheus.yml \
-              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/prometheus.yml"
+          # Sync the four files the prometheus + blackbox containers
+          # care about. Bind-mounts in /srv/backend/docker/ pick them up
+          # at next read (prometheus reload, blackbox restart).
+          scp -q \
+              docker/prometheus.yml \
+              docker/alerts.yml \
+              docker/blackbox.yml \
+              docker/docker-compose.yml \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
 
           ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
           set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          # Bring up blackbox-exporter (new service in this update) and
+          # restart it if already running so it re-reads blackbox.yml.
+          docker compose $COMPOSE_ARGS up -d blackbox-exporter
+          docker compose $COMPOSE_ARGS restart blackbox-exporter
+
           PROM=$(docker ps --filter ancestor=prom/prometheus:v2.51.2 --format '{{.ID}}' | head -1)
           if [ -z "$PROM" ]; then
               echo "ERROR: prometheus container not running" >&2
@@ -85,6 +104,10 @@ jobs:
           docker exec "$PROM" wget -qO- \
               'http://localhost:9090/api/v1/query?query=pg_replication_is_replica' \
               | grep -oE '"value":\[[^]]+\]|"replica":"[^"]+"|"host":"[^"]+"'
+          echo "BLACKBOX TLS CERT EXPIRY (days remaining):"
+          docker exec "$PROM" wget -qO- \
+              'http://localhost:9090/api/v1/query?query=(probe_ssl_earliest_cert_expiry-time())/86400' \
+              | grep -oE '"value":\[[^]]+\]|"instance":"[^"]+"'
           echo "════════════════════════════════════════════════════════"
 
           # === Verbose dumps (may get truncated, OK) =====================
