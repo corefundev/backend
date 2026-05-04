@@ -123,6 +123,19 @@ jobs:
               'http://localhost:9090/api/v1/query?query=(probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"}-time())/86400' \
               | grep -oE '"value":\[[^]]+\]|"instance":"[^"]+"' \
               || echo "(no cert-expiry result — check blackbox container logs)"
+
+          # When probe_success=0, dump blackbox debug for the failing
+          # target. The /probe endpoint with debug=true prints the
+          # entire prober trace inline.
+          BB=$(docker ps --filter ancestor=prom/blackbox-exporter:v0.25.0 --format '{{.ID}}' | head -1)
+          if [ -n "$BB" ]; then
+              echo "--- blackbox direct probe (postgres:5432) ---"
+              docker exec "$BB" wget -qO- \
+                  'http://localhost:9115/probe?module=pg_starttls&target=postgres:5432&debug=true' \
+                  | head -80
+              echo "--- blackbox container logs (last 30) ---"
+              docker logs --tail=30 "$BB" 2>&1
+          fi
           echo "════════════════════════════════════════════════════════"
 
           set -e
