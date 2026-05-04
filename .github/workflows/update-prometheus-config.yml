@@ -89,4 +89,15 @@ jobs:
           echo "--- active jobs ---"
           docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/targets \
               | grep -oE '"job":"[^"]+"' | sort -u
+
+          # Wait one scrape interval so the new target has a result.
+          sleep 16
+          echo "--- postgres-replica target detail ---"
+          docker exec "$PROM" wget -qO- \
+              'http://localhost:9090/api/v1/targets?scrapePool=postgres-replica'
+          echo
+          echo "--- spot-check pg_replication_is_replica metric ---"
+          docker exec "$PROM" wget -qO- \
+              'http://localhost:9090/api/v1/query?query=pg_replication_is_replica'
+          echo
           EOF
