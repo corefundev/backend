@@ -76,10 +76,17 @@ jobs:
           import os
           from src.auth.vault_agent import bootstrap_secrets
           bootstrap_secrets()
-          val = os.environ.get('DATABASE_URL_REPLICA', '(unset)')
-          # Mask password before printing.
-          import re
-          masked = re.sub(r'://([^:]+):[^@]+@', r'://\1:***@', val)
-          print(masked)
-          " 2>&1 | tail -5
+          val = os.environ.get('DATABASE_URL_REPLICA', '')
+          if not val:
+              print('STATUS: UNSET — Lockbox entry not picked up')
+          else:
+              # Show structure without leaking password: protocol prefix
+              # and host suffix only.
+              import re
+              m = re.match(r'^(postgresql://[^:]+):[^@]+@(.+)\$', val)
+              if m:
+                  print(f'STATUS: SET ok — {m.group(1)}:***@{m.group(2)}')
+              else:
+                  print(f'STATUS: SET but UNRECOGNISED FORMAT — len={len(val)} starts={val[:18]!r} ends={val[-25:]!r}')
+          " 2>&1 | tail -10
           EOF
