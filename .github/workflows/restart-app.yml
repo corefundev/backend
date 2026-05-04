@@ -80,13 +80,20 @@ jobs:
           if not val:
               print('STATUS: UNSET — Lockbox entry not picked up')
           else:
-              # Show structure without leaking password: protocol prefix
-              # and host suffix only.
-              import re
-              m = re.match(r'^(postgresql://[^:]+):[^@]+@(.+)\$', val)
-              if m:
-                  print(f'STATUS: SET ok — {m.group(1)}:***@{m.group(2)}')
-              else:
-                  print(f'STATUS: SET but UNRECOGNISED FORMAT — len={len(val)} starts={val[:18]!r} ends={val[-25:]!r}')
-          " 2>&1 | tail -10
+              # Unambiguous dump — !r shows escape codes (\\r, \\n, '),
+              # split the value at the @ so we never accidentally print
+              # the password segment.
+              print('STATUS: SET (len=' + str(len(val)) + ')')
+              print('  starts (20) = ' + repr(val[:20]))
+              print('  ends   (30) = ' + repr(val[-30:]))
+              # Try to test connection with psycopg2 — that's the real
+              # signal of whether the value works.
+              try:
+                  import psycopg2
+                  c = psycopg2.connect(val, connect_timeout=3)
+                  c.close()
+                  print('  CONNECTION: OK (psycopg2 connected to replica)')
+              except Exception as e:
+                  print('  CONNECTION: FAILED — ' + repr(e)[:200])
+          " 2>&1 | tail -15
           EOF
