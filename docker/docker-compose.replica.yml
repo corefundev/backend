@@ -36,12 +36,29 @@ services:
       # env presence before checking PGDATA contents). Set it to anything;
       # it's not actually applied because the cluster is already initialized.
       POSTGRES_PASSWORD: ignored-already-initialized
+    # ssl=on so the replica can terminate TLS for read connections from
+    # primary's app code (DATABASE_URL_REPLICA?sslmode=require). Uses a
+    # SEPARATE self-signed cert from primary (replica.crt/replica.key) —
+    # primary's private key is not on this host. App's sslmode=require
+    # only needs encryption, not chain validation; verify-ca would need
+    # the cert distributed to app's trust bundle (follow-up if MITM
+    # protection between primary and replica becomes a concern).
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/ssl/pg/replica.crt
+      - -c
+      - ssl_key_file=/etc/ssl/pg/replica.key
     volumes:
       - /srv/postgres-replica/data:/var/lib/postgresql/data
-      # Public cert from primary, used to verify the WAL stream is
-      # really coming from our primary (sslmode=verify-ca). Populated
-      # by scripts/configure_replica_ssl.sh after the primary's TLS
-      # rollout. Read-only — replica never writes here.
+      # /etc/ssl/pg/ contains TWO certs:
+      #  - server.crt: primary's PUBLIC cert, used for sslmode=verify-ca
+      #    on the WAL CLIENT side (replica → primary).
+      #  - replica.crt + replica.key: replica's OWN cert+key, used for
+      #    ssl=on as a SERVER (primary's app → replica reads).
+      # Read-only mount — cert generation happens out-of-band.
       - /srv/postgres-replica/ssl:/etc/ssl/pg:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sku -d sku_forecasting"]
