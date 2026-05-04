@@ -56,8 +56,6 @@ jobs:
 
           ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
           set -e
-          # Find prometheus container by image (ancestor filter survives
-          # compose project rename).
           PROM=$(docker ps --filter ancestor=prom/prometheus:v2.51.2 --format '{{.ID}}' | head -1)
           if [ -z "$PROM" ]; then
               echo "ERROR: prometheus container not running" >&2
@@ -65,17 +63,26 @@ jobs:
           fi
           echo "prometheus container: $PROM"
 
-          # Hot-reload via /-/reload (enabled by --web.enable-lifecycle).
-          # curl runs INSIDE the container so we don't need 9090 exposed
-          # to the host network — it already is, but this avoids the
-          # firewall hop.
-          docker exec "$PROM" wget -qO- --post-data= http://localhost:9090/-/reload \
-              || { echo "reload failed" >&2; exit 1; }
-          echo "reload OK"
+          echo "--- on-disk prometheus.yml (host) ---"
+          tail -25 /srv/backend/docker/prometheus.yml
 
-          # Show active scrape targets — the new replica job should appear.
+          echo "--- prometheus.yml AS SEEN BY CONTAINER ---"
+          docker exec "$PROM" tail -25 /etc/prometheus/prometheus.yml
+
+          echo "--- reload ---"
+          # Capture body and exit code so a config-parse error surfaces
+          RESP=$(docker exec "$PROM" wget -qO- --post-data= --content-on-error \
+              http://localhost:9090/-/reload 2>&1) || {
+              echo "RELOAD FAILED:"; echo "$RESP"; exit 1
+          }
+          echo "reload returned: $RESP"
+
           sleep 2
-          docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/targets \
-              | head -c 4000
+          echo "--- prometheus's loaded config (scrape jobs only) ---"
+          docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/status/config \
+              | head -c 6000
           echo
+          echo "--- active jobs ---"
+          docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/targets \
+              | grep -oE '"job":"[^"]+"' | sort -u
           EOF
