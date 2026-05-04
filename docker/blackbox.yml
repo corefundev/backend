@@ -12,17 +12,21 @@ modules:
     prober: tcp
     timeout: 5s
     tcp:
-      # PostgreSQL StartTLS handshake:
-      #   1. Plaintext connect.
-      #   2. Send 8-byte SSLRequest (length=8 + magic 80877103 = 0x04d2162f).
-      #   3. Server replies with single byte 'S' (0x53) to accept TLS,
-      #      'N' (0x4E) to reject.
-      #   4. UPGRADE connection to TLS via starttls:true on this step
-      #      (NOT tls:true at top level — that would TLS-on-dial which
-      #      postgres reads as garbage and closes with EOF).
+      # PostgreSQL StartTLS handshake. Each query_response step in
+      # blackbox processes Expect→Send→StartTLS in THAT order. Postgres
+      # is a "client speaks first" protocol — it sends nothing on its
+      # own — so a single step with both send + expect would deadlock
+      # (blackbox waits for server bytes that never come).
+      #
+      # Two-step solution:
+      #   1. Send the 8-byte SSLRequest plaintext. No `expect` → blackbox
+      #      skips the read phase, just writes.
+      #   2. Read the server's 1-byte reply, expect 'S' (TLS accepted),
+      #      then `starttls: true` upgrades the connection to TLS so
+      #      blackbox can introspect the cert for expiry.
       query_response:
         - send: "\x00\x00\x00\x08\x04\xd2\x16\x2f"
-          expect: "^S$"
+        - expect: "^S$"
           starttls: true
       tls_config:
         # Checking cert EXPIRY, not chain validity (the cert is self-
