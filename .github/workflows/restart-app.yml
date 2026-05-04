@@ -1,0 +1,74 @@
+# Force-refresh app containers' env from Lockbox.
+#
+# Use case: any time a secret in YC Lockbox is changed (rotation,
+# new entry like DATABASE_URL_REPLICA, etc.). bootstrap_secrets()
+# reads Lockbox at process start, so a `docker compose restart`
+# picks up the new value.
+#
+# Doesn't touch postgres / redis / clamav / nginx / monitoring —
+# only the services that actually re-read Lockbox at startup
+# (api, worker, scan-worker, process-worker).
+#
+# Triggered manually only.
+
+name: Restart App (refresh Lockbox env)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restart:
+    name: docker compose restart api + workers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Restart app services + verify env
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+          docker compose $COMPOSE_ARGS restart api worker scan-worker process-worker
+
+          # Wait for /readyz so the next step's check is meaningful.
+          for i in $(seq 1 30); do
+              if curl -fsS http://localhost:8000/readyz >/dev/null 2>&1; then
+                  echo "api ready after ${i}s"
+                  break
+              fi
+              sleep 1
+          done
+
+          # Verify the env var landed in the running container. Mask the
+          # password so the workflow log stays clean.
+          API=$(docker compose $COMPOSE_ARGS ps -q api)
+          echo "--- DATABASE_URL_REPLICA presence in api container ---"
+          docker exec "$API" sh -c 'echo "${DATABASE_URL_REPLICA:-(unset)}"' \
+              | sed -E 's|://([^:]+):[^@]+@|://\1:***@|'
+          EOF
