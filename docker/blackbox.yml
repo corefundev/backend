@@ -12,15 +12,20 @@ modules:
     prober: tcp
     timeout: 5s
     tcp:
-      # PostgreSQL SSLRequest message: 8 bytes — length=8 + magic
-      # 80877103 (0x04d2162f). Server replies with single byte 'S'
-      # (0x53) to accept TLS; anything else means TLS not supported.
+      # PostgreSQL StartTLS handshake:
+      #   1. Plaintext connect.
+      #   2. Send 8-byte SSLRequest (length=8 + magic 80877103 = 0x04d2162f).
+      #   3. Server replies with single byte 'S' (0x53) to accept TLS,
+      #      'N' (0x4E) to reject.
+      #   4. UPGRADE connection to TLS via starttls:true on this step
+      #      (NOT tls:true at top level — that would TLS-on-dial which
+      #      postgres reads as garbage and closes with EOF).
       query_response:
         - send: "\x00\x00\x00\x08\x04\xd2\x16\x2f"
           expect: "^S$"
-      tls: true
+          starttls: true
       tls_config:
-        # We're checking cert EXPIRY, not chain validity (the cert is
-        # self-signed; chain check would always fail). The expiry value
-        # comes from the cert blackbox sees during handshake.
+        # Checking cert EXPIRY, not chain validity (the cert is self-
+        # signed; chain check would always fail). Expiry value comes
+        # from the cert blackbox sees during the upgraded handshake.
         insecure_skip_verify: true
