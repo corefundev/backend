@@ -66,7 +66,7 @@ run_sql() {
 }
 
 # ── 1. Role ───────────────────────────────────────────────────────
-echo "[1/6] role"
+echo "[1/7] role"
 # SQL-quote the password by '-doubling. Role name is alnum-only so we
 # don't bother quoting it as a literal — but we do quote it as an
 # identifier when used in CREATE/ALTER.
@@ -80,7 +80,7 @@ else
 fi
 
 # ── 2. pg_hba.conf — managed line, idempotent ─────────────────────
-echo "[2/6] pg_hba"
+echo "[2/7] pg_hba"
 HBA_PATH=$(docker exec "$PG_CONTAINER" sh -c 'echo $PGDATA')/pg_hba.conf
 # Build the sed program in a temp file so quoting is trivial. Match
 # both the marker comment AND any prior line with the right shape so
@@ -108,12 +108,12 @@ docker exec "$PG_CONTAINER" grep -E '^[[:space:]]*(host|hostssl)[[:space:]]+repl
     || echo "    (none — that's a problem)"
 
 # ── 3. Reload + verify ────────────────────────────────────────────
-echo "[3/6] reload + verify"
+echo "[3/7] reload + verify"
 run_sql -c "SELECT pg_reload_conf();"
 run_sql -c "SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules WHERE database @> ARRAY['replication'];"
 
 # ── 4. Slot ───────────────────────────────────────────────────────
-echo "[4/6] slot"
+echo "[4/7] slot"
 if run_sql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = '$SLOT_NAME'" | grep -q '^1$'; then
     echo "    slot $SLOT_NAME already exists"
 else
@@ -122,12 +122,23 @@ else
 fi
 run_sql -c "SELECT slot_name, slot_type, active, restart_lsn FROM pg_replication_slots WHERE slot_name = '$SLOT_NAME';"
 
-# ── 5. WAL settings ───────────────────────────────────────────────
-echo "[5/6] WAL settings"
+# ── 5b. Grant pg_monitor to replicator ───────────────────────────
+# So the postgres-exporter on the replica VPS can scrape pg_stat_*
+# views. pg_monitor is a built-in role (PG 10+) that bundles
+# pg_read_all_settings + pg_read_all_stats + pg_stat_scan_tables.
+# Read-only — no risk of replicator writing anything (which it can't
+# anyway, replica is read-only).
+echo "[5/7] grant pg_monitor to $REPL_USER"
+run_sql -c "GRANT pg_monitor TO \"$REPL_USER\";"
+# Show actual membership for auditability
+run_sql -c "SELECT r.rolname AS role, m.rolname AS member_of FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.member JOIN pg_roles m ON m.oid = am.roleid WHERE r.rolname = '$REPL_USER';"
+
+# ── 6. WAL settings ───────────────────────────────────────────────
+echo "[6/7] WAL settings"
 run_sql -c "SELECT name, setting FROM pg_settings WHERE name IN ('wal_level','max_wal_senders','max_replication_slots');"
 
 # ── 6. UFW ────────────────────────────────────────────────────────
-echo "[6/6] UFW"
+echo "[7/7] UFW"
 if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
     if sudo ufw status numbered | grep -qE "5432.*$REPL_CIDR"; then
         echo "    UFW already permits 5432 from $REPL_CIDR"

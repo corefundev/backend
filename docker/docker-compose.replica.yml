@@ -58,3 +58,84 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # ── Metrics exporter ────────────────────────────────────────────
+  # Exposes pg_stat_* + pg_replication_slots + pg_stat_wal_receiver
+  # for Prometheus scraping. Connects as `replicator` (which has
+  # pg_monitor role granted by setup_replication_primary.sh — replicates
+  # over to here automatically).
+  #
+  # The DATA_SOURCE_NAME password is supplied via REPLICATION_PASSWORD
+  # env on the host (set when running `docker compose up`). Same secret
+  # bootstrap_replica.sh / configure_replica_ssl.sh use.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "postgresql://replicator:${REPLICATION_PASSWORD}@postgres-replica:5432/sku_forecasting?sslmode=disable"
+    depends_on:
+      postgres-replica:
+        condition: service_healthy
+    # Exposed on the public interface so primary's Prometheus can
+    # scrape it. The replica-firewall sidecar below restricts source
+    # IP to PRIMARY_CIDR only — anyone else gets DROP.
+    ports:
+      - "9187:9187"
+    healthcheck:
+      test: ["CMD", "/postgres_exporter", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Replica-side firewall sidecar ───────────────────────────────
+  # Mirrors the pg-firewall pattern from primary's
+  # docker-compose.replication.yml. Restricts incoming TCP/9187
+  # to PRIMARY_CIDR + localhost; everything else gets DROPed in
+  # DOCKER-USER chain. Self-heals every hour.
+  replica-firewall:
+    image: alpine:3.20
+    container_name: replica-firewall
+    privileged: true
+    network_mode: host
+    restart: always
+    environment:
+      PRIMARY_CIDR: "${PRIMARY_CIDR:-62.217.181.157/32}"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache iptables >/dev/null
+        ensure_rule() {
+            while iptables -C DOCKER-USER "$$@" 2>/dev/null; do
+                iptables -D DOCKER-USER "$$@"
+            done
+            iptables -I DOCKER-USER 1 "$$@"
+        }
+        # Final order (top-of-chain insert pushes earlier rules down):
+        #   1. ACCEPT primary
+        #   2. ACCEPT localhost
+        #   3. DROP everyone
+        ensure_rule -p tcp --dport 9187 -j DROP \
+            -m comment --comment "exporter-fw-deny"
+        ensure_rule -p tcp --dport 9187 -s 127.0.0.1/8 -j ACCEPT \
+            -m comment --comment "exporter-fw-localhost"
+        ensure_rule -p tcp --dport 9187 -s "$$PRIMARY_CIDR" -j ACCEPT \
+            -m comment --comment "exporter-fw-primary"
+        echo "replica-firewall: rules applied for PRIMARY_CIDR=$$PRIMARY_CIDR"
+        iptables -L DOCKER-USER -n -v --line-numbers | head -10
+        # Hourly re-apply self-heals against external table flush
+        # (manual ops, dockerd reload).
+        while true; do
+            sleep 3600
+            ensure_rule -p tcp --dport 9187 -j DROP -m comment --comment "exporter-fw-deny"
+            ensure_rule -p tcp --dport 9187 -s 127.0.0.1/8 -j ACCEPT -m comment --comment "exporter-fw-localhost"
+            ensure_rule -p tcp --dport 9187 -s "$$PRIMARY_CIDR" -j ACCEPT -m comment --comment "exporter-fw-primary"
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"

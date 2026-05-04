@@ -33,10 +33,26 @@ scrape_configs:
         regex: "^go_|^process_"
         action: drop
 
-  # Postgres — via postgres_exporter
+  # Postgres — via postgres_exporter (LOCAL: primary's own DB)
   - job_name: "postgres"
     static_configs:
       - targets: ["postgres-exporter:9187"]
+
+  # Postgres — replica VPS (db-replica.testcore.ru / 212.8.226.233).
+  # Replica runs its own postgres-exporter sidecar (see
+  # docker/docker-compose.replica.yml). Replica-firewall sidecar there
+  # restricts source IP to this primary, so anyone else gets DROPed.
+  # 15s scrape interval is fine for lag tracking; pg_replication_slots
+  # + pg_stat_wal_receiver expose written/flushed/replayed LSNs which
+  # let Grafana plot lag in MB.
+  - job_name: "postgres-replica"
+    static_configs:
+      - targets: ["212.8.226.233:9187"]
+        labels:
+          replica: "1"
+          host:    "db-replica.testcore.ru"
+    scrape_interval: 15s
+    scrape_timeout:  10s
   # NOTE: minio scrape removed — production uses Beget S3, not MinIO.
   # The corresponding MinIO alerts in alerts.yml are likewise harmless
   # (they reference metrics that never get produced).
