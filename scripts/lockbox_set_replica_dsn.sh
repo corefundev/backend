@@ -37,7 +37,7 @@ EOF
     exit 1
 fi
 
-SECRET_NAME="${SECRET_NAME:-sku-app-secrets}"
+SECRET_NAME="${SECRET_NAME:-sku-forecasting-secrets}"
 REPLICA_HOST="${REPLICA_HOST:-db-replica.testcore.ru}"
 REPLICA_PORT="${REPLICA_PORT:-5432}"
 DB_NAME="${DB_NAME:-sku_forecasting}"
