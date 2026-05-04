@@ -88,6 +88,25 @@ def _connect():
         return None
 
 
+def _clean_dsn(dsn: Optional[str]) -> Optional[str]:
+    """
+    Defensive trim for env-var DSNs. Strips surrounding whitespace and
+    matching quotes — operators occasionally paste DSNs with extra
+    quotes in vault commands, which breaks psycopg2 with a "could not
+    parse network address" that's hard to diagnose. Treat the trim as
+    forgiveness for that specific class of mistake; log a warning so
+    the operator still knows their value isn't pristine.
+    """
+    if not dsn:
+        return dsn
+    cleaned = dsn.strip()
+    for q in ("'", '"'):
+        if len(cleaned) >= 2 and cleaned.startswith(q) and cleaned.endswith(q):
+            cleaned = cleaned[1:-1]
+            logger.warning("DSN had surrounding %s — stripped. Fix the secret to silence this.", q)
+    return cleaned
+
+
 def _connect_read():
     """
     Connect to REPLICA for reads (list_for_client, recent_failed_logins).
@@ -96,7 +115,7 @@ def _connect_read():
     the standby is briefly down.
     """
     import psycopg2
-    replica_url = os.environ.get("DATABASE_URL_REPLICA")
+    replica_url = _clean_dsn(os.environ.get("DATABASE_URL_REPLICA"))
     if replica_url:
         try:
             return psycopg2.connect(replica_url, connect_timeout=3)

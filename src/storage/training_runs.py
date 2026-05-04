@@ -81,7 +81,15 @@ class PostgresTrainingRunsRegistry:
         # the seconds of streaming-replication lag, which lets primary
         # spend its connection budget on writes (training enqueues,
         # status updates from workers).
-        self._read_url = os.environ.get("DATABASE_URL_REPLICA") or database_url
+        # Strip surrounding quotes/whitespace defensively — operators
+        # occasionally paste DSNs with extra quotes in vault commands,
+        # which would break psycopg2 with cryptic errors.
+        raw_replica = (os.environ.get("DATABASE_URL_REPLICA") or "").strip()
+        for _q in ("'", '"'):
+            if len(raw_replica) >= 2 and raw_replica.startswith(_q) and raw_replica.endswith(_q):
+                raw_replica = raw_replica[1:-1]
+                logger.warning("DATABASE_URL_REPLICA had surrounding %s — stripped.", _q)
+        self._read_url = raw_replica or database_url
         # Schema is owned by migrations/ and applied by the dedicated
         # `migrate` compose service before api/worker start. Registries
         # are pure data accessors now.
