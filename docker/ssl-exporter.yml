@@ -1,0 +1,20 @@
+# ssl-exporter modules — SSL/TLS endpoint probing for cert-expiry alerts.
+#
+# Why ssl-exporter and not blackbox-exporter:
+#   blackbox-exporter's TCP query_response treats Send/Expect strings as
+#   YAML strings, and high bytes (e.g. 0xD2 in PostgreSQL's SSLRequest
+#   magic 0x04D2162F) get UTF-8 encoded by the YAML parser, breaking the
+#   8-byte handshake. ssl-exporter has built-in `starttls: postgres`
+#   support that speaks the protocol natively in Go.
+
+modules:
+  postgres:
+    prober: tcp
+    tcp:
+      # Built-in postgres StartTLS handler — sends SSLRequest, expects
+      # 'S', upgrades to TLS, then introspects the server cert. The cert
+      # is self-signed so we skip chain verification (we only care about
+      # expiry, not chain validity).
+      starttls: postgres
+      tls_config:
+        insecure_skip_verify: true

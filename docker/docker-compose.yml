@@ -426,19 +426,23 @@ services:
       retries: 3
       start_period: 10s
 
-  # blackbox-exporter — TLS endpoint probing for cert-expiry alerts.
+  # ssl-exporter — TLS endpoint probing for cert-expiry alerts.
   # Used by the PgReplicationCertExpiringSoon alert to surface
-  # `probe_ssl_earliest_cert_expiry` for the replication TLS endpoint
-  # well before the annual self-signed cert needs rotating.
-  blackbox-exporter:
-    image: prom/blackbox-exporter:v0.25.0
+  # `ssl_cert_not_after` for the replication TLS endpoint well before
+  # the annual self-signed cert needs rotating. Has native postgres
+  # StartTLS support (blackbox's YAML-byte-encoding broke the 8-byte
+  # SSLRequest handshake — see commit history).
+  ssl-exporter:
+    image: ribbybibby/ssl-exporter:2.4.3
     restart: unless-stopped
     volumes:
-      - ./blackbox.yml:/config/blackbox.yml:ro
+      - ./ssl-exporter.yml:/config/ssl_exporter.yml:ro
     command:
-      - "--config.file=/config/blackbox.yml"
+      - "--config.file=/config/ssl_exporter.yml"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9115/-/healthy"]
+      # ssl-exporter's root /probe lacks /-/healthy; just probe loopback
+      # which always succeeds at the listening-on-port level.
+      test: ["CMD", "wget", "-qO-", "http://localhost:9219/"]
       interval: 30s
       timeout: 5s
       retries: 3

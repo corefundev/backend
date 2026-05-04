@@ -38,15 +38,15 @@ scrape_configs:
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
-  # SSL cert expiry probing — blackbox upgrades a TCP connection to
-  # the replication endpoint via PostgreSQL StartTLS, then exposes
-  # `probe_ssl_earliest_cert_expiry` (unix-time of cert's Not After).
-  # Targets are TCP host:port; module name picks the prober config in
-  # docker/blackbox.yml.
-  - job_name: "blackbox-pg-tls"
+  # SSL cert expiry probing — ssl-exporter upgrades a TCP connection
+  # to the replication endpoint via PostgreSQL StartTLS, then exposes
+  # `ssl_cert_not_after` (unix-time of cert's Not After). Targets are
+  # TCP host:port; module name picks the prober config in
+  # docker/ssl-exporter.yml.
+  - job_name: "ssl-pg-tls"
     metrics_path: /probe
     params:
-      module: [pg_starttls]
+      module: [postgres]
     static_configs:
       - targets:
           - "postgres:5432"             # primary's postgres (in-stack)
@@ -59,7 +59,7 @@ scrape_configs:
       - source_labels: [__param_target]
         target_label:  instance
       - target_label: __address__
-        replacement:   blackbox-exporter:9115
+        replacement:   ssl-exporter:9219
     scrape_interval: 1m
 
   # Postgres — replica VPS (db-replica.testcore.ru / 212.8.226.233).

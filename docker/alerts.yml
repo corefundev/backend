@@ -132,7 +132,7 @@ groups:
       # done in business hours, not at 3am when streaming dies.
       - alert: PgReplicationCertExpiringSoon
         expr: |
-          (probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"} - time()) / 86400 < 30
+          (ssl_cert_not_after{job="ssl-pg-tls"} - time()) / 86400 < 30
         for:   1h
         labels:
           severity: warning
@@ -143,7 +143,7 @@ groups:
 
       - alert: PgReplicationCertExpired
         expr: |
-          (probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"} - time()) / 86400 < 0
+          (ssl_cert_not_after{job="ssl-pg-tls"} - time()) / 86400 < 0
         for:   5m
         labels:
           severity: critical
