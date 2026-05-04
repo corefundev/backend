@@ -76,6 +76,7 @@ def _now_iso() -> str:
 
 
 def _connect():
+    """Connect to PRIMARY for writes (record_event)."""
     import psycopg2
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -85,6 +86,24 @@ def _connect():
     except Exception:
         logger.exception("audit: cannot connect to DATABASE_URL")
         return None
+
+
+def _connect_read():
+    """
+    Connect to REPLICA for reads (list_for_client, recent_failed_logins).
+    Falls back to primary when DATABASE_URL_REPLICA is unset OR the replica
+    is unreachable — read paths should never become unavailable just because
+    the standby is briefly down.
+    """
+    import psycopg2
+    replica_url = os.environ.get("DATABASE_URL_REPLICA")
+    if replica_url:
+        try:
+            return psycopg2.connect(replica_url, connect_timeout=3)
+        except Exception:
+            logger.warning("audit: replica unreachable, falling back to primary")
+    # Fallback path: same as the write connection.
+    return _connect()
 
 
 def record_event(
@@ -157,8 +176,12 @@ def list_for_client(
     """
     Recent events for the given client, newest first. Bounded by the
     `idx_audit_log_client_ts` index.
+
+    Reads go to the standby replica when DATABASE_URL_REPLICA is set —
+    audit timeline is read-heavy and tolerates the ~seconds of replay
+    lag. Falls back to primary if replica is down.
     """
-    conn = _connect()
+    conn = _connect_read()
     if conn is None:
         return []
     try:
@@ -194,8 +217,14 @@ def recent_failed_logins(
     """
     Count of failed login attempts for `actor_email` within the recent
     window. Backs the brute-force lockout check at login time.
+
+    Reads go to the standby replica when DATABASE_URL_REPLICA is set.
+    Replication lag of <5s is acceptable here — a stuffer who fails 10
+    times in <5s gets caught by either the primary's view (next request)
+    or the OTP store's per-row attempt cap. False-negative window is
+    bounded by replay_lag.
     """
-    conn = _connect()
+    conn = _connect_read()
     if conn is None:
         return 0
     try:

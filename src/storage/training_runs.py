@@ -77,12 +77,32 @@ class PostgresTrainingRunsRegistry:
         except ImportError as e:
             raise ImportError("psycopg2-binary required") from e
         self._url = database_url
+        # Optional read replica — reads of training history can tolerate
+        # the seconds of streaming-replication lag, which lets primary
+        # spend its connection budget on writes (training enqueues,
+        # status updates from workers).
+        self._read_url = os.environ.get("DATABASE_URL_REPLICA") or database_url
         # Schema is owned by migrations/ and applied by the dedicated
         # `migrate` compose service before api/worker start. Registries
         # are pure data accessors now.
 
     def _conn(self):
+        """Primary connection — for INSERT/UPDATE."""
         return self._psycopg2.connect(self._url)
+
+    def _conn_read(self):
+        """
+        Replica connection — for SELECT. Falls back to primary when the
+        replica isn't reachable so list/get endpoints stay available
+        through brief replication blips.
+        """
+        try:
+            return self._psycopg2.connect(self._read_url, connect_timeout=3)
+        except Exception:
+            if self._read_url != self._url:
+                logger.warning("training_runs: replica unreachable, falling back to primary")
+                return self._psycopg2.connect(self._url)
+            raise
 
     def create(self, record: TrainingRunRecord) -> None:
         sql = """
@@ -120,7 +140,9 @@ class PostgresTrainingRunsRegistry:
             conn.commit()
 
     def get(self, run_id: str) -> Optional[TrainingRunRecord]:
-        with self._conn() as conn:
+        # Read path → replica when configured. Primary fallback handled
+        # by _conn_read.
+        with self._conn_read() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute("SELECT * FROM sku_training_runs WHERE run_id = %s", (run_id,))
                 row = cur.fetchone()
@@ -161,7 +183,8 @@ class PostgresTrainingRunsRegistry:
         return affected
 
     def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
-        with self._conn() as conn:
+        # Read path → replica when configured.
+        with self._conn_read() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT * FROM sku_training_runs WHERE client_id = %s "

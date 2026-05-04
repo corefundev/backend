@@ -48,11 +48,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Bind only to localhost on the replica VPS for now. Add a second
-    # ports rule (or change to 0.0.0.0:5432:5432) when the primary VPS
-    # needs to query us — guarded by UFW.
+    # Published to 0.0.0.0:5432 so the primary VPS's app code can use
+    # this replica for read queries (DATABASE_URL_REPLICA in compose).
+    # The replica-firewall sidecar below restricts source IP to
+    # PRIMARY_CIDR + localhost — anyone else gets DROPed.
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
     logging:
       driver: json-file
       options:
@@ -114,25 +115,30 @@ services:
             done
             iptables -I DOCKER-USER 1 "$$@"
         }
-        # Final order (top-of-chain insert pushes earlier rules down):
-        #   1. ACCEPT primary
-        #   2. ACCEPT localhost
-        #   3. DROP everyone
-        ensure_rule -p tcp --dport 9187 -j DROP \
-            -m comment --comment "exporter-fw-deny"
-        ensure_rule -p tcp --dport 9187 -s 127.0.0.1/8 -j ACCEPT \
-            -m comment --comment "exporter-fw-localhost"
-        ensure_rule -p tcp --dport 9187 -s "$$PRIMARY_CIDR" -j ACCEPT \
-            -m comment --comment "exporter-fw-primary"
+        # Apply per-port rules. Final order (top-of-chain insert pushes
+        # earlier rules down): ACCEPT primary → ACCEPT localhost → DROP.
+        apply_port() {
+            local port="$$1" tag="$$2"
+            ensure_rule -p tcp --dport "$$port" -j DROP \
+                -m comment --comment "$${tag}-deny"
+            ensure_rule -p tcp --dport "$$port" -s 127.0.0.1/8 -j ACCEPT \
+                -m comment --comment "$${tag}-localhost"
+            ensure_rule -p tcp --dport "$$port" -s "$$PRIMARY_CIDR" -j ACCEPT \
+                -m comment --comment "$${tag}-primary"
+        }
+        # 9187 = postgres-exporter (read by primary's Prometheus).
+        # 5432 = postgres-replica's SQL endpoint (read-replica routing
+        #        from primary's app: DATABASE_URL_REPLICA).
+        apply_port 9187 exporter-fw
+        apply_port 5432  pgread-fw
         echo "replica-firewall: rules applied for PRIMARY_CIDR=$$PRIMARY_CIDR"
-        iptables -L DOCKER-USER -n -v --line-numbers | head -10
+        iptables -L DOCKER-USER -n -v --line-numbers | head -15
         # Hourly re-apply self-heals against external table flush
         # (manual ops, dockerd reload).
         while true; do
             sleep 3600
-            ensure_rule -p tcp --dport 9187 -j DROP -m comment --comment "exporter-fw-deny"
-            ensure_rule -p tcp --dport 9187 -s 127.0.0.1/8 -j ACCEPT -m comment --comment "exporter-fw-localhost"
-            ensure_rule -p tcp --dport 9187 -s "$$PRIMARY_CIDR" -j ACCEPT -m comment --comment "exporter-fw-primary"
+            apply_port 9187 exporter-fw
+            apply_port 5432  pgread-fw
         done
     logging:
       driver: json-file

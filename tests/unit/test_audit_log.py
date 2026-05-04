@@ -56,6 +56,33 @@ def test_recent_failed_logins_returns_zero_on_db_failure(monkeypatch):
     assert recent_failed_logins("alice@example.com") == 0
 
 
+def test_replica_fallback_when_replica_url_unset(monkeypatch):
+    """
+    DATABASE_URL_REPLICA is OPTIONAL. When unset, reads should fall back
+    to the primary connection — operators don't need to dual-configure
+    just to use the audit module.
+    """
+    monkeypatch.delenv("DATABASE_URL_REPLICA", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    from src.audit.log import _connect_read
+    # No primary, no replica → returns None (not an exception).
+    assert _connect_read() is None
+
+
+def test_replica_fallback_when_replica_unreachable(monkeypatch):
+    """
+    DATABASE_URL_REPLICA pointed at an unreachable host should fall back
+    to primary, not raise. Reads must remain available through brief
+    standby outages.
+    """
+    monkeypatch.setenv("DATABASE_URL_REPLICA", "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    from src.audit.log import _connect_read
+    # Replica unreachable + no primary → falls through to _connect → None.
+    # Must not raise.
+    assert _connect_read() is None
+
+
 def test_lockout_threshold_env_vars_have_safe_defaults():
     """
     Both /auth/login/verify and /auth/signup/verify pull
