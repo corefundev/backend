@@ -20,12 +20,32 @@ DB_NAME="${DB_NAME:-sku_forecasting}"
 DB_USER="${DB_USER:-sku}"
 
 echo "→ Fetching POSTGRES_PASSWORD from Lockbox secret '$SECRET_NAME'…"
-PG_PW=$(yc lockbox payload get --name "$SECRET_NAME" --key POSTGRES_PASSWORD --format text 2>/dev/null \
-        | tr -d '[:space:]')
+# Stash to a temp file so we can see stderr if yc fails. set -e would
+# otherwise kill the script silently on any yc error.
+YC_OUT=$(mktemp)
+YC_ERR=$(mktemp)
+set +e
+yc lockbox payload get --name "$SECRET_NAME" --key POSTGRES_PASSWORD --format text \
+    >"$YC_OUT" 2>"$YC_ERR"
+YC_RC=$?
+set -e
+
+if [ $YC_RC -ne 0 ]; then
+    echo "ERROR: yc lockbox payload get failed (rc=$YC_RC):" >&2
+    cat "$YC_ERR" >&2
+    rm -f "$YC_OUT" "$YC_ERR"
+    echo "" >&2
+    echo "Check that:" >&2
+    echo "  - yc CLI is initialized: yc config list" >&2
+    echo "  - You have access to secret '$SECRET_NAME'" >&2
+    echo "  - The key 'POSTGRES_PASSWORD' exists: yc lockbox secret describe --name $SECRET_NAME" >&2
+    exit 2
+fi
+PG_PW=$(tr -d '[:space:]' < "$YC_OUT")
+rm -f "$YC_OUT" "$YC_ERR"
 
 if [ -z "$PG_PW" ]; then
-    echo "ERROR: POSTGRES_PASSWORD entry empty or missing in $SECRET_NAME." >&2
-    echo "       Check: yc lockbox payload get --name $SECRET_NAME --key POSTGRES_PASSWORD" >&2
+    echo "ERROR: POSTGRES_PASSWORD entry empty in $SECRET_NAME." >&2
     exit 2
 fi
 echo "  password length: ${#PG_PW}  (sanity: should be > 8)"
