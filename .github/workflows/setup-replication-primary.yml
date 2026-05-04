@@ -81,6 +81,31 @@ jobs:
           set -e
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          # Cert MUST exist before postgres starts — the new compose
+          # overlay's `ssl=on -c ssl_cert_file=...` will fail-loop
+          # otherwise. Generation is idempotent: skips if files present.
+          SSL_DIR=/srv/backend/secrets/pg-ssl
+          mkdir -p "$SSL_DIR"
+          if [ ! -f "$SSL_DIR/server.crt" ] || [ ! -f "$SSL_DIR/server.key" ]; then
+              echo "generating SSL cert (one-time)"
+              docker run --rm -v "$SSL_DIR:/out" alpine:3.20 sh -c '
+                  apk add --no-cache openssl >/dev/null
+                  openssl req -new -x509 -days 365 -nodes \
+                      -keyout /out/server.key \
+                      -out /out/server.crt \
+                      -subj "/CN=api.testcore.ru" \
+                      -addext "subjectAltName=DNS:api.testcore.ru,IP:62.217.181.157"
+                  chown 70:70 /out/server.crt /out/server.key
+                  chmod 644 /out/server.crt
+                  chmod 600 /out/server.key
+              '
+              echo "cert generated"
+          else
+              echo "SSL cert already present"
+          fi
+          ls -la "$SSL_DIR"
+
           docker compose $COMPOSE_ARGS up -d postgres pg-firewall
 
           for i in $(seq 1 30); do
