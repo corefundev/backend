@@ -65,28 +65,33 @@ services:
             done
             iptables -I DOCKER-USER 1 "$$@"
         }
-        # Insert in REVERSE final order — first inserted ends up last
-        # (top-of-chain insert pushes earlier rules down). Final order:
-        #   1. ACCEPT replica
-        #   2. ACCEPT localhost
-        #   3. DROP everyone
-        ensure_rule -p tcp --dport 5432 -j DROP \
-            -m comment --comment "pg-fw-deny"
-        ensure_rule -p tcp --dport 5432 -s 127.0.0.1/8 -j ACCEPT \
-            -m comment --comment "pg-fw-localhost"
-        ensure_rule -p tcp --dport 5432 -s "$$REPLICA_CIDR" -j ACCEPT \
-            -m comment --comment "pg-fw-replica"
+        apply_rules() {
+            # Final chain order (top-of-chain insert pushes earlier rules down):
+            #   1. RETURN docker-subnet src — outbound from our own
+            #      containers (api → replica:5432) skips this filter.
+            #      Without this rule, app-container outbound to replica
+            #      would also match the dport-5432 DROP and break read-
+            #      replica routing.
+            #   2. ACCEPT replica src on 5432  (incoming WAL request).
+            #   3. ACCEPT localhost on 5432    (host-local backups).
+            #   4. DROP rest on 5432           (external scans).
+            # Insert in reverse so RETURN ends up at the top.
+            ensure_rule -p tcp --dport 5432 -j DROP \
+                -m comment --comment "pg-fw-deny"
+            ensure_rule -p tcp --dport 5432 -s 127.0.0.1/8 -j ACCEPT \
+                -m comment --comment "pg-fw-localhost"
+            ensure_rule -p tcp --dport 5432 -s "$$REPLICA_CIDR" -j ACCEPT \
+                -m comment --comment "pg-fw-replica"
+            ensure_rule -s 172.16.0.0/12 -j RETURN \
+                -m comment --comment "pg-fw-skip-docker-out"
+        }
+        apply_rules
         echo "pg-firewall: rules applied for REPLICA_CIDR=$$REPLICA_CIDR"
         iptables -L DOCKER-USER -n -v --line-numbers | head -10
-        # Sleep so the container stays alive — `restart: always` would
-        # otherwise treat exit-0 as "completed" and not restart on
-        # dockerd reload, leaving the rules un-managed. Periodic re-
-        # apply (every hour) heals against any external table flush.
+        # Periodic re-apply heals against external table flush.
         while true; do
             sleep 3600
-            ensure_rule -p tcp --dport 5432 -j DROP -m comment --comment "pg-fw-deny"
-            ensure_rule -p tcp --dport 5432 -s 127.0.0.1/8 -j ACCEPT -m comment --comment "pg-fw-localhost"
-            ensure_rule -p tcp --dport 5432 -s "$$REPLICA_CIDR" -j ACCEPT -m comment --comment "pg-fw-replica"
+            apply_rules
         done
     logging:
       driver: json-file

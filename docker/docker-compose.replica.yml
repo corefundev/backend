@@ -126,19 +126,25 @@ services:
             ensure_rule -p tcp --dport "$$port" -s "$$PRIMARY_CIDR" -j ACCEPT \
                 -m comment --comment "$${tag}-primary"
         }
-        # 9187 = postgres-exporter (read by primary's Prometheus).
-        # 5432 = postgres-replica's SQL endpoint (read-replica routing
-        #        from primary's app: DATABASE_URL_REPLICA).
-        apply_port 9187 exporter-fw
-        apply_port 5432  pgread-fw
-        echo "replica-firewall: rules applied for PRIMARY_CIDR=$$PRIMARY_CIDR"
-        iptables -L DOCKER-USER -n -v --line-numbers | head -15
-        # Hourly re-apply self-heals against external table flush
-        # (manual ops, dockerd reload).
-        while true; do
-            sleep 3600
+        apply_rules() {
+            # 9187 = postgres-exporter (read by primary's Prometheus).
+            # 5432 = postgres-replica's SQL endpoint (read-replica routing
+            #        from primary's app: DATABASE_URL_REPLICA).
             apply_port 9187 exporter-fw
             apply_port 5432  pgread-fw
+            # RETURN docker-subnet traffic so internal container-to-
+            # container talk (postgres-exporter → postgres-replica:5432)
+            # skips our dport filter — it'd otherwise match and DROP.
+            ensure_rule -s 172.16.0.0/12 -j RETURN \
+                -m comment --comment "replica-fw-skip-docker-out"
+        }
+        apply_rules
+        echo "replica-firewall: rules applied for PRIMARY_CIDR=$$PRIMARY_CIDR"
+        iptables -L DOCKER-USER -n -v --line-numbers | head -15
+        # Hourly re-apply self-heals against external table flush.
+        while true; do
+            sleep 3600
+            apply_rules
         done
     logging:
       driver: json-file
