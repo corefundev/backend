@@ -90,6 +90,10 @@ jobs:
           sleep 18  # one scrape interval + margin
 
           # === HEADLINE ANSWER (top of log) ============================
+          # Verification block — failures shouldn't fail the whole
+          # workflow (the deploy itself succeeded). Each query gets a
+          # `|| echo "(no data yet)"` fallback for fresh-scrape windows.
+          set +e
           echo "════════════════════════════════════════════════════════"
           echo "ACTIVE JOBS:"
           docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/targets \
@@ -104,13 +108,24 @@ jobs:
           docker exec "$PROM" wget -qO- \
               'http://localhost:9090/api/v1/query?query=pg_replication_is_replica' \
               | grep -oE '"value":\[[^]]+\]|"replica":"[^"]+"|"host":"[^"]+"'
+
+          # Blackbox's scrape interval is 1m — wait so the first probe
+          # has landed before we query for cert expiry.
+          echo "(waiting 65s for blackbox first scrape …)"
+          sleep 65
+          echo "BLACKBOX TLS PROBE STATUS (1=ok):"
+          docker exec "$PROM" wget -qO- \
+              'http://localhost:9090/api/v1/query?query=probe_success{job="blackbox-pg-tls"}' \
+              | grep -oE '"value":\[[^]]+\]|"instance":"[^"]+"' \
+              || echo "(no probe_success result — blackbox may not have scraped yet)"
           echo "BLACKBOX TLS CERT EXPIRY (days remaining):"
           docker exec "$PROM" wget -qO- \
-              'http://localhost:9090/api/v1/query?query=(probe_ssl_earliest_cert_expiry-time())/86400' \
-              | grep -oE '"value":\[[^]]+\]|"instance":"[^"]+"'
+              'http://localhost:9090/api/v1/query?query=(probe_ssl_earliest_cert_expiry{job="blackbox-pg-tls"}-time())/86400' \
+              | grep -oE '"value":\[[^]]+\]|"instance":"[^"]+"' \
+              || echo "(no cert-expiry result — check blackbox container logs)"
           echo "════════════════════════════════════════════════════════"
 
-          # === Verbose dumps (may get truncated, OK) =====================
+          set -e
           echo "--- on-disk prometheus.yml ---"
           tail -25 /srv/backend/docker/prometheus.yml
           EOF
