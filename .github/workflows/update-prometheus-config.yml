@@ -61,43 +61,33 @@ jobs:
               echo "ERROR: prometheus container not running" >&2
               exit 1
           fi
-          echo "prometheus container: $PROM"
 
-          echo "--- on-disk prometheus.yml (host) ---"
-          tail -25 /srv/backend/docker/prometheus.yml
+          # Reload first — verbose dumps come after so a truncated log
+          # still shows the answer.
+          docker exec "$PROM" wget -qO- --post-data= \
+              http://localhost:9090/-/reload >/dev/null 2>&1 \
+              && echo "RELOAD: ok" \
+              || { echo "RELOAD: FAILED"; exit 1; }
+          sleep 18  # one scrape interval + margin
 
-          echo "--- prometheus.yml AS SEEN BY CONTAINER ---"
-          docker exec "$PROM" tail -25 /etc/prometheus/prometheus.yml
-
-          echo "--- reload ---"
-          # BusyBox wget's --post-data= sends an empty POST body, which
-          # is what /-/reload expects. Capture both response body and
-          # transport status. A non-2xx response prints to stderr but
-          # wget still exits 0 for protocol errors → check by polling
-          # /api/v1/status/runtimeinfo afterwards.
-          RESP=$(docker exec "$PROM" wget -qSO- --post-data= \
-              http://localhost:9090/-/reload 2>&1) || {
-              echo "RELOAD FAILED:"; echo "$RESP"; exit 1
-          }
-          echo "reload returned: $RESP"
-
-          sleep 2
-          echo "--- prometheus's loaded config (scrape jobs only) ---"
-          docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/status/config \
-              | head -c 6000
-          echo
-          echo "--- active jobs ---"
+          # === HEADLINE ANSWER (top of log) ============================
+          echo "════════════════════════════════════════════════════════"
+          echo "ACTIVE JOBS:"
           docker exec "$PROM" wget -qO- http://localhost:9090/api/v1/targets \
-              | grep -oE '"job":"[^"]+"' | sort -u
+              | grep -oE '"job":"[^"]+","[^"]+"|"job":"[^"]+"' | sort -u | head -20
 
-          # Wait one scrape interval so the new target has a result.
-          sleep 16
-          echo "--- postgres-replica target detail ---"
+          echo "REPLICA TARGET HEALTH:"
           docker exec "$PROM" wget -qO- \
-              'http://localhost:9090/api/v1/targets?scrapePool=postgres-replica'
-          echo
-          echo "--- spot-check pg_replication_is_replica metric ---"
+              'http://localhost:9090/api/v1/targets?scrapePool=postgres-replica' \
+              | grep -oE '"health":"[^"]+"|"lastError":"[^"]*"|"scrapeUrl":"[^"]+"'
+
+          echo "REPLICA METRIC pg_replication_is_replica:"
           docker exec "$PROM" wget -qO- \
-              'http://localhost:9090/api/v1/query?query=pg_replication_is_replica'
-          echo
+              'http://localhost:9090/api/v1/query?query=pg_replication_is_replica' \
+              | grep -oE '"value":\[[^]]+\]|"replica":"[^"]+"|"host":"[^"]+"'
+          echo "════════════════════════════════════════════════════════"
+
+          # === Verbose dumps (may get truncated, OK) =====================
+          echo "--- on-disk prometheus.yml ---"
+          tail -25 /srv/backend/docker/prometheus.yml
           EOF
