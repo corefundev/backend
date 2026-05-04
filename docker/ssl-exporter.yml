@@ -10,11 +10,13 @@
 modules:
   postgres:
     prober: tcp
+    # tls_config sits at the MODULE level in ssl-exporter (different
+    # schema from blackbox-exporter, where it nested under `tcp:`).
+    # Cert is self-signed → skip chain verification; we only need
+    # expiry, not chain validity.
+    tls_config:
+      insecure_skip_verify: true
     tcp:
       # Built-in postgres StartTLS handler — sends SSLRequest, expects
-      # 'S', upgrades to TLS, then introspects the server cert. The cert
-      # is self-signed so we skip chain verification (we only care about
-      # expiry, not chain validity).
+      # 'S', upgrades to TLS, then introspects the server cert.
       starttls: postgres
-      tls_config:
-        insecure_skip_verify: true
