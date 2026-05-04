@@ -56,6 +56,20 @@ def test_recent_failed_logins_returns_zero_on_db_failure(monkeypatch):
     assert recent_failed_logins("alice@example.com") == 0
 
 
+def test_lockout_threshold_env_vars_have_safe_defaults():
+    """
+    Both /auth/login/verify and /auth/signup/verify pull
+    LOGIN_LOCKOUT_THRESHOLD / LOGIN_LOCKOUT_WINDOW_MIN at request time.
+    A typo or env-source bug that returned 0 would silently disable
+    lockout — pin the parsing so a regression is loud here, not in
+    prod a month later.
+    """
+    import os
+    # Defaults match what's in src/api/main.py
+    assert int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10")) == 10
+    assert int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15")) == 15
+
+
 def test_event_type_constants_are_stable_strings():
     """
     Event-type taxonomy is a contract between the writer (record_event

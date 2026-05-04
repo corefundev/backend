@@ -713,7 +713,11 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     a fresh api_key (returned ONCE), and issues a JWT.
 
     Anti-abuse:
-      • OTP attempts cap (built into the OTP store)
+      • OTP attempts cap (per-row, in OTP store)
+      • Per-email sliding-window lockout via audit_log — catches the
+        OTP-store loophole (attacker requests fresh OTP after each
+        max-attempts, repeats indefinitely). Same threshold/window as
+        /auth/login/verify so behaviour stays consistent.
       • Daily new-account cap per /24 subnet (assert before insert,
         record after success)
     """
@@ -728,6 +732,37 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         canonical = canonical_email(email)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid email format")
+
+    from src.audit import record_event, recent_failed_logins, EVT_OTP_VERIFY
+    _audit_ip = client_ip(http_req)
+    _audit_ua = http_req.headers.get("user-agent")
+
+    # Per-email brute-force lockout — shares the audit-window with
+    # login_verify so an attacker can't dodge the cap by alternating
+    # /auth/login/verify and /auth/signup/verify against the same email.
+    LOCKOUT_THRESHOLD = int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10"))
+    LOCKOUT_WINDOW_MIN = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
+    if LOCKOUT_THRESHOLD > 0:
+        recent_fails = recent_failed_logins(canonical, window_minutes=LOCKOUT_WINDOW_MIN)
+        if recent_fails >= LOCKOUT_THRESHOLD:
+            record_event(
+                event_type=EVT_OTP_VERIFY, event_subtype="locked_out_signup",
+                actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+                success=False,
+                metadata={
+                    "recent_fails":  recent_fails,
+                    "window_min":    LOCKOUT_WINDOW_MIN,
+                    "threshold":     LOCKOUT_THRESHOLD,
+                },
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Too many failed attempts; try again in "
+                    f"{LOCKOUT_WINDOW_MIN} minutes."
+                ),
+                headers={"Retry-After": str(LOCKOUT_WINDOW_MIN * 60)},
+            )
 
     # Daily cap pre-check — fail fast before touching the DB.
     ip = client_ip(http_req) or "0.0.0.0"
@@ -755,11 +790,29 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
             new_attempts = store.increment_attempts(record.id)
             if new_attempts >= otp_max_attempts():
                 store.mark_used(record.id)
+        record_event(
+            event_type=EVT_OTP_VERIFY, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "invalid_otp", "purpose": "signup"},
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     if record is None or cid_record is None:
+        record_event(
+            event_type=EVT_OTP_VERIFY, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "expired_or_no_otp", "purpose": "signup"},
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
     if record.attempts >= otp_max_attempts():
+        record_event(
+            event_type=EVT_OTP_VERIFY, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "max_attempts", "purpose": "signup"},
+        )
         raise HTTPException(status_code=429, detail="Too many attempts; request a new code")
 
     desired_cid = cid_record.code_hash
@@ -1177,6 +1230,10 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     if not state:
         raise HTTPException(400, detail="Missing 'state' parameter")
 
+    from src.audit import record_event, EVT_OAUTH_CALLBACK
+    _audit_ip = client_ip(request)
+    _audit_ua = request.headers.get("user-agent")
+
     nonce = request.cookies.get(COOKIE_NAME, "")
     # Explicit non-empty check before HMAC verify. Without this, a
     # crafted state with `nonce=""` would compare equal against an
@@ -1185,11 +1242,24 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     # MODEL_SIGNING_KEY leak elsewhere).
     if not nonce:
         logger.warning("OAuth %s callback without nonce cookie", provider)
+        record_event(
+            event_type=EVT_OAUTH_CALLBACK, event_subtype="missing_nonce",
+            ip=_audit_ip, user_agent=_audit_ua, success=False,
+            metadata={"provider": provider},
+        )
         raise HTTPException(400, detail="Missing OAuth session cookie")
     try:
         verify_state(state, expected_nonce=nonce, expected_provider=provider)
     except StateError as e:
         logger.warning("OAuth %s state rejected: %s", provider, e)
+        # CSRF defence trip — audit this loudly. A burst of these from
+        # the same IP/window should fire a Grafana alert (incident
+        # response signal, not just a noisy user).
+        record_event(
+            event_type=EVT_OAUTH_CALLBACK, event_subtype="csrf_state_rejected",
+            ip=_audit_ip, user_agent=_audit_ua, success=False,
+            metadata={"provider": provider, "reason": str(e)[:200]},
+        )
         raise HTTPException(400, detail="Invalid OAuth state (CSRF defence)")
 
     # ── Step 2 + 3: identity ─────────────────────────────────────────
