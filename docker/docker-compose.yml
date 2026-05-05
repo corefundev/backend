@@ -550,27 +550,23 @@ services:
 
   # ── Alertmanager ──────────────────────────────────────────────
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    # Custom image: alpine + lockbox_bootstrap.sh so the container fetches
+    # TELEGRAM_ALERT_BOT_TOKEN / TELEGRAM_ALERT_CHAT_ID from YC Lockbox at
+    # startup. The bot token never touches /srv/backend/.env — see
+    # docker/Dockerfile.alertmanager + scripts/alertmanager_entrypoint.sh.
+    #
+    # In Lockbox-mode (prod), docker-compose.lockbox.yml mounts the SA
+    # key + sets YC_SA_KEY_FILE / YC_LOCKBOX_SECRET_ID. In dev (no
+    # Lockbox), set TELEGRAM_ALERT_* directly via .env — entrypoint
+    # falls through to render-with-env if YC_SA_KEY_FILE is unset.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.alertmanager
     volumes:
       # Template — contains ${TELEGRAM_ALERT_BOT_TOKEN} and
-      # ${TELEGRAM_ALERT_CHAT_ID} placeholders.
+      # ${TELEGRAM_ALERT_CHAT_ID} placeholders, rendered at startup.
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tpl:ro
       - alertmanager_data:/alertmanager
-    environment:
-      TELEGRAM_ALERT_BOT_TOKEN: "${TELEGRAM_ALERT_BOT_TOKEN:-}"
-      TELEGRAM_ALERT_CHAT_ID:   "${TELEGRAM_ALERT_CHAT_ID:-}"
-    # Wrap entrypoint: render the template via sed (busybox has no envsubst),
-    # write to a tmpfs path, then exec the real alertmanager binary.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -eu
-        sed -e "s|\$${TELEGRAM_ALERT_BOT_TOKEN}|$$TELEGRAM_ALERT_BOT_TOKEN|g" \
-            -e "s|\$${TELEGRAM_ALERT_CHAT_ID}|$$TELEGRAM_ALERT_CHAT_ID|g" \
-            /etc/alertmanager/alertmanager.yml.tpl > /tmp/alertmanager.yml
-        exec /bin/alertmanager \
-            --config.file=/tmp/alertmanager.yml \
-            --storage.path=/alertmanager
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]

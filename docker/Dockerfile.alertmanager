@@ -1,0 +1,47 @@
+# Custom alertmanager image — bakes Lockbox-bootstrap deps so the
+# container fetches TELEGRAM_ALERT_BOT_TOKEN / TELEGRAM_ALERT_CHAT_ID
+# directly from Yandex Lockbox at startup. Avoids ever writing the bot
+# token to /srv/backend/.env.
+#
+# Why a custom image vs upstream prom/alertmanager:v0.27.0:
+#   The upstream image is busybox-based — no curl/jq/openssl, so
+#   lockbox_bootstrap.sh (PS256-signed JWT → IAM → Lockbox payload)
+#   can't run there. We rebase on alpine, install the few extra
+#   packages, and copy the alertmanager binary from upstream.
+#
+# Same Lockbox-fetch pattern as the backup container (Dockerfile.backup).
+
+FROM prom/alertmanager:v0.27.0 AS upstream
+
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+        curl \
+        jq \
+        openssl \
+        coreutils \
+        ca-certificates
+
+# Alertmanager binary + bundled defaults from upstream — pinned to
+# the same v0.27.0 we were running before.
+COPY --from=upstream /bin/alertmanager /bin/alertmanager
+COPY --from=upstream /bin/amtool       /bin/amtool
+
+# Lockbox secret-loader (shared with backup container). Stable script,
+# baked into the image.
+COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
+
+# Render-and-exec wrapper: optional Lockbox bootstrap, sed-render
+# template, exec alertmanager.
+COPY scripts/alertmanager_entrypoint.sh /usr/local/bin/alertmanager_entrypoint.sh
+
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/alertmanager_entrypoint.sh \
+ && mkdir -p /alertmanager \
+ && chown -R nobody:nobody /alertmanager
+
+EXPOSE 9093
+WORKDIR /alertmanager
+USER nobody
+
+ENTRYPOINT ["/usr/local/bin/alertmanager_entrypoint.sh"]

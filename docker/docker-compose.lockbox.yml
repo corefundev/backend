@@ -119,3 +119,13 @@ services:
       <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # Alertmanager (custom image) bootstraps TELEGRAM_ALERT_BOT_TOKEN +
+  # TELEGRAM_ALERT_CHAT_ID from Lockbox at startup via the same
+  # JWT-PS256/IAM/payload chain as the backup container. The bot token
+  # never lands in /srv/backend/.env this way.
+  alertmanager:
+    environment:
+      <<: *lockbox-blanks
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

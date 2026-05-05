@@ -1,15 +1,25 @@
-# Update Alertmanager Telegram bot config:
-#   1. scp the latest alertmanager.yml + docker-compose.yml.
-#   2. Idempotently put TELEGRAM_ALERT_BOT_TOKEN + TELEGRAM_ALERT_CHAT_ID
-#      into /srv/backend/.env (alertmanager isn't Python so it can't
-#      vault_agent at runtime; relies on compose-time interpolation
-#      from .env).
-#   3. Recreate alertmanager container.
-#   4. Send a synthetic test alert via amtool / curl.
+# Update Alertmanager (Lockbox-mode):
+#   1. scp the latest alertmanager.yml + docker-compose.yml +
+#      Dockerfile.alertmanager + scripts/alertmanager_entrypoint.sh.
+#      lockbox_bootstrap.sh is already on the VPS (used by backup).
+#   2. Strip any leftover TELEGRAM_ALERT_* lines from /srv/backend/.env
+#      (legacy from the GH-secrets phase — they must NOT be there now;
+#      Lockbox is the only source).
+#   3. Build the alertmanager image and recreate the container.
+#   4. Optionally send a synthetic test alert via /api/v2/alerts.
 #
-# Required GitHub secrets:
-#   TELEGRAM_ALERT_BOT_TOKEN  Bot token from BotFather (rotateable)
-#   TELEGRAM_ALERT_CHAT_ID    Chat ID of the Alert System group (negative for supergroups)
+# No GitHub secrets for the bot token any more — the SA key on the VPS
+# fetches it from Lockbox at container start.
+#
+# Lockbox secret prerequisites:
+#   sku-forecasting-secrets must contain text entries
+#     TELEGRAM_ALERT_BOT_TOKEN
+#     TELEGRAM_ALERT_CHAT_ID
+#   (added via:
+#     yc lockbox secret add-version \
+#         --id $YC_LOCKBOX_SECRET_ID \
+#         --payload '[{"key":"TELEGRAM_ALERT_BOT_TOKEN","text_value":"…"},
+#                     {"key":"TELEGRAM_ALERT_CHAT_ID","text_value":"…"}]')
 
 name: Update Alertmanager (Telegram)
 
@@ -24,7 +34,7 @@ on:
 
 jobs:
   update:
-    name: Update + restart alertmanager
+    name: Build + restart alertmanager
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -50,71 +60,76 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Push alertmanager.yml + docker-compose.yml
+      - name: Push alertmanager files to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          scp -q docker/alertmanager.yml docker/docker-compose.yml \
+          scp -q docker/alertmanager.yml \
+                 docker/docker-compose.yml \
+                 docker/Dockerfile.alertmanager \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
+          scp -q scripts/alertmanager_entrypoint.sh \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/scripts/"
 
-      - name: Persist creds in .env + recreate alertmanager
+      - name: Strip legacy TELEGRAM_ALERT_* lines from .env
         env:
-          VPS_HOST:                 ${{ secrets.VPS_HOST }}
-          VPS_USER:                 ${{ secrets.VPS_USER }}
-          TELEGRAM_ALERT_BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
-          TELEGRAM_ALERT_CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          for v in TELEGRAM_ALERT_BOT_TOKEN TELEGRAM_ALERT_CHAT_ID; do
-              if [ -z "${!v:-}" ]; then
-                  echo "ERROR: GH secret $v is not set" >&2
-                  exit 2
-              fi
-          done
-
-          # Pass values via SSH-side env. Quoting: outer single-quotes
-          # for the literal heredoc body; values inlined via $-expansion
-          # are already export'd in the runner's env.
-          ssh -q "${VPS_USER}@${VPS_HOST}" \
-              "BOT_TOKEN='$TELEGRAM_ALERT_BOT_TOKEN' CHAT_ID='$TELEGRAM_ALERT_CHAT_ID' bash -s" <<'EOF'
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
           set -e
           cd /srv/backend
           ENV_FILE=.env
-
-          # Make sure .env exists; touch keeps perms if it did.
-          touch "$ENV_FILE"
-          chmod 600 "$ENV_FILE"
-
-          # Idempotent upsert: drop any prior managed lines, then append fresh.
+          [ -f "$ENV_FILE" ] || exit 0
+          # Drop any prior TELEGRAM_ALERT_* — Lockbox is the only source now.
+          BEFORE=$(grep -cE '^TELEGRAM_ALERT_(BOT_TOKEN|CHAT_ID)=' "$ENV_FILE" || true)
           sed -i '/^TELEGRAM_ALERT_BOT_TOKEN=/d' "$ENV_FILE"
           sed -i '/^TELEGRAM_ALERT_CHAT_ID=/d'   "$ENV_FILE"
-          printf 'TELEGRAM_ALERT_BOT_TOKEN=%s\n' "$BOT_TOKEN" >> "$ENV_FILE"
-          printf 'TELEGRAM_ALERT_CHAT_ID=%s\n'   "$CHAT_ID"   >> "$ENV_FILE"
+          echo "  scrubbed $BEFORE legacy TELEGRAM_ALERT_* line(s) from .env"
+          EOF
 
-          # Verify (lengths, no values to logs).
-          echo "  .env now contains (lengths):"
-          grep -E '^TELEGRAM_ALERT_(BOT_TOKEN|CHAT_ID)=' "$ENV_FILE" \
-              | awk -F= '{ printf "    %s=%d chars\n", $1, length($2) }'
-
+      - name: Build + recreate alertmanager
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          chmod +x scripts/alertmanager_entrypoint.sh
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "  building alertmanager image…"
+          docker compose $COMPOSE_ARGS build alertmanager
 
           echo "  recreating alertmanager…"
           docker compose $COMPOSE_ARGS up -d --force-recreate alertmanager
 
           echo "  waiting for healthy…"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
               S=$(docker compose $COMPOSE_ARGS ps --format '{{.Health}}' alertmanager 2>/dev/null || true)
               [ "$S" = "healthy" ] && { echo "  healthy after ${i}s"; break; }
               sleep 1
           done
 
           echo
+          echo "  Lockbox bootstrap log line (look for 'injected N variables'):"
+          docker compose $COMPOSE_ARGS logs --tail=20 alertmanager 2>&1 \
+              | grep -E 'lockbox_bootstrap|level=' | head -10 || true
+
+          echo
           echo "  rendered config (sensitive values masked):"
           AM=$(docker compose $COMPOSE_ARGS ps -q alertmanager)
           docker exec "$AM" cat /tmp/alertmanager.yml \
               | sed -E 's/(bot_token: ").{4}[^"]*/\1***/g; s/(chat_id:\s+).+/\1***/g'
+
+          echo
+          echo "  verifying .env has no TELEGRAM_ALERT_* (should be empty):"
+          grep -E '^TELEGRAM_ALERT_' .env || echo "    (clean)"
           EOF
 
       - name: Send synthetic test alert
