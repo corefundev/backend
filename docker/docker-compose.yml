@@ -447,14 +447,10 @@ services:
       - ./ssl-exporter.yml:/config/ssl_exporter.yml:ro
     command:
       - "--config.file=/config/ssl_exporter.yml"
-    healthcheck:
-      # ssl-exporter's root /probe lacks /-/healthy; just probe loopback
-      # which always succeeds at the listening-on-port level.
-      test: ["CMD", "wget", "-qO-", "http://localhost:9219/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck: image is distroless (no shell, no curl, no wget,
+    # only /ssl_exporter binary itself). Container-level probe would
+    # need a sidecar. Prometheus monitors the /probe endpoint as a
+    # scrape target — that's the SLO check that matters.
     # Bounded log rotation — without this Docker uses the unbounded
     # default and historical config-parse errors stick around forever.
     logging:
@@ -474,8 +470,9 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # Image has python but no curl/wget/nc — use urllib for the probe.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9726/metrics >/dev/null || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request, sys; urllib.request.urlopen('http://localhost:9726/metrics', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
