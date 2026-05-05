@@ -72,6 +72,13 @@ jobs:
               "SELECT filename, applied_at FROM _db_migrations ORDER BY applied_at;"
 
           echo
+          echo "── rebuilding migrate image (picks up new SQL files) ──"
+          # migrate (and api, worker) bake migrations/ + code into the
+          # image via Dockerfile COPY. Rebuilding ensures the new
+          # migration files are visible to scripts/migrate.py at runtime.
+          docker compose $COMPOSE_ARGS build migrate
+
+          echo
           echo "── running migrate (idempotent) ──"
           docker compose $COMPOSE_ARGS run --rm migrate
 
