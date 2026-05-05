@@ -66,6 +66,8 @@ x-lockbox-blanks: &lockbox-blanks
   AIRFLOW_FERNET_KEY:              ""
   AIRFLOW_SECRET_KEY:              ""
   AIRFLOW_PASSWORD:                ""
+  TELEGRAM_ALERT_BOT_TOKEN:        ""
+  TELEGRAM_ALERT_CHAT_ID:          ""
   RESEND_API_KEY:                  ""
   SMTP_PASSWORD:                   ""
   TURNSTILE_SECRET_KEY:            ""

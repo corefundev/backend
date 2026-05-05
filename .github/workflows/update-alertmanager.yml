@@ -1,0 +1,149 @@
+# Update Alertmanager Telegram bot config:
+#   1. scp the latest alertmanager.yml + docker-compose.yml.
+#   2. Idempotently put TELEGRAM_ALERT_BOT_TOKEN + TELEGRAM_ALERT_CHAT_ID
+#      into /srv/backend/.env (alertmanager isn't Python so it can't
+#      vault_agent at runtime; relies on compose-time interpolation
+#      from .env).
+#   3. Recreate alertmanager container.
+#   4. Send a synthetic test alert via amtool / curl.
+#
+# Required GitHub secrets:
+#   TELEGRAM_ALERT_BOT_TOKEN  Bot token from BotFather (rotateable)
+#   TELEGRAM_ALERT_CHAT_ID    Chat ID of the Alert System group (negative for supergroups)
+
+name: Update Alertmanager (Telegram)
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_test_alert:
+        description: "Send a synthetic test alert after restart"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  update:
+    name: Update + restart alertmanager
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Push alertmanager.yml + docker-compose.yml
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          scp -q docker/alertmanager.yml docker/docker-compose.yml \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
+
+      - name: Persist creds in .env + recreate alertmanager
+        env:
+          VPS_HOST:                 ${{ secrets.VPS_HOST }}
+          VPS_USER:                 ${{ secrets.VPS_USER }}
+          TELEGRAM_ALERT_BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          TELEGRAM_ALERT_CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          for v in TELEGRAM_ALERT_BOT_TOKEN TELEGRAM_ALERT_CHAT_ID; do
+              if [ -z "${!v:-}" ]; then
+                  echo "ERROR: GH secret $v is not set" >&2
+                  exit 2
+              fi
+          done
+
+          # Pass values via SSH-side env. Quoting: outer single-quotes
+          # for the literal heredoc body; values inlined via $-expansion
+          # are already export'd in the runner's env.
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              "BOT_TOKEN='$TELEGRAM_ALERT_BOT_TOKEN' CHAT_ID='$TELEGRAM_ALERT_CHAT_ID' bash -s" <<'EOF'
+          set -e
+          cd /srv/backend
+          ENV_FILE=.env
+
+          # Make sure .env exists; touch keeps perms if it did.
+          touch "$ENV_FILE"
+          chmod 600 "$ENV_FILE"
+
+          # Idempotent upsert: drop any prior managed lines, then append fresh.
+          sed -i '/^TELEGRAM_ALERT_BOT_TOKEN=/d' "$ENV_FILE"
+          sed -i '/^TELEGRAM_ALERT_CHAT_ID=/d'   "$ENV_FILE"
+          printf 'TELEGRAM_ALERT_BOT_TOKEN=%s\n' "$BOT_TOKEN" >> "$ENV_FILE"
+          printf 'TELEGRAM_ALERT_CHAT_ID=%s\n'   "$CHAT_ID"   >> "$ENV_FILE"
+
+          # Verify (lengths, no values to logs).
+          echo "  .env now contains (lengths):"
+          grep -E '^TELEGRAM_ALERT_(BOT_TOKEN|CHAT_ID)=' "$ENV_FILE" \
+              | awk -F= '{ printf "    %s=%d chars\n", $1, length($2) }'
+
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "  recreating alertmanager…"
+          docker compose $COMPOSE_ARGS up -d --force-recreate alertmanager
+
+          echo "  waiting for healthy…"
+          for i in $(seq 1 30); do
+              S=$(docker compose $COMPOSE_ARGS ps --format '{{.Health}}' alertmanager 2>/dev/null || true)
+              [ "$S" = "healthy" ] && { echo "  healthy after ${i}s"; break; }
+              sleep 1
+          done
+
+          echo
+          echo "  rendered config (sensitive values masked):"
+          AM=$(docker compose $COMPOSE_ARGS ps -q alertmanager)
+          docker exec "$AM" cat /tmp/alertmanager.yml \
+              | sed -E 's/(bot_token: ").{4}[^"]*/\1***/g; s/(chat_id:\s+).+/\1***/g'
+          EOF
+
+      - name: Send synthetic test alert
+        if: inputs.send_test_alert
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+          AM=$(docker compose $COMPOSE_ARGS ps -q alertmanager)
+          # Direct API push — no need for amtool. Fires immediately.
+          docker exec "$AM" wget -qO- --post-data='[{
+              "labels": {
+                  "alertname": "TelegramRoutingTest",
+                  "severity":  "warning",
+                  "cluster":   "prod"
+              },
+              "annotations": {
+                  "summary":     "Test alert from Update Alertmanager workflow",
+                  "description": "If you see this in the Alert System group, telegram routing works."
+              },
+              "endsAt": "'"$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                         || date -u -v +5M +%Y-%m-%dT%H:%M:%SZ)"'"
+          }]' --header='Content-Type: application/json' \
+              http://localhost:9093/api/v2/alerts
+          echo
+          echo "  Test alert posted. Check the Alert System group for ⚠️ TelegramRoutingTest."
+          EOF

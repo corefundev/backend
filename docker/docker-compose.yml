@@ -552,18 +552,21 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     volumes:
-      # Template — contains literal ${ALERT_WEBHOOK_URL} placeholder.
+      # Template — contains ${TELEGRAM_ALERT_BOT_TOKEN} and
+      # ${TELEGRAM_ALERT_CHAT_ID} placeholders.
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tpl:ro
       - alertmanager_data:/alertmanager
     environment:
-      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+      TELEGRAM_ALERT_BOT_TOKEN: "${TELEGRAM_ALERT_BOT_TOKEN:-}"
+      TELEGRAM_ALERT_CHAT_ID:   "${TELEGRAM_ALERT_CHAT_ID:-}"
     # Wrap entrypoint: render the template via sed (busybox has no envsubst),
     # write to a tmpfs path, then exec the real alertmanager binary.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        sed "s|\$${ALERT_WEBHOOK_URL}|$$ALERT_WEBHOOK_URL|g" \
+        sed -e "s|\$${TELEGRAM_ALERT_BOT_TOKEN}|$$TELEGRAM_ALERT_BOT_TOKEN|g" \
+            -e "s|\$${TELEGRAM_ALERT_CHAT_ID}|$$TELEGRAM_ALERT_CHAT_ID|g" \
             /etc/alertmanager/alertmanager.yml.tpl > /tmp/alertmanager.yml
         exec /bin/alertmanager \
             --config.file=/tmp/alertmanager.yml \

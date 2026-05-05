@@ -1,21 +1,21 @@
-# Alertmanager config — single Slack webhook.
+# Alertmanager config — Telegram bot delivery.
 #
-# A modern Slack incoming webhook is bound to a single channel at creation
-# time, so the `channel:` field in receiver configs is ignored. Severity-
-# based channel routing requires a separate webhook per channel; if/when
-# that's needed, add more webhooks and split routes accordingly.
+# All severity levels go to a single chat (Alert System supergroup),
+# differentiated by a leading emoji and explicit *Severity:* line.
+# When team grows enough to need on-call rotation, split routes into
+# multiple chats / topics here.
 #
-# The ${ALERT_WEBHOOK_URL} placeholder is rendered at startup by the
-# alertmanager service's wrapper entrypoint (sed-based envsubst — see
-# docker-compose.yml). The unrendered template lives at
+# Two env placeholders rendered at startup by the alertmanager
+# service's wrapper entrypoint (sed-based envsubst — see
+# docker-compose.yml). Template lives at
 #   /etc/alertmanager/alertmanager.yml.tpl
-# and the rendered output goes to /tmp/alertmanager.yml.
+# rendered output goes to /tmp/alertmanager.yml.
 
 global:
   resolve_timeout: 5m
 
 route:
-  receiver: slack
+  receiver: telegram
   group_by:        ["alertname", "cluster"]
   group_wait:      30s        # quiet window before first notify
   group_interval:  2m         # gap between notifications in a group
@@ -24,20 +24,27 @@ route:
   routes:
     - matchers:
         - severity = "critical"
-      receiver: slack
+      receiver: telegram
       group_wait: 10s
       repeat_interval: 5m
 
 receivers:
-  - name: slack
-    slack_configs:
-      - api_url: "${ALERT_WEBHOOK_URL}"
+  - name: telegram
+    telegram_configs:
+      # Alertmanager v0.27 expects the token as bot_token (not _file),
+      # rendered from $TELEGRAM_ALERT_BOT_TOKEN at compose startup.
+      - bot_token: "${TELEGRAM_ALERT_BOT_TOKEN}"
+        chat_id:    ${TELEGRAM_ALERT_CHAT_ID}
+        api_url:    "https://api.telegram.org"
+        parse_mode: HTML
         send_resolved: true
-        title: |-
-          {{ if eq .CommonLabels.severity "critical" }}🚨{{ else }}⚠️{{ end }} {{ .CommonLabels.alertname }}
-        text: |
-          *Severity:* `{{ .CommonLabels.severity }}`
-          {{ range .Alerts }}• *{{ .Annotations.summary }}*
+        message: |-
+          {{ if eq .CommonLabels.severity "critical" }}🔥{{ else }}⚠️{{ end }} <b>{{ .CommonLabels.alertname }}</b>
+
+          <i>severity:</i> <code>{{ .CommonLabels.severity }}</code>
+          <i>status:</i>   <code>{{ .Status }}</code>
+          {{ range .Alerts }}
+          • <b>{{ .Annotations.summary }}</b>
           {{ .Annotations.description }}
           {{ end }}
 
