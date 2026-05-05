@@ -1,0 +1,126 @@
+# Verify a fresh backup landed in S3 within the last 25 hours.
+#
+# Background: backup pipeline silently died for 8 days (see #176) before
+# the monthly drill caught it. We needed a check that runs MORE OFTEN
+# than monthly and surfaces "no fresh dump" loudly.
+#
+# This workflow:
+#   1. Runs on cron every 4 hours (6 checks/day).
+#   2. Lists S3 backups, finds the newest by lexical sort
+#      (YYYY-MM-DD/sku_forecasting_<TS>.dump.enc — sorts chronologically).
+#   3. Parses the timestamp from the filename, computes age.
+#   4. Fails the workflow (and thus emails repo admins) if age > 25h.
+#   5. On failure, optionally POSTs to Slack via ALERT_WEBHOOK_URL.
+#
+# 25h threshold = nightly cron runs at 02:10 UTC daily, so any healthy
+# day the latest dump is <24h old. 25h gives 1h slack for cron drift /
+# upload time / S3 listing eventual consistency.
+
+name: Check Backup Freshness
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 4 hours — 00:10, 04:10, 08:10, 12:10, 16:10, 20:10 UTC.
+    # 10-min offset so checks don't race the 02:10 backup itself.
+    - cron: "10 */4 * * *"
+
+jobs:
+  check:
+    name: Latest dump age
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install mc
+        run: |
+          curl -fsSL -o /usr/local/bin/mc \
+              https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x /usr/local/bin/mc
+
+      - name: Compute age of newest dump in S3
+        id: check
+        env:
+          S3_BACKUP_BUCKET:            ${{ secrets.S3_BACKUP_BUCKET }}
+          S3_BACKUP_ENDPOINT_URL:      ${{ secrets.S3_BACKUP_ENDPOINT_URL }}
+          S3_BACKUP_ACCESS_KEY_ID:     ${{ secrets.S3_BACKUP_ACCESS_KEY_ID }}
+          S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
+          STALE_HOURS:                 25
+        run: |
+          set -euo pipefail
+          for v in S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY; do
+              if [ -z "${!v:-}" ]; then
+                  echo "ERROR: secret $v is not set" >&2
+                  exit 2
+              fi
+          done
+
+          mc alias set bak "$S3_BACKUP_ENDPOINT_URL" \
+              "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+
+          LATEST=$(mc find "bak/$S3_BACKUP_BUCKET/backups/" --name '*.dump.enc' \
+                   | sort | tail -1)
+          if [ -z "$LATEST" ]; then
+              echo "::error::no .dump.enc found under s3://$S3_BACKUP_BUCKET/backups/"
+              echo "stale=true"             >> "$GITHUB_OUTPUT"
+              echo "reason=no_dumps_at_all" >> "$GITHUB_OUTPUT"
+              exit 1
+          fi
+
+          # Filename ends with ..._<TS>.dump.enc where TS is YYYYMMDDTHHMMSSZ
+          # (UTC, ISO-8601-basic). Parse → epoch seconds.
+          BASENAME=$(basename "$LATEST")
+          TS_RAW=$(echo "$BASENAME" | sed -E 's/.*_([0-9]{8}T[0-9]{6}Z)\.dump\.enc/\1/')
+          if [ -z "$TS_RAW" ] || [ "$TS_RAW" = "$BASENAME" ]; then
+              echo "::error::could not parse timestamp from filename: $BASENAME"
+              echo "stale=true"             >> "$GITHUB_OUTPUT"
+              echo "reason=bad_filename"    >> "$GITHUB_OUTPUT"
+              exit 1
+          fi
+
+          # Convert YYYYMMDDTHHMMSSZ → YYYY-MM-DDTHH:MM:SSZ for `date -d`.
+          ISO=$(echo "$TS_RAW" | sed -E 's/^(....)(..)(..)T(..)(..)(..)Z$/\1-\2-\3T\4:\5:\6Z/')
+          EPOCH_DUMP=$(date -u -d "$ISO" +%s)
+          EPOCH_NOW=$(date -u +%s)
+          AGE_SEC=$((EPOCH_NOW - EPOCH_DUMP))
+          AGE_HRS=$((AGE_SEC / 3600))
+
+          echo "latest=$LATEST"
+          echo "timestamp=$ISO"
+          echo "age_hours=$AGE_HRS"
+          echo "latest=$LATEST"          >> "$GITHUB_OUTPUT"
+          echo "timestamp=$ISO"          >> "$GITHUB_OUTPUT"
+          echo "age_hours=$AGE_HRS"      >> "$GITHUB_OUTPUT"
+
+          if [ "$AGE_HRS" -gt "$STALE_HOURS" ]; then
+              echo "::error::Latest backup is $AGE_HRS hours old (threshold: ${STALE_HOURS}h). Backup pipeline likely broken — check #176 history."
+              echo "stale=true"          >> "$GITHUB_OUTPUT"
+              echo "reason=too_old"      >> "$GITHUB_OUTPUT"
+              exit 1
+          fi
+
+          echo "OK: backup is $AGE_HRS hours old (<= ${STALE_HOURS}h threshold)"
+          echo "stale=false" >> "$GITHUB_OUTPUT"
+
+      # Optional Slack notification — fires only on failure. Uses the
+      # same ALERT_WEBHOOK_URL that Alertmanager posts to. If the secret
+      # isn't configured the step is a no-op (skips with warning).
+      - name: Notify Slack on stale
+        if: failure() && steps.check.outputs.stale == 'true'
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          AGE_HOURS:         ${{ steps.check.outputs.age_hours }}
+          REASON:            ${{ steps.check.outputs.reason }}
+          LATEST:            ${{ steps.check.outputs.latest }}
+        run: |
+          if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
+              echo "ALERT_WEBHOOK_URL not set — skipping Slack notify."
+              exit 0
+          fi
+          PAYLOAD=$(cat <<EOF
+          {
+            "text": ":warning: *Backup pipeline alert* — latest dump is ${AGE_HOURS}h old (reason: ${REASON}).\nLast known: \`${LATEST}\`\nRunbook: trigger \`Diagnose Backup Pipeline\` then \`Restart Backup + Verify\` workflow."
+          }
+          EOF
+          )
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+              --data "$PAYLOAD" \
+              "$ALERT_WEBHOOK_URL"

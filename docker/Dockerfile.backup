@@ -1,0 +1,38 @@
+# Backup container — runs nightly pg_dump + AES-256 + S3 upload via cron.
+#
+# Why a dedicated Dockerfile (vs runtime apk-add on alpine:3.20):
+#   The previous setup did `apk add postgresql-client openssl coreutils
+#   dcron curl` + `curl -L mc` at container start. When alpine's CDN or
+#   min.io's CDN was unreachable on a restart, the install hung forever
+#   and crond never started — that's exactly what killed nightly
+#   backups for 8 days (2026-04-27 → 2026-05-05). Baking the deps into
+#   the image at build time eliminates the runtime network dependency.
+#
+# Image is small (~30 MB) — alpine + pg-client + mc + a couple of
+# coreutils helpers. Rebuilt only when this Dockerfile changes.
+
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+        postgresql-client \
+        openssl \
+        coreutils \
+        dcron \
+        curl \
+        ca-certificates \
+ && curl -fsSL -o /usr/local/bin/mc \
+        https://dl.min.io/client/mc/release/linux-amd64/mc \
+ && chmod +x /usr/local/bin/mc \
+ && mc --version
+
+# Crontab + log file. Crontab path is /scripts/backup.sh — that file
+# comes from the bind-mount of ../scripts at compose runtime, so the
+# image doesn't need it at build time.
+RUN echo "10 2 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1" \
+        | crontab - \
+ && touch /var/log/backup.log
+
+# Foreground crond. The echo before exec preserves the "backup cron
+# installed; waiting…" stdout signal that scripts/restart-backup
+# workflow watches for to know the container is ready.
+CMD ["sh", "-c", "echo 'backup cron installed; waiting…' && exec crond -f -L /var/log/backup.log"]

@@ -58,8 +58,12 @@ jobs:
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
 
-          echo "── 1. Restart backup service ──"
-          docker compose $COMPOSE_ARGS restart backup
+          echo "── 1. Rebuild + recreate backup service ──"
+          # `up -d --build` rebuilds the image from docker/Dockerfile.backup
+          # (catches Dockerfile changes) and recreates the container.
+          # `restart` would only bounce the existing container — useless
+          # if the image itself needs an update.
+          docker compose $COMPOSE_ARGS up -d --build backup
           BAK=$(docker compose $COMPOSE_ARGS ps -q backup)
           echo "container id: $BAK"
 
