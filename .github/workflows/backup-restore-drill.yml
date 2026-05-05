@@ -1,0 +1,176 @@
+# Monthly drill: pull the most recent encrypted dump from S3,
+# decrypt it, restore into an ephemeral postgres container, run smoke
+# queries. Fails loudly if anything along the chain breaks.
+#
+# A backup that's never been restored is a hope, not a backup. This
+# drill turns the hope into a verified property — and surfaces format
+# regressions (changed pg_dump options, encryption algorithm drift,
+# missing migrations, etc.) before a real DR scenario.
+#
+# Required GitHub secrets (mirror values from Lockbox):
+#   S3_BACKUP_BUCKET
+#   S3_BACKUP_ENDPOINT_URL
+#   S3_BACKUP_ACCESS_KEY_ID
+#   S3_BACKUP_SECRET_ACCESS_KEY
+#   BACKUP_PASSPHRASE
+
+name: Backup Restore Drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:15 UTC on the 1st of every month. Off-peak in all timezones.
+    - cron: "15 3 1 * *"
+
+jobs:
+  drill:
+    name: Restore latest dump + smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     drill
+          POSTGRES_PASSWORD: drill
+          POSTGRES_DB:       drill_restore
+        options: >-
+          --health-cmd "pg_isready -U drill"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    env:
+      # Restore goes into the ephemeral service container above, NOT
+      # into prod. Hardcoded localhost.
+      PGHOST:     127.0.0.1
+      PGPORT:     5432
+      PGUSER:     drill
+      PGPASSWORD: drill
+      PGDATABASE: drill_restore
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install mc + postgresql-client + openssl
+        run: |
+          set -euo pipefail
+          # MinIO client — same `mc` we use in backup.sh.
+          curl -fsSL -o /usr/local/bin/mc \
+              https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x /usr/local/bin/mc
+          # postgresql-client for pg_restore + psql; openssl for AES decrypt.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client openssl
+          mc --version | head -1
+          pg_restore --version
+          openssl version
+
+      - name: Find latest backup in S3
+        env:
+          S3_BACKUP_BUCKET:            ${{ secrets.S3_BACKUP_BUCKET }}
+          S3_BACKUP_ENDPOINT_URL:      ${{ secrets.S3_BACKUP_ENDPOINT_URL }}
+          S3_BACKUP_ACCESS_KEY_ID:     ${{ secrets.S3_BACKUP_ACCESS_KEY_ID }}
+          S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          for v in S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY; do
+              if [ -z "${!v:-}" ]; then
+                  echo "ERROR: secret $v is not set in this repo." >&2
+                  exit 2
+              fi
+          done
+          mc alias set bak "$S3_BACKUP_ENDPOINT_URL" \
+              "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+          # Recursively list YYYY-MM-DD/<name>.dump.enc, sort by lexically
+          # (which equals chronologically because of the date prefix), pick last.
+          LATEST=$(mc find "bak/$S3_BACKUP_BUCKET/backups/" --name '*.dump.enc' \
+                   | sort | tail -1)
+          if [ -z "$LATEST" ]; then
+              echo "ERROR: no .dump.enc found under s3://$S3_BACKUP_BUCKET/backups/" >&2
+              exit 3
+          fi
+          echo "latest=$LATEST"
+          echo "BACKUP_REMOTE_PATH=$LATEST" >> $GITHUB_ENV
+
+      - name: Download + decrypt
+        env:
+          S3_BACKUP_ENDPOINT_URL:      ${{ secrets.S3_BACKUP_ENDPOINT_URL }}
+          S3_BACKUP_ACCESS_KEY_ID:     ${{ secrets.S3_BACKUP_ACCESS_KEY_ID }}
+          S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
+          BACKUP_PASSPHRASE:           ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mc alias set bak "$S3_BACKUP_ENDPOINT_URL" \
+              "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+          mkdir -p /tmp/drill
+          mc cp "$BACKUP_REMOTE_PATH" /tmp/drill/backup.dump.enc
+          ls -la /tmp/drill/backup.dump.enc
+
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+              -in  /tmp/drill/backup.dump.enc \
+              -out /tmp/drill/backup.dump \
+              -pass env:BACKUP_PASSPHRASE
+          ls -la /tmp/drill/backup.dump
+
+      - name: pg_restore into ephemeral postgres
+        run: |
+          set -euo pipefail
+          # --clean --if-exists handles the case where service container's
+          # initial template (created by POSTGRES_DB=drill_restore) has
+          # default schema artifacts. --no-owner avoids requiring the
+          # original `sku` role to exist in the drill instance.
+          pg_restore --no-owner --no-privileges --verbose \
+              --dbname="postgresql://drill:drill@127.0.0.1:5432/drill_restore" \
+              /tmp/drill/backup.dump 2>&1 | tail -50
+
+      - name: Smoke queries
+        run: |
+          set -euo pipefail
+          echo "─── tables in restored DB ───"
+          psql -tAc "
+            SELECT schemaname || '.' || tablename
+              FROM pg_tables
+             WHERE schemaname NOT IN ('pg_catalog','information_schema')
+             ORDER BY 1
+          "
+
+          # Critical-table presence check. List must stay in sync with
+          # migrations/ — if a migration adds a new table that's also
+          # backed up, append it here.
+          for t in _db_migrations sku_clients sku_training_runs sku_forecasts sku_uploads sku_anomalies sku_otp_codes audit_log; do
+              EXISTS=$(psql -tAc "SELECT 1 FROM pg_tables WHERE tablename = '$t'" || true)
+              if [ "$EXISTS" != "1" ]; then
+                  echo "MISSING table: $t" >&2
+                  exit 4
+              fi
+              ROWS=$(psql -tAc "SELECT count(*) FROM $t")
+              echo "  $t: $ROWS rows"
+          done
+
+          # _db_migrations should have at least 7 entries (we shipped 7
+          # migrations as of v0.9.0). Catches a corrupted dump that
+          # restored only schema but not data.
+          MIGRATIONS=$(psql -tAc "SELECT count(*) FROM _db_migrations")
+          if [ "$MIGRATIONS" -lt 7 ]; then
+              echo "FAIL: _db_migrations has $MIGRATIONS rows (expected ≥ 7)" >&2
+              exit 5
+          fi
+          echo "OK: $MIGRATIONS migration rows present"
+
+          # The dump must have a recent enough timestamp — yesterday's
+          # backup is fine, a 30-day-old one means cron stopped firing.
+          # Look at backup_manifest oid_max isn't helpful; use the file
+          # size as a sanity floor (>1 KB).
+          SIZE=$(stat -c %s /tmp/drill/backup.dump 2>/dev/null || stat -f %z /tmp/drill/backup.dump)
+          if [ "$SIZE" -lt 1024 ]; then
+              echo "FAIL: dump file size suspiciously small: $SIZE bytes" >&2
+              exit 6
+          fi
+          echo "OK: dump size $SIZE bytes"
+
+      - name: Final report
+        run: |
+          echo "═══════════════════════════════════════════════════════"
+          echo "  Backup-restore drill PASSED"
+          echo "  source: $BACKUP_REMOTE_PATH"
+          echo "═══════════════════════════════════════════════════════"
