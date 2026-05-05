@@ -510,6 +510,12 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backup
+    # tini as PID 1, crond as its child. Without init:true crond runs
+    # as PID 1 and its setpgid() calls fail with "Operation not
+    # permitted" because PID 1 is its own session leader and can't
+    # call setpgid on itself. Symptom: container restart-loops with
+    # `setpgid: Operation not permitted` in logs.
+    init: true
     environment:
       DATABASE_URL:          postgresql://sku:sku@postgres:5432/sku_forecasting
       # Backup S3 — отдельный аккаунт / keypair. Backup-скрипт смотрит
