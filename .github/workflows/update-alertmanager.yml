@@ -72,6 +72,7 @@ jobs:
                  docker/Dockerfile.alertmanager \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
           scp -q scripts/alertmanager_entrypoint.sh \
+                 scripts/lockbox_bootstrap.sh \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/scripts/"
 
       - name: Strip legacy TELEGRAM_ALERT_* lines from .env
