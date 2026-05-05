@@ -1,0 +1,87 @@
+# Run pending DB migrations on prod.
+#
+# The `migrate` compose service is one-shot — it runs once at initial
+# deploy, applies migrations, exits 0. If new migration files land in
+# migrations/ later (like 008_audit_log.sql), they don't auto-apply
+# until someone explicitly re-runs the migrate service.
+#
+# This workflow does that: scp the migrations dir + scripts/migrate.py,
+# then `docker compose run --rm migrate` so a fresh container runs
+# scripts/migrate.py against the live DB.
+#
+# Idempotent — migrate.py uses _db_migrations to track applied files,
+# so re-running is a no-op when nothing's pending.
+
+name: Apply DB Migrations
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    name: docker compose run migrate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Push migrations + migrate.py
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # rsync would be nicer but plain VPSes often lack it; tar+ssh is universal.
+          tar czf - migrations scripts/migrate.py \
+              | ssh -q "${VPS_USER}@${VPS_HOST}" "cd /srv/backend && tar xzf - && ls migrations/ | tail -10"
+
+      - name: Run migrate service
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "── current state of _db_migrations ──"
+          PG=$(docker compose $COMPOSE_ARGS ps -q postgres)
+          docker exec "$PG" psql -U sku -d sku_forecasting -c \
+              "SELECT filename, applied_at FROM _db_migrations ORDER BY applied_at;"
+
+          echo
+          echo "── running migrate (idempotent) ──"
+          docker compose $COMPOSE_ARGS run --rm migrate
+
+          echo
+          echo "── post-migrate _db_migrations ──"
+          docker exec "$PG" psql -U sku -d sku_forecasting -c \
+              "SELECT filename, applied_at FROM _db_migrations ORDER BY applied_at;"
+
+          echo
+          echo "── verify audit_log table exists ──"
+          docker exec "$PG" psql -U sku -d sku_forecasting -c \
+              "SELECT to_regclass('public.audit_log') AS audit_log;"
+          EOF
