@@ -107,3 +107,13 @@ services:
       <<: *lockbox-blanks
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # Backup container's lockbox_bootstrap.sh (cron wrapper) needs the
+  # SA key mounted + YC_SA_KEY_FILE / YC_LOCKBOX_SECRET_ID set. Without
+  # this overlay block, backup falls back to compose-time interpolation
+  # of ${BACKUP_PASSPHRASE:-} etc., which is empty in Lockbox-mode.
+  backup:
+    environment:
+      <<: *lockbox-blanks
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

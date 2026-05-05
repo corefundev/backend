@@ -47,14 +47,18 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Push docker-compose.yml (in case backup section changed)
+      - name: Push compose + Dockerfile.backup + lockbox_bootstrap.sh
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
           scp -q docker/docker-compose.yml \
-              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/docker-compose.yml"
+              docker/docker-compose.lockbox.yml \
+              docker/Dockerfile.backup \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
+          scp -q scripts/lockbox_bootstrap.sh \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/scripts/lockbox_bootstrap.sh"
 
       - name: Restart + wait + manual backup
         env:
@@ -67,57 +71,12 @@ jobs:
           cd /srv/backend
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
 
-          echo "── 1. Source backup secrets from api container's vault_agent ──"
-          # Backup container relies on compose-time ${VAR:-} interpolation
-          # for its env. Lockbox vault_agent injects only into Python's
-          # os.environ at runtime — invisible to compose. Workaround:
-          # have the api container (which DOES run vault_agent) print
-          # the values, capture into a temp file, source it for the
-          # docker compose up below.
-          API=$(docker compose $COMPOSE_ARGS ps -q api 2>/dev/null \
-                || docker ps --filter ancestor=ghcr.io/corefundev/backend/sku-api --format '{{.ID}}' | head -1 \
-                || docker ps --format '{{.Names}}\t{{.ID}}' | grep -F api | head -1 | awk '{print $2}')
-          if [ -z "$API" ]; then
-              echo "ERROR: api container not found — can't extract backup secrets" >&2
-              exit 1
-          fi
-          # Temp file with mode 600 — values live for ~10 lines of bash.
-          ENV_FILE=$(mktemp)
-          chmod 600 "$ENV_FILE"
-          docker exec "$API" python -c '
-          import os
-          from src.auth.vault_agent import bootstrap_secrets
-          bootstrap_secrets()
-          for k in ("BACKUP_PASSPHRASE","S3_BACKUP_ENDPOINT_URL","S3_BACKUP_ACCESS_KEY_ID","S3_BACKUP_SECRET_ACCESS_KEY","S3_BACKUP_BUCKET","S3_BACKUP_REGION"):
-              v = os.environ.get(k, "")
-              # Single-quote-escaped for safe sourcing later.
-              esc = v.replace("'\''", "'\''\\'\'''\''")
-              print(f"export {k}='\''{esc}'\''")
-          ' > "$ENV_FILE"
-
-          # Sanity check the temp file has at least 4 vars (the critical ones).
-          if [ "$(wc -l < "$ENV_FILE")" -lt 4 ]; then
-              echo "ERROR: didn't extract enough vars from api container" >&2
-              cat "$ENV_FILE" | sed 's/=.*/=***/'
-              rm -f "$ENV_FILE"
-              exit 2
-          fi
-
-          # Source into THIS shell (not echoed → values stay out of logs).
-          # shellcheck disable=SC1090
-          . "$ENV_FILE"
-          rm -f "$ENV_FILE"
-          echo "  vars sourced (lengths): \
-            BACKUP_PASSPHRASE=${#BACKUP_PASSPHRASE} \
-            S3_BACKUP_ENDPOINT_URL=${#S3_BACKUP_ENDPOINT_URL} \
-            S3_BACKUP_ACCESS_KEY_ID=${#S3_BACKUP_ACCESS_KEY_ID} \
-            S3_BACKUP_SECRET_ACCESS_KEY=${#S3_BACKUP_SECRET_ACCESS_KEY} \
-            S3_BACKUP_BUCKET=${#S3_BACKUP_BUCKET}"
-          export BACKUP_PASSPHRASE S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY S3_BACKUP_BUCKET S3_BACKUP_REGION
-
-          echo
-          echo "── 2. Recreate backup container with proper env ──"
-          docker compose $COMPOSE_ARGS up -d --force-recreate backup
+          echo "── 1. Build + recreate backup with self-bootstrapping image ──"
+          # Dockerfile.backup bakes deps + lockbox_bootstrap.sh in. The
+          # container's crontab uses lockbox_bootstrap.sh as a wrapper
+          # that fetches fresh Lockbox secrets before each backup run —
+          # no compose-time env interpolation needed.
+          docker compose $COMPOSE_ARGS up -d --build --force-recreate backup
           BAK=$(docker compose $COMPOSE_ARGS ps -q backup)
           echo "container id: $BAK"
 
@@ -143,13 +102,15 @@ jobs:
           fi
 
           echo
-          echo "── 4. Manual backup.sh run ──"
-          docker exec "$BAK" sh /scripts/backup.sh 2>&1 | tail -30
+          echo "── 4. Manual backup.sh run (via lockbox_bootstrap wrapper) ──"
+          # Lockbox bootstrap fetches fresh secrets, then exec's backup.sh.
+          # Same wrapper crond uses on schedule.
+          docker exec "$BAK" /usr/local/bin/lockbox_bootstrap.sh sh /scripts/backup.sh 2>&1 | tail -30
 
           echo
           echo "── 5. List the most recent .dump.enc in S3 ──"
-          # Reuse mc that backup.sh already configured.
-          docker exec "$BAK" sh -c '
+          # Re-bootstrap to get S3 creds, then list.
+          docker exec "$BAK" /usr/local/bin/lockbox_bootstrap.sh sh -c '
               mc alias set bak "$S3_BACKUP_ENDPOINT_URL" "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
               mc find "bak/$S3_BACKUP_BUCKET/backups/" --name "*.dump.enc" | sort | tail -3
           '

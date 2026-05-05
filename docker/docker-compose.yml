@@ -503,17 +503,13 @@ services:
   # pg_dump + AES-256 encryption + S3 upload. The same container can be
   # exec'd to run restore.sh interactively.
   backup:
-    # NOTE: a custom Dockerfile.backup exists in this directory and would
-    # eliminate the runtime apk-add fragility that killed the backup
-    # cron for 8 days (#176). It's NOT wired in yet because the backup
-    # container relies on compose-time `${VAR:-}` interpolation for its
-    # secrets (BACKUP_PASSPHRASE, S3_BACKUP_*), which only works if those
-    # vars are in /srv/backend/.env or the shell at compose-up time.
-    # Lockbox vault_agent injects into Python's os.environ at runtime —
-    # invisible to compose. Switching to Dockerfile.backup needs an
-    # in-container Lockbox bootstrap (curl + jq or yc CLI). Tracked as
-    # #177.
-    image: alpine:3.20
+    # Custom image: deps baked at build time (no runtime apk-add hangs)
+    # + scripts/lockbox_bootstrap.sh as a cron wrapper that fetches
+    # secrets from Lockbox before each backup run. See
+    # docker/Dockerfile.backup for full rationale.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backup
     environment:
       DATABASE_URL:          postgresql://sku:sku@postgres:5432/sku_forecasting
       # Backup S3 — отдельный аккаунт / keypair. Backup-скрипт смотрит
@@ -531,17 +527,10 @@ services:
     volumes:
       - ../scripts:/scripts:ro
       - backups:/tmp/backup
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        apk add --no-cache postgresql-client openssl coreutils dcron curl > /dev/null
-        curl -L -o /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc && chmod +x /usr/local/bin/mc
-        echo "10 2 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1" | crontab -
-        touch /var/log/backup.log
-        echo "backup cron installed; waiting…"
-        crond -f -L /var/log/backup.log
+    # No entrypoint override — Dockerfile.backup CMD echoes the
+    # "backup cron installed" sentinel then exec's crond. Crontab entry
+    # uses lockbox_bootstrap.sh as a wrapper to fetch fresh secrets
+    # from Lockbox before each backup run.
     depends_on:
       postgres: { condition: service_healthy }
       minio:    { condition: service_healthy }

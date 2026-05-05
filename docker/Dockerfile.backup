@@ -1,38 +1,51 @@
 # Backup container — runs nightly pg_dump + AES-256 + S3 upload via cron.
 #
+# Runtime self-bootstraps from Yandex Lockbox: each cron invocation
+# runs `lockbox_bootstrap.sh` first, fetches fresh secrets via JWT/PS256
+# → IAM token → Lockbox payload, exports them, then runs backup.sh.
+# No reliance on compose-time `${VAR:-}` interpolation, no .env file
+# leakage of secrets, no env baked into the container at create time.
+#
 # Why a dedicated Dockerfile (vs runtime apk-add on alpine:3.20):
 #   The previous setup did `apk add postgresql-client openssl coreutils
-#   dcron curl` + `curl -L mc` at container start. When alpine's CDN or
-#   min.io's CDN was unreachable on a restart, the install hung forever
-#   and crond never started — that's exactly what killed nightly
-#   backups for 8 days (2026-04-27 → 2026-05-05). Baking the deps into
-#   the image at build time eliminates the runtime network dependency.
-#
-# Image is small (~30 MB) — alpine + pg-client + mc + a couple of
-# coreutils helpers. Rebuilt only when this Dockerfile changes.
+#   dcron curl jq` + `curl mc` at container start. When alpine's CDN was
+#   unreachable on a restart, install hung forever and crond never
+#   started — that's exactly what killed nightly backups for 8 days
+#   (#176). Baking deps at build time eliminates the runtime fragility.
 
 FROM alpine:3.20
 
+# Install everything backup.sh + lockbox_bootstrap.sh need.
 RUN apk add --no-cache \
         postgresql-client \
         openssl \
         coreutils \
         dcron \
         curl \
+        jq \
         ca-certificates \
  && curl -fsSL -o /usr/local/bin/mc \
         https://dl.min.io/client/mc/release/linux-amd64/mc \
  && chmod +x /usr/local/bin/mc \
- && mc --version
+ && mc --version >/dev/null
 
-# Crontab + log file. Crontab path is /scripts/backup.sh — that file
-# comes from the bind-mount of ../scripts at compose runtime, so the
-# image doesn't need it at build time.
-RUN echo "10 2 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1" \
+# lockbox_bootstrap.sh wraps any command, fetching Lockbox secrets
+# first. backup.sh comes from the bind-mount at runtime (so we can
+# tweak the dump pipeline without rebuilding the image), but
+# lockbox_bootstrap.sh is baked here — it's stable and a critical
+# dep of the container starting cleanly.
+COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh
+
+# Crontab — every cron run does its own Lockbox fetch via the wrapper,
+# so the secrets in the cron environment are always fresh. crond runs
+# jobs with empty env, so without this wrapper the secrets exported in
+# the parent CMD wouldn't be visible to backup.sh.
+RUN echo "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/backup.sh >> /var/log/backup.log 2>&1" \
         | crontab - \
  && touch /var/log/backup.log
 
-# Foreground crond. The echo before exec preserves the "backup cron
-# installed; waiting…" stdout signal that scripts/restart-backup
-# workflow watches for to know the container is ready.
+# Foreground crond — image PID 1.
+# Echo the "backup cron installed" sentinel so scripts/restart-backup
+# workflow's wait-for-readiness loop still works.
 CMD ["sh", "-c", "echo 'backup cron installed; waiting…' && exec crond -f -L /var/log/backup.log"]
