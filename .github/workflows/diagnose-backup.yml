@@ -1,0 +1,161 @@
+# Diagnose why nightly backups stopped firing.
+#
+# The backup-restore drill (#175) found that the most recent dump in S3
+# is 8 days stale, and was taken before half the migrations applied.
+# This workflow gathers the evidence needed to find and fix the cause:
+#
+#   1. Is the `backup` compose service running at all?
+#   2. Last 100 lines of backup container logs (cron output if any).
+#   3. Is busybox crond actually inside it and running?
+#   4. What does its crontab say?
+#   5. Try a one-shot manual backup, capture every error.
+#
+# Run via workflow_dispatch only — diagnostics are read-mostly except
+# the optional manual-trigger step at the end.
+
+name: Diagnose Backup Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_manual_backup:
+        description: "Run a one-shot backup.sh after diagnostics"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  diagnose:
+    name: Inspect backup container + try manual run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Inspect backup container
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          RUN_MANUAL: ${{ inputs.run_manual_backup }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              "RUN_MANUAL='$RUN_MANUAL' bash -s" <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "════════════════════════════════════════════════════════"
+          echo "1. Compose ps for backup service"
+          echo "════════════════════════════════════════════════════════"
+          docker compose $COMPOSE_ARGS ps backup || echo "(not found)"
+
+          # Find container ID by service or by image fallback.
+          BAK=$(docker compose $COMPOSE_ARGS ps -q backup 2>/dev/null || true)
+          if [ -z "$BAK" ]; then
+              # Backup service uses alpine image — try to find it any
+              # other way (compose project name may have shifted).
+              BAK=$(docker ps -a --filter name=backup --format '{{.ID}}' | head -1)
+          fi
+          if [ -z "$BAK" ]; then
+              echo "ERROR: no backup container found at all" >&2
+              exit 1
+          fi
+          echo
+          echo "container id: $BAK"
+
+          echo
+          echo "════════════════════════════════════════════════════════"
+          echo "2. State + restart count"
+          echo "════════════════════════════════════════════════════════"
+          docker inspect --format \
+              'state={{.State.Status}}  exitcode={{.State.ExitCode}}  restarts={{.RestartCount}}  started={{.State.StartedAt}}  finished={{.State.FinishedAt}}' \
+              "$BAK"
+
+          echo
+          echo "════════════════════════════════════════════════════════"
+          echo "3. Last 100 lines of container logs"
+          echo "════════════════════════════════════════════════════════"
+          docker logs --tail=100 "$BAK" 2>&1 || echo "(no logs)"
+
+          # If container is stopped, crond + crontab inspection won't
+          # work. Skip those steps gracefully.
+          STATE=$(docker inspect --format '{{.State.Status}}' "$BAK")
+          if [ "$STATE" = "running" ]; then
+              echo
+              echo "════════════════════════════════════════════════════════"
+              echo "4. Is crond running inside the container?"
+              echo "════════════════════════════════════════════════════════"
+              docker exec "$BAK" sh -c 'ps -ef | head -10' 2>&1 || \
+                  docker exec "$BAK" sh -c 'ps' 2>&1 || \
+                  echo "(ps not available)"
+
+              echo
+              echo "════════════════════════════════════════════════════════"
+              echo "5. Crontab contents"
+              echo "════════════════════════════════════════════════════════"
+              for f in /var/spool/cron/crontabs/root /etc/crontabs/root /etc/cron.d/backup; do
+                  if docker exec "$BAK" test -f "$f" 2>/dev/null; then
+                      echo "--- $f ---"
+                      docker exec "$BAK" cat "$f"
+                  fi
+              done
+
+              echo
+              echo "════════════════════════════════════════════════════════"
+              echo "6. Env vars relevant to backup (masked)"
+              echo "════════════════════════════════════════════════════════"
+              docker exec "$BAK" sh -c 'env | grep -E "^(DATABASE_URL|S3_BACKUP|BACKUP_PASSPHRASE|BACKUP_PREFIX)" | sed -E "s|(://[^:]+:)[^@]+@|\1***@|; s|(KEY=).*|\1***|; s|(PASSPHRASE=).*|\1***|"'
+          else
+              echo
+              echo "Container is NOT running (state=$STATE). Skipping in-container inspection."
+              echo "Try: docker compose $COMPOSE_ARGS up -d backup"
+          fi
+
+          if [ "$RUN_MANUAL" = "true" ]; then
+              echo
+              echo "════════════════════════════════════════════════════════"
+              echo "7. Running backup.sh manually (this writes a real backup)"
+              echo "════════════════════════════════════════════════════════"
+              if [ "$STATE" != "running" ]; then
+                  echo "Starting backup container first…"
+                  docker compose $COMPOSE_ARGS up -d backup
+                  sleep 5
+                  BAK=$(docker compose $COMPOSE_ARGS ps -q backup)
+              fi
+              # Run via docker exec so the container's env is available.
+              # Use bash explicitly; the backup container is alpine so
+              # /bin/sh is busybox — backup.sh uses POSIX-only syntax,
+              # works either way.
+              docker exec "$BAK" sh /scripts/backup.sh 2>&1 || {
+                  echo "MANUAL BACKUP FAILED — see output above" >&2
+                  exit 2
+              }
+              echo "MANUAL BACKUP OK"
+          fi
+
+          echo
+          echo "════════════════════════════════════════════════════════"
+          echo "DIAGNOSE DONE"
+          echo "════════════════════════════════════════════════════════"
+          EOF
