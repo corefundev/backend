@@ -68,6 +68,7 @@ jobs:
           set -euo pipefail
           scp -q docker/alertmanager.yml \
                  docker/docker-compose.yml \
+                 docker/docker-compose.lockbox.yml \
                  docker/Dockerfile.alertmanager \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
           scp -q scripts/alertmanager_entrypoint.sh \
