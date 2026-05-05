@@ -124,8 +124,20 @@ services:
   # TELEGRAM_ALERT_CHAT_ID from Lockbox at startup via the same
   # JWT-PS256/IAM/payload chain as the backup container. The bot token
   # never lands in /srv/backend/.env this way.
+  #
+  # *Not* using <<: *lockbox-blanks here — alertmanager only needs 2 of
+  # the 80+ keys, and we explicitly gate via LOCKBOX_ALLOWED_KEYS so
+  # lockbox_bootstrap.sh skips the rest. Container env stays minimal,
+  # an attacker who pwns alertmanager still can't read secrets the
+  # service has no business seeing (defence-in-depth — the SA key on
+  # disk would still let them refetch the full payload, that's a
+  # separate hardening step).
   alertmanager:
     environment:
-      <<: *lockbox-blanks
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "TELEGRAM_ALERT_BOT_TOKEN TELEGRAM_ALERT_CHAT_ID"
+      TELEGRAM_ALERT_BOT_TOKEN: ""
+      TELEGRAM_ALERT_CHAT_ID:   ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

@@ -16,6 +16,14 @@
 #   YC_SA_KEY_FILE          path to authorized_key.json (read-only mount)
 #   YC_LOCKBOX_SECRET_ID    Lockbox secret id
 #
+# Optional env:
+#   LOCKBOX_ALLOWED_KEYS    space-separated allowlist of keys to export.
+#                           If set, keys not in the list are skipped — even
+#                           though the script still pulls the full payload
+#                           (the IAM token has read access to the whole
+#                           secret). Use to keep low-trust containers from
+#                           seeing every secret in env.
+#
 # Required tools:
 #   jq, openssl, curl, base64, mktemp  (alpine packages)
 
@@ -94,12 +102,21 @@ PAYLOAD_JSON=$(curl -fsS \
 unset IAM_TOKEN
 
 # ── 5. Export textValue entries ───────────────────────────────────
+ALLOWED="${LOCKBOX_ALLOWED_KEYS:-}"
 N=$(printf '%s' "$PAYLOAD_JSON" | jq -r '.entries | length')
 i=0
 INJECTED=0
+SKIPPED=0
 while [ "$i" -lt "$N" ]; do
     K=$(printf '%s' "$PAYLOAD_JSON" | jq -r ".entries[$i].key")
     V=$(printf '%s' "$PAYLOAD_JSON" | jq -r ".entries[$i].textValue // empty")
+    if [ -n "$ALLOWED" ]; then
+        # Allowlist gate — skip keys not in $LOCKBOX_ALLOWED_KEYS.
+        case " $ALLOWED " in
+            *" $K "*) ;;
+            *) SKIPPED=$((SKIPPED + 1)); i=$((i + 1)); continue ;;
+        esac
+    fi
     if [ -n "$K" ] && [ -n "$V" ]; then
         # Don't clobber explicit env overrides (matches lockbox_agent.py).
         eval "EXISTING=\${$K-__UNSET__}"
@@ -110,9 +127,13 @@ while [ "$i" -lt "$N" ]; do
     fi
     i=$((i + 1))
 done
-unset PAYLOAD_JSON N i K V EXISTING
+unset PAYLOAD_JSON N i K V EXISTING ALLOWED
 
-echo "lockbox_bootstrap: injected $INJECTED variables from $YC_LOCKBOX_SECRET_ID" >&2
+if [ "$SKIPPED" -gt 0 ]; then
+    echo "lockbox_bootstrap: injected $INJECTED, skipped $SKIPPED (allowlist) from $YC_LOCKBOX_SECRET_ID" >&2
+else
+    echo "lockbox_bootstrap: injected $INJECTED variables from $YC_LOCKBOX_SECRET_ID" >&2
+fi
 
 # ── 6. exec the rest ──────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
