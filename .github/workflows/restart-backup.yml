@@ -1,0 +1,104 @@
+# Restart the backup container and verify cron + manual backup work.
+#
+# Backup container (alpine:3.20 + runtime apk-add) hung on apk for
+# 8 days, never reached the crond step → no nightly backups. This
+# workflow:
+#   1. docker compose restart backup
+#   2. Wait up to 90s for "backup cron installed; waiting…" in logs
+#      (signals apk + curl + crontab install all completed)
+#   3. Run /scripts/backup.sh manually inside the container — produces
+#      a fresh dump immediately so we don't need to wait until 02:10 UTC
+#   4. List the latest backup in S3 to confirm it landed
+#
+# A proper Dockerfile (preinstalled deps, no runtime apk) is tracked
+# as #176's follow-up — this workflow is the band-aid that gets a
+# fresh backup TODAY.
+
+name: Restart Backup + Verify
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restart:
+    name: Kick the backup container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Restart + wait + manual backup
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "── 1. Restart backup service ──"
+          docker compose $COMPOSE_ARGS restart backup
+          BAK=$(docker compose $COMPOSE_ARGS ps -q backup)
+          echo "container id: $BAK"
+
+          echo
+          echo "── 2. Wait for 'backup cron installed' in logs (up to 90s) ──"
+          INSTALLED=0
+          for i in $(seq 1 30); do
+              if docker logs --since=1m "$BAK" 2>&1 | grep -q "backup cron installed"; then
+                  echo "ready after ${i}*3s"
+                  INSTALLED=1
+                  break
+              fi
+              sleep 3
+          done
+          echo
+          echo "── recent logs (post-restart) ──"
+          docker logs --tail=30 "$BAK" 2>&1
+
+          if [ "$INSTALLED" -ne 1 ]; then
+              echo "ERROR: cron didn't install within 90s — apk still failing?" >&2
+              echo "Try a Dockerfile with preinstalled deps (issue: #176 follow-up)." >&2
+              exit 2
+          fi
+
+          echo
+          echo "── 3. Manual backup.sh run ──"
+          docker exec "$BAK" sh /scripts/backup.sh 2>&1 | tail -30
+
+          echo
+          echo "── 4. List the most recent .dump.enc in S3 ──"
+          # Reuse mc that backup.sh already configured.
+          docker exec "$BAK" sh -c '
+              mc alias set bak "$S3_BACKUP_ENDPOINT_URL" "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+              mc find "bak/$S3_BACKUP_BUCKET/backups/" --name "*.dump.enc" | sort | tail -3
+          '
+
+          echo
+          echo "═══════════════════════════════════════════════════════"
+          echo "  Backup container restarted; fresh dump uploaded."
+          echo "  Re-trigger 'Backup Restore Drill' to verify integrity."
+          echo "═══════════════════════════════════════════════════════"
+          EOF
