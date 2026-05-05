@@ -118,14 +118,25 @@ jobs:
 
           echo
           echo "  Lockbox bootstrap log line (look for 'injected N variables'):"
-          docker compose $COMPOSE_ARGS logs --tail=20 alertmanager 2>&1 \
-              | grep -E 'lockbox_bootstrap|level=' | head -10 || true
+          docker compose $COMPOSE_ARGS logs --tail=80 alertmanager 2>&1 \
+              | grep -E 'lockbox_bootstrap|alertmanager_entrypoint' || \
+              echo "    (no bootstrap line — entrypoint may have skipped Lockbox path)"
 
           echo
-          echo "  rendered config (sensitive values masked):"
+          echo "  recent alertmanager errors (if any):"
+          docker compose $COMPOSE_ARGS logs --tail=80 alertmanager 2>&1 \
+              | grep -E 'level=error|level=warn' | tail -10 || true
+
           AM=$(docker compose $COMPOSE_ARGS ps -q alertmanager)
-          docker exec "$AM" cat /tmp/alertmanager.yml \
-              | sed -E 's/(bot_token: ").{4}[^"]*/\1***/g; s/(chat_id:\s+).+/\1***/g'
+          if [ -n "$AM" ] && docker inspect -f '{{.State.Running}}' "$AM" 2>/dev/null | grep -q true; then
+              echo
+              echo "  rendered config (sensitive values masked):"
+              docker exec "$AM" cat /tmp/alertmanager.yml \
+                  | sed -E 's/(bot_token: ").{4}[^"]*/\1***/g; s/(chat_id:\s+).+/\1***/g'
+          else
+              echo
+              echo "  alertmanager container is not running — skipping rendered-config dump."
+          fi
 
           echo
           echo "  verifying .env has no TELEGRAM_ALERT_* (should be empty):"
