@@ -13,9 +13,16 @@
 #   started — that's exactly what killed nightly backups for 8 days
 #   (#176). Baking deps at build time eliminates the runtime fragility.
 
+# Stage 1: pull mc from official MinIO image — direct download from
+# dl.min.io occasionally times out from this VPS's build network,
+# Docker Hub is more reliable. Pinned to the version we were already
+# running successfully via runtime curl.
+FROM minio/mc:RELEASE.2025-08-13T08-35-41Z AS mc-stage
+
 FROM alpine:3.20
 
-# Install everything backup.sh + lockbox_bootstrap.sh need.
+# Install everything backup.sh + lockbox_bootstrap.sh need. mc comes
+# from the multi-stage COPY below — no runtime/build-time CDN curl.
 RUN apk add --no-cache \
         postgresql-client \
         openssl \
@@ -23,11 +30,9 @@ RUN apk add --no-cache \
         dcron \
         curl \
         jq \
-        ca-certificates \
- && curl -fsSL -o /usr/local/bin/mc \
-        https://dl.min.io/client/mc/release/linux-amd64/mc \
- && chmod +x /usr/local/bin/mc \
- && mc --version >/dev/null
+        ca-certificates
+
+COPY --from=mc-stage /usr/bin/mc /usr/local/bin/mc
 
 # lockbox_bootstrap.sh wraps any command, fetching Lockbox secrets
 # first. backup.sh comes from the bind-mount at runtime (so we can
