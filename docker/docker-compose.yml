@@ -413,19 +413,22 @@ services:
   # ── Prometheus ────────────────────────────────────────────────
   # ── Postgres exporter (Prometheus target) ──────────────────────
   # Exports pg_stat_database, pg_stat_activity, etc. for the alert rules
-  # (PostgresDown, PostgresConnectionsHigh). DATA_SOURCE_NAME comes from
-  # host .env — duplicated with Lockbox because postgres-exporter is not
-  # a Python service that can use lockbox_agent.
+  # (PostgresDown, PostgresConnectionsHigh).
+  #
+  # Custom image — bakes lockbox_bootstrap.sh so DATABASE_URL gets
+  # fetched from Lockbox at container startup. Without this we'd have
+  # to keep the postgres password in /srv/backend/.env (upstream image
+  # is distroless, can't run a shell-based loader).
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    environment:
-      DATA_SOURCE_NAME: "${DATABASE_URL}?sslmode=disable"
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.postgres-exporter
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "/postgres_exporter", "--version"]
+      test: ["CMD", "/bin/postgres_exporter", "--version"]
       interval: 30s
       timeout: 5s
       retries: 3

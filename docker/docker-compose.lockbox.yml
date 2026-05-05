@@ -141,3 +141,17 @@ services:
       TELEGRAM_ALERT_CHAT_ID:   ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # postgres-exporter (custom image) bootstraps DATABASE_URL from
+  # Lockbox — closes the last plaintext-secret hole in /srv/backend/.env
+  # (the postgres password used to live there because upstream's
+  # exporter image is distroless and couldn't run lockbox_bootstrap.sh).
+  # Same allowlist pattern as alertmanager: only DATABASE_URL.
+  postgres-exporter:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "DATABASE_URL"
+      DATABASE_URL: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

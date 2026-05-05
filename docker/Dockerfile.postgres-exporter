@@ -1,0 +1,40 @@
+# Custom postgres-exporter image — bakes Lockbox-bootstrap deps so the
+# container fetches DATABASE_URL from Yandex Lockbox at startup. Avoids
+# ever writing the postgres password into /srv/backend/.env.
+#
+# Why a custom image vs upstream prometheuscommunity/postgres-exporter:
+#   The upstream image is scratch/distroless — no shell, no curl, no jq,
+#   no openssl. lockbox_bootstrap.sh can't run there. We rebase on alpine,
+#   install the few extra packages, and copy the exporter binary from
+#   upstream.
+#
+# Same Lockbox-fetch pattern as backup + alertmanager containers.
+
+FROM prometheuscommunity/postgres-exporter:v0.15.0 AS upstream
+
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+        curl \
+        jq \
+        openssl \
+        coreutils \
+        ca-certificates
+
+# Exporter binary from upstream — pinned to v0.15.0.
+COPY --from=upstream /postgres_exporter /bin/postgres_exporter
+
+# Lockbox secret-loader (shared with backup + alertmanager).
+COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
+
+# Wrapper: optional Lockbox bootstrap, set DATA_SOURCE_NAME from
+# DATABASE_URL, exec exporter.
+COPY scripts/postgres_exporter_entrypoint.sh /usr/local/bin/postgres_exporter_entrypoint.sh
+
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/postgres_exporter_entrypoint.sh
+
+EXPOSE 9187
+USER nobody
+
+ENTRYPOINT ["/usr/local/bin/postgres_exporter_entrypoint.sh"]

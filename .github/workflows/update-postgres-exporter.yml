@@ -1,0 +1,128 @@
+# Update postgres-exporter (Lockbox-mode):
+#   1. scp the latest docker-compose.yml + docker-compose.lockbox.yml +
+#      Dockerfile.postgres-exporter + scripts/postgres_exporter_entrypoint.sh
+#      + scripts/lockbox_bootstrap.sh.
+#   2. Drop DATABASE_URL from /srv/backend/.env — Lockbox is now the only
+#      source. Removes the last plaintext-secret hole in the .env file.
+#   3. Build the postgres-exporter image and recreate the container.
+#   4. Verify `pg_up` metric returns 1 (means exporter actually connected
+#      to postgres with the Lockbox-fetched DATABASE_URL).
+#
+# Lockbox secret prerequisites:
+#   sku-forecasting-secrets must contain DATABASE_URL (already does —
+#   used by api/worker via vault_agent.bootstrap_secrets()).
+
+name: Update Postgres Exporter (Lockbox)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update:
+    name: Build + restart postgres-exporter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Push files to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          scp -q docker/docker-compose.yml \
+                 docker/docker-compose.lockbox.yml \
+                 docker/Dockerfile.postgres-exporter \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
+          scp -q scripts/postgres_exporter_entrypoint.sh \
+                 scripts/lockbox_bootstrap.sh \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/scripts/"
+
+      - name: Drop DATABASE_URL from .env
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # No on-disk backup — bak files are exactly the leak vector
+          # this whole change is fixing. The line we're removing is also
+          # not the source of truth (that's Lockbox).
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          BEFORE=$(grep -cE '^DATABASE_URL=' .env || true)
+          sed -i '/^DATABASE_URL=/d' .env
+          echo "  scrubbed $BEFORE DATABASE_URL line(s) from .env"
+          echo "  remaining secret-shaped vars in .env (lengths only):"
+          awk -F= '/^[A-Z_]+=/ { printf "    %-30s len=%d\n", $1, length($2) }' .env \
+              | grep -E 'PASSWORD|SECRET|TOKEN|KEY|URL' || echo "    (none)"
+          EOF
+
+      - name: Build + recreate postgres-exporter
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          chmod +x scripts/postgres_exporter_entrypoint.sh
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "  building postgres-exporter image…"
+          docker compose $COMPOSE_ARGS build postgres-exporter
+
+          echo "  recreating postgres-exporter…"
+          docker compose $COMPOSE_ARGS up -d --force-recreate postgres-exporter
+
+          echo "  waiting for healthy…"
+          for i in $(seq 1 60); do
+              S=$(docker compose $COMPOSE_ARGS ps --format '{{.Health}}' postgres-exporter 2>/dev/null || true)
+              [ "$S" = "healthy" ] && { echo "  healthy after ${i}s"; break; }
+              sleep 1
+          done
+
+          echo
+          echo "  Lockbox bootstrap log line:"
+          docker compose $COMPOSE_ARGS logs --tail=80 postgres-exporter 2>&1 \
+              | grep -E 'lockbox_bootstrap|postgres_exporter_entrypoint|level=' | head -10 || true
+
+          echo
+          echo "  pg_up metric (expect '1'):"
+          PE=$(docker compose $COMPOSE_ARGS ps -q postgres-exporter)
+          for i in $(seq 1 10); do
+              VAL=$(docker exec "$PE" wget -qO- http://127.0.0.1:9187/metrics 2>/dev/null \
+                    | awk '$1 == "pg_up" { print $2; exit }') || true
+              if [ "$VAL" = "1" ]; then
+                  echo "    pg_up=1 — Lockbox-bootstrapped exporter is reaching postgres."
+                  break
+              fi
+              sleep 1
+          done
+          if [ "${VAL:-}" != "1" ]; then
+              echo "    pg_up != 1 (got '${VAL:-empty}') — check logs above."
+              exit 1
+          fi
+          EOF
