@@ -103,6 +103,13 @@ jobs:
           chmod +x scripts/alertmanager_entrypoint.sh
           COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
 
+          echo "  resolved alertmanager service env (compose config):"
+          docker compose $COMPOSE_ARGS config alertmanager 2>/dev/null \
+              | sed -n '/^[[:space:]]*environment:/,/^[[:space:]]*[a-z_]\+:/p' \
+              | sed -E 's/(BOT_TOKEN|PASSWORD|SECRET[A-Z_]*|API_KEY|FERNET).*$/\1: ***/g' \
+              | head -40
+
+          echo
           echo "  building alertmanager image…"
           docker compose $COMPOSE_ARGS build alertmanager
 

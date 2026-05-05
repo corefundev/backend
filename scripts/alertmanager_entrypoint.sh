@@ -17,6 +17,11 @@ set -eu
 
 # Recursion guard: lockbox_bootstrap.sh execs us back as "$@". Without
 # the marker we'd re-enter the Lockbox branch infinitely.
+# Diagnostic: dump which Lockbox-related keys are present in env (no values).
+echo "alertmanager_entrypoint: relevant env keys at entry:" >&2
+printenv | grep -E '^(YC_|TELEGRAM_ALERT_|ALERTMGR_)' | sort \
+    | awk -F= '{ printf "  %s len=%d\n", $1, length($2) }' >&2 || true
+
 if [ -n "${YC_SA_KEY_FILE:-}" ] && [ -z "${ALERTMGR_BOOTED:-}" ]; then
     export ALERTMGR_BOOTED=1
     exec /usr/local/bin/lockbox_bootstrap.sh "$0" "$@"
