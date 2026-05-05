@@ -21,8 +21,10 @@ RUN apk add --no-cache \
         coreutils \
         ca-certificates
 
-# Exporter binary from upstream — pinned to v0.15.0.
-COPY --from=upstream /postgres_exporter /bin/postgres_exporter
+# Exporter binary from upstream — pinned to v0.15.0. Upstream image
+# bakes it at /bin/postgres_exporter (their PATH lookup finds it via
+# CMD ["postgres_exporter"]).
+COPY --from=upstream /bin/postgres_exporter /bin/postgres_exporter
 
 # Lockbox secret-loader (shared with backup + alertmanager).
 COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh

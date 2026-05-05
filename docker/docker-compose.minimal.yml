@@ -86,7 +86,11 @@ services:
 
   backup:
     environment:
-      DATABASE_URL: "${DATABASE_URL}"
+      # Default to empty — backup container fetches DATABASE_URL from
+      # Lockbox at startup via lockbox_bootstrap.sh. Without :- compose
+      # warns when host .env doesn't have DATABASE_URL (which is the
+      # whole point of removing it from .env).
+      DATABASE_URL: "${DATABASE_URL:-}"
     depends_on: !override
       postgres:
         condition: service_healthy
