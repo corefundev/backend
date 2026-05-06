@@ -203,4 +203,4 @@ groups:
           team:     forecasting
         annotations:
           summary:     "Postgres backup is stale or missing (>25h)"
-          description: "No fresh dump pushed to pushgateway. Run the Diagnose Backup workflow + Restart Backup workflow. History: backup pipeline silently died for 8 days in #176."
+          description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
