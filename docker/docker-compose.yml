@@ -69,6 +69,7 @@ services:
   # outdated schema. Replaces in-process DDL that used to race on
   # pg_type during multi-worker startup.
   migrate:
+    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -81,6 +82,11 @@ services:
 
   # ── Inference API ─────────────────────────────────────────────
   api:
+    # Image is published to GHCR by .github/workflows/cd.yml. Local dev
+    # also works: `docker compose build api` produces an image with the
+    # same tag so `up` reuses it without pulling. Pin the tag via env
+    # var API_IMAGE_TAG=<sha>; defaults to :latest for dev.
+    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -103,6 +109,7 @@ services:
 
   # ── Training worker (rq worker) ───────────────────────────────
   worker:
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
@@ -129,6 +136,7 @@ services:
   # ── Upload pipeline: scan worker ──────────────────────────────
   # Streams untrusted bytes into ClamAV; never writes attacker data to disk.
   scan-worker:
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
@@ -162,6 +170,7 @@ services:
   # Needs access to the Docker socket to launch secure_parser containers.
   # Run on a dedicated node in prod; treat as privileged.
   process-worker:
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker

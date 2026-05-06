@@ -1,139 +1,307 @@
-name: CD
+# Continuous deployment: push to main → staging → smoke → manual gate → prod.
+#
+# Pipeline shape:
+#   1. build         — build api + worker images on the runner, push to GHCR
+#                      with both :sha-12 and :main tags. Identical artifact
+#                      flows to staging and prod (no rebuild on VPS).
+#   2. deploy-staging — rsync configs (compose/scripts/migrations) to
+#                      /srv/backend on staging, pull images, run migrate,
+#                      recreate api + worker* services. Other infra
+#                      services (postgres/redis/nginx/...) are restarted
+#                      only if their compose-time defs changed.
+#   3. smoke-staging  — external probes (https://api.staging.testcore.ru/healthz).
+#   4. deploy-prod    — environment "production" requires reviewer approval
+#                      (configure in GH Settings → Environments). Mirrors
+#                      staging steps on prod VPS using same image SHA.
+#   5. smoke-prod     — final external probe + tagged commit notification.
+#
+# Required GH secrets:
+#   STAGING_HOST, STAGING_USER,
+#   STAGING_SSH_PRIVATE_KEY, STAGING_SSH_KNOWN_HOSTS
+#   VPS_HOST, VPS_USER, VPS_SSH_PRIVATE_KEY, VPS_SSH_KNOWN_HOSTS  (prod)
+#
+# Required GH environments:
+#   "staging"     — no protection (auto-deploys on push to main)
+#   "production"  — required reviewers (set in Settings → Environments)
+#
+# GHCR auth on VPS uses GITHUB_TOKEN (passed via SSH heredoc); a
+# read-only PAT could be persisted on each VPS instead, but rotating
+# the runner-issued token avoids one more secret to manage.
+
+name: CD — Deploy to Staging then Production
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "migrations/**"
+      - "docker/**"
+      - "configs/**"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - ".github/workflows/cd.yml"
   workflow_dispatch:
     inputs:
-      environment:
-        description: "Deploy target"
-        required: true
-        default: staging
-        type: choice
-        options: [staging, production]
+      skip_staging:
+        description: "Emergency: skip staging, deploy main directly to prod (requires approval)"
+        type: boolean
+        default: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_API: ghcr.io/${{ github.repository }}/sku-api
-  IMAGE_WORKER: ghcr.io/${{ github.repository }}/sku-worker
+  REGISTRY:     ghcr.io
+  IMAGE_API:    ghcr.io/corefundev/sku-forecasting-api
+  IMAGE_WORKER: ghcr.io/corefundev/sku-forecasting-worker
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # ── Deploy Staging ─────────────────────────────────────────
-  deploy-staging:
-    name: Deploy to Staging
+
+  build:
+    name: Build & push images to GHCR
     runs-on: ubuntu-latest
-    environment: staging
-    concurrency:
-      group: deploy-staging
-      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Log in to Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - id: tag
+        run: echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f0848 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push API image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+      - name: Build + push api image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
           context: .
           file: docker/Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE_API }}:staging
-            ${{ env.IMAGE_API }}:${{ github.sha }}
+            ${{ env.IMAGE_API }}:${{ steps.tag.outputs.sha }}
+            ${{ env.IMAGE_API }}:main
+          cache-from: type=registry,ref=${{ env.IMAGE_API }}:buildcache
+          cache-to:   type=registry,ref=${{ env.IMAGE_API }}:buildcache,mode=max
 
-      - name: Build and push Worker image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+      - name: Build + push worker image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
           context: .
           file: docker/Dockerfile.worker
           push: true
           tags: |
-            ${{ env.IMAGE_WORKER }}:staging
-            ${{ env.IMAGE_WORKER }}:${{ github.sha }}
+            ${{ env.IMAGE_WORKER }}:${{ steps.tag.outputs.sha }}
+            ${{ env.IMAGE_WORKER }}:main
+          cache-from: type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache
+          cache-to:   type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache,mode=max
 
-      - name: Deploy to staging server
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
-        with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
-          script: |
-            cd /opt/sku-forecasting
-            docker compose pull
-            docker compose up -d --no-deps api worker
-            sleep 10
-            curl -f http://localhost:8000/health || exit 1
-            echo "Staging health check passed"
-
-  # ── Staging validation ─────────────────────────────────────
-  validate-staging:
-    name: Validate Staging
+  deploy-staging:
+    name: Deploy → staging
+    needs: build
+    if: ${{ ! inputs.skip_staging }}
     runs-on: ubuntu-latest
-    needs: deploy-staging
+    environment: staging
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-      - run: pip install httpx pytest
-      - name: Run smoke tests against staging
+
+      - name: Setup SSH (staging)
         env:
-          STAGING_URL: ${{ secrets.STAGING_URL }}
-          API_KEY:     ${{ secrets.STAGING_API_KEY }}
+          SSH_KEY:         ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.STAGING_SSH_KNOWN_HOSTS }}
         run: |
-          python -c "
-          import httpx, os
-          url = os.environ['STAGING_URL']
-          key = os.environ['API_KEY']
-          r = httpx.get(f'{url}/health', timeout=10)
-          assert r.status_code == 200, f'Health check failed: {r.status_code}'
-          assert r.json()['status'] == 'ok'
-          print('Staging validation: PASSED')
-          "
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
-  # ── Manual approval gate ───────────────────────────────────
-  # (GitHub environment protection rules enforce manual approval)
+      - name: Sync configs to staging /srv/backend
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+        run: |
+          set -euo pipefail
+          # Push only configs / scripts / migrations — image carries src.
+          # Excludes: secrets/yc-sa-key.json (kept stable on host), .env
+          # (host-managed), build / cache / venv junk.
+          rsync -azh \
+              --include='docker/' --include='docker/**' \
+              --include='scripts/' --include='scripts/**' \
+              --include='migrations/' --include='migrations/**' \
+              --include='configs/' --include='configs/**' \
+              --exclude='*' \
+              --exclude='secrets/**' --exclude='.env' \
+              -e "ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts" \
+              ./ "${USER}@${HOST}:/srv/backend/"
 
-  # ── Deploy Production ──────────────────────────────────────
-  deploy-production:
-    name: Deploy to Production
+      - name: Pull image, migrate, recreate app services
+        env:
+          HOST:    ${{ secrets.STAGING_HOST }}
+          USER:    ${{ secrets.STAGING_USER }}
+          TAG:     ${{ needs.build.outputs.tag }}
+          GHCR_PW: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
+              env API_IMAGE_TAG="$TAG" WORKER_IMAGE_TAG="$TAG" \
+                  GHCR_PW="$GHCR_PW" GHCR_USER="$GHCR_USER" \
+                  bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.staging.yml"
+
+          echo "  pulling api + worker images @ ${API_IMAGE_TAG}"
+          docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
+
+          echo "  running migrations"
+          docker compose $COMPOSE_ARGS run --rm migrate
+
+          echo "  recreating app services"
+          docker compose $COMPOSE_ARGS up -d --no-deps --force-recreate \
+              api worker scan-worker process-worker
+
+          echo "  waiting for api healthy"
+          for i in $(seq 1 60); do
+              S=$(docker compose $COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null)
+              [ "$S" = "healthy" ] && { echo "    healthy after ${i}s"; break; }
+              sleep 1
+          done
+
+          docker logout ghcr.io
+          EOF
+
+  smoke-staging:
+    name: Smoke → staging
+    needs: deploy-staging
     runs-on: ubuntu-latest
-    needs: validate-staging
-    environment: production   # ← requires manual approval in GitHub Settings
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
     steps:
-      - name: Tag production images
+      - name: /healthz returns 200 + status:ok
         run: |
-          docker pull ${{ env.IMAGE_API }}:${{ github.sha }}
-          docker tag  ${{ env.IMAGE_API }}:${{ github.sha }} ${{ env.IMAGE_API }}:latest
-          docker push ${{ env.IMAGE_API }}:latest
+          set -euo pipefail
+          for i in $(seq 1 12); do
+              BODY=$(curl -fsS https://api.staging.testcore.ru/healthz 2>&1) || BODY=""
+              if echo "$BODY" | grep -q '"status":"ok"'; then
+                  echo "  /healthz OK on attempt $i: $BODY"
+                  exit 0
+              fi
+              sleep 5
+          done
+          echo "::error::staging /healthz did not return status:ok within 60s"
+          exit 1
 
-      - name: Deploy to production server
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          script: |
-            cd /opt/sku-forecasting
-            docker compose pull
-            # Rolling restart: worker first, then API
-            docker compose up -d --no-deps worker
-            sleep 5
-            docker compose up -d --no-deps api
-            sleep 15
-            curl -f http://localhost:8000/health || exit 1
-            echo "Production deploy complete"
+      - name: TLS cert chain valid (LE)
+        run: |
+          set -euo pipefail
+          ISSUER=$(echo | openssl s_client -connect api.staging.testcore.ru:443 -servername api.staging.testcore.ru 2>/dev/null | openssl x509 -noout -issuer)
+          echo "  issuer: $ISSUER"
+          echo "$ISSUER" | grep -q "Let's Encrypt" || { echo "::error::cert not Let's Encrypt"; exit 1; }
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          generate_release_notes: true
+  deploy-prod:
+    name: Deploy → production
+    needs: smoke-staging
+    if: ${{ always() && (needs.smoke-staging.result == 'success' || inputs.skip_staging) }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup SSH (prod)
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Sync configs to prod /srv/backend
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          rsync -azh \
+              --include='docker/' --include='docker/**' \
+              --include='scripts/' --include='scripts/**' \
+              --include='migrations/' --include='migrations/**' \
+              --include='configs/' --include='configs/**' \
+              --exclude='*' \
+              --exclude='secrets/**' --exclude='.env' \
+              -e "ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts" \
+              ./ "${USER}@${HOST}:/srv/backend/"
+
+      - name: Pull image, migrate, rolling-recreate on prod
+        env:
+          HOST:      ${{ secrets.VPS_HOST }}
+          USER:      ${{ secrets.VPS_USER }}
+          TAG:       ${{ needs.build.outputs.tag }}
+          GHCR_PW:   ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
+              env API_IMAGE_TAG="$TAG" WORKER_IMAGE_TAG="$TAG" \
+                  GHCR_PW="$GHCR_PW" GHCR_USER="$GHCR_USER" \
+                  bash -s <<'EOF'
+          set -e
+          cd /srv/backend
+          echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+          # Prod uses replication.yml overlay (staging doesn't).
+          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+
+          echo "  pulling api + worker images @ ${API_IMAGE_TAG}"
+          docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
+
+          echo "  running migrations"
+          docker compose $COMPOSE_ARGS run --rm migrate
+
+          echo "  rolling: workers first (no traffic), then api"
+          docker compose $COMPOSE_ARGS up -d --no-deps --force-recreate worker scan-worker process-worker
+          sleep 5
+          docker compose $COMPOSE_ARGS up -d --no-deps --force-recreate api
+
+          echo "  waiting for api healthy"
+          for i in $(seq 1 60); do
+              S=$(docker compose $COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null)
+              [ "$S" = "healthy" ] && { echo "    healthy after ${i}s"; break; }
+              sleep 1
+          done
+
+          docker logout ghcr.io
+          EOF
+
+  smoke-prod:
+    name: Smoke → production
+    needs: deploy-prod
+    runs-on: ubuntu-latest
+    steps:
+      - name: /healthz returns 200 + status:ok
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+              BODY=$(curl -fsS https://api.testcore.ru/healthz 2>&1) || BODY=""
+              if echo "$BODY" | grep -q '"status":"ok"'; then
+                  echo "  /healthz OK on attempt $i: $BODY"
+                  exit 0
+              fi
+              sleep 5
+          done
+          echo "::error::prod /healthz did not return status:ok within 60s"
+          exit 1
