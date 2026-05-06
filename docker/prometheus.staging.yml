@@ -1,0 +1,60 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  # external_labels propagate to every metric, alert and federation
+  # sample. Lets alertmanager group by cluster + lets us route
+  # staging alerts visibly differently from prod (see template in
+  # alertmanager.yml). Override to "staging" via prometheus.staging.yml.
+  external_labels:
+    cluster: staging
+
+# Alerting rules (in alerts.yml) evaluate against freshly scraped metrics.
+# Alertmanager fans out to Slack / PagerDuty / email via its own config.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: "sku-forecasting-api"
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Worker queues — rq exposes metrics only when the rq-exporter sidecar
+  # is running. Optional; rule referencing rq_* no-ops if no data.
+  - job_name: "rq-exporter"
+    static_configs:
+      - targets: ["rq-exporter:9726"]
+    honor_labels: true
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "^go_|^process_"
+        action: drop
+
+  # Postgres — via postgres_exporter (LOCAL: primary's own DB)
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # NOTE: ssl-pg-tls + postgres-replica scrape jobs are intentionally
+  # absent on staging. Staging postgres doesn't run with TLS (no replica
+  # to encrypt the WAL stream to), so there's no cert to probe. The
+  # corresponding alerts in alerts.yml reference these metrics — they
+  # silently no-op when the metric doesn't exist.
+
+  # Pushgateway — receives metrics from batch jobs (backup.sh).
+  # honor_labels: true so the `instance` / `job` labels pushed by the
+  # job survive (otherwise prometheus overwrites them with the scrape
+  # target's pushgateway:9091).
+  - job_name: "pushgateway"
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

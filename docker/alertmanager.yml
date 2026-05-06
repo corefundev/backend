@@ -39,8 +39,9 @@ receivers:
         parse_mode: HTML
         send_resolved: true
         message: |-
-          {{ if eq .CommonLabels.severity "critical" }}🔥{{ else }}⚠️{{ end }} <b>{{ .CommonLabels.alertname }}</b>
+          {{ if eq .CommonLabels.severity "critical" }}🔥{{ else }}⚠️{{ end }} <b>{{ .CommonLabels.alertname }}</b>{{ if eq .CommonLabels.cluster "staging" }} <i>(staging)</i>{{ end }}
 
+          <i>cluster:</i>  <code>{{ .CommonLabels.cluster }}</code>
           <i>severity:</i> <code>{{ .CommonLabels.severity }}</code>
           <i>status:</i>   <code>{{ .Status }}</code>
           {{ range .Alerts }}

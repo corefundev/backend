@@ -1,6 +1,12 @@
 global:
   scrape_interval:     15s
   evaluation_interval: 15s
+  # external_labels propagate to every metric, alert and federation
+  # sample. Lets alertmanager group by cluster + lets us route
+  # staging alerts visibly differently from prod (see template in
+  # alertmanager.yml). Override to "staging" via prometheus.staging.yml.
+  external_labels:
+    cluster: prod
 
 # Alerting rules (in alerts.yml) evaluate against freshly scraped metrics.
 # Alertmanager fans out to Slack / PagerDuty / email via its own config.

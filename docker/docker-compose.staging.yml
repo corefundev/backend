@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Staging overlay. Layered on top of:
+#   docker-compose.yml + docker-compose.prod.yml + docker-compose.minimal.yml
+#   + docker-compose.lockbox.yml
+#
+# What's different vs prod:
+#   • Prometheus scrapes staging.yml (cluster=staging external_label, no
+#     replica/ssl-pg-tls scrape jobs).
+#   • postgres command override: drops the SSL/CA flags from
+#     docker-compose.replication.yml (we don't apply that overlay on
+#     staging — there's no replica to encrypt to).
+#   • mlflow / sandbox-image services skipped via `profiles: ["disabled"]`
+#     trick — they're heavy and not needed for smoke flow.
+#
+# Same Lockbox-bootstrap pattern as prod: yc-sa-key.json mounted RO,
+# alertmanager / postgres-exporter / api / workers / backup all fetch
+# their secrets from `sku-forecasting-staging-secrets` at startup.
+#
+# Compose chain on staging VPS:
+#   docker compose --env-file .env \
+#       -f docker-compose.yml \
+#       -f docker-compose.prod.yml \
+#       -f docker-compose.minimal.yml \
+#       -f docker-compose.lockbox.yml \
+#       -f docker-compose.staging.yml \
+#       up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # Override prometheus config to use the staging variant — adds
+  # cluster=staging external_label and drops scrape jobs that only
+  # exist on the prod stack (postgres-replica, ssl-pg-tls).
+  prometheus:
+    volumes: !override
+      - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+
+  # Heavy services we don't need on staging — disable via a non-default
+  # profile so `up -d` (no --profile) skips them.
+  mlflow:
+    profiles: ["disabled"]
+
+  sandbox-image:
+    profiles: ["disabled"]
+
+  airflow-init:
+    profiles: ["disabled"]
+
+  airflow-scheduler:
+    profiles: ["disabled"]
+
+  airflow-webserver:
+    profiles: ["disabled"]
+
+  grafana:
+    profiles: ["disabled"]
