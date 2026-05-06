@@ -175,11 +175,14 @@ jobs:
           echo "  pulling api + worker images @ \$API_IMAGE_TAG"
           docker compose \$COMPOSE_ARGS pull api worker scan-worker process-worker migrate
 
+          EXPECTED="ghcr.io/corefundev/sku-forecasting-api:\$API_IMAGE_TAG"
+          echo "  expected image: \$EXPECTED"
+
           echo "  running migrations"
           docker compose \$COMPOSE_ARGS run --rm migrate
 
           echo "  recreating app services"
-          docker compose \$COMPOSE_ARGS up -d --no-deps --force-recreate \
+          docker compose \$COMPOSE_ARGS up -d --force-recreate \
               api worker scan-worker process-worker
 
           echo "  waiting for api healthy"
@@ -189,8 +192,12 @@ jobs:
               sleep 1
           done
 
-          echo "  api container is now running:"
-          docker inspect docker-api-1 --format 'Image={{.Config.Image}}  Started={{.State.StartedAt}}'
+          ACTUAL=\$(docker inspect docker-api-1 --format '{{.Config.Image}}')
+          echo "  api container running image: \$ACTUAL"
+          if [ "\$ACTUAL" != "\$EXPECTED" ]; then
+              echo "::error::image mismatch — expected=\$EXPECTED actual=\$ACTUAL"
+              exit 2
+          fi
           docker logout ghcr.io
           EOF
 
@@ -279,13 +286,16 @@ jobs:
           echo "  pulling api + worker images @ \$API_IMAGE_TAG"
           docker compose \$COMPOSE_ARGS pull api worker scan-worker process-worker migrate
 
+          EXPECTED="ghcr.io/corefundev/sku-forecasting-api:\$API_IMAGE_TAG"
+          echo "  expected image: \$EXPECTED"
+
           echo "  running migrations"
           docker compose \$COMPOSE_ARGS run --rm migrate
 
           echo "  rolling: workers first (no traffic), then api"
-          docker compose \$COMPOSE_ARGS up -d --no-deps --force-recreate worker scan-worker process-worker
+          docker compose \$COMPOSE_ARGS up -d --force-recreate worker scan-worker process-worker
           sleep 5
-          docker compose \$COMPOSE_ARGS up -d --no-deps --force-recreate api
+          docker compose \$COMPOSE_ARGS up -d --force-recreate api
 
           echo "  waiting for api healthy"
           for i in \$(seq 1 60); do
@@ -294,8 +304,12 @@ jobs:
               sleep 1
           done
 
-          echo "  api container is now running:"
-          docker inspect docker-api-1 --format 'Image={{.Config.Image}}  Started={{.State.StartedAt}}'
+          ACTUAL=\$(docker inspect docker-api-1 --format '{{.Config.Image}}')
+          echo "  api container running image: \$ACTUAL"
+          if [ "\$ACTUAL" != "\$EXPECTED" ]; then
+              echo "::error::image mismatch — expected=\$EXPECTED actual=\$ACTUAL"
+              exit 2
+          fi
           docker logout ghcr.io
           EOF
 
