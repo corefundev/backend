@@ -81,3 +81,19 @@ echo "local_sha=$LOCAL_SHA  remote_etag=$REMOTE_SHA"
 
 rm -f "$OUT.enc"
 echo "[$(date -u +%FT%TZ)] backup complete"
+
+# Push success-timestamp to Prometheus pushgateway. Prometheus scrapes
+# pushgateway and the BackupStale alert (alerts.yml) compares this
+# against `time()`. If push fails (e.g. pushgateway is down), the
+# backup itself is still considered successful — the alert will simply
+# fire on staleness, which is the correct fail-loud behaviour.
+PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
+NOW=$(date -u +%s)
+if curl -fsS --max-time 5 -X PUT \
+        --data-binary "# TYPE sku_backup_last_success_timestamp_seconds gauge
+sku_backup_last_success_timestamp_seconds $NOW
+" "$PUSHGATEWAY_URL/metrics/job/backup/instance/sku-forecasting" >/dev/null 2>&1; then
+    echo "[$(date -u +%FT%TZ)] pushed sku_backup_last_success_timestamp_seconds=$NOW"
+else
+    echo "[$(date -u +%FT%TZ)] WARNING: failed to push to $PUSHGATEWAY_URL (BackupStale alert will fire on next eval)" >&2
+fi

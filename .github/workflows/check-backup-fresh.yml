@@ -100,27 +100,39 @@ jobs:
           echo "OK: backup is $AGE_HRS hours old (<= ${STALE_HOURS}h threshold)"
           echo "stale=false" >> "$GITHUB_OUTPUT"
 
-      # Optional Slack notification — fires only on failure. Uses the
-      # same ALERT_WEBHOOK_URL that Alertmanager posts to. If the secret
-      # isn't configured the step is a no-op (skips with warning).
-      - name: Notify Slack on stale
+      # Telegram notification — fires on failure. This workflow is a
+      # secondary defence-in-depth alongside the BackupStale Prometheus
+      # alert (alerts.yml). If pushgateway / prometheus / alertmanager
+      # is also broken, this independent S3-side probe still fires.
+      #
+      # The bot token + chat id live in GH secrets (not Lockbox) since
+      # this is a CI-side notification — no SA key access from runner.
+      - name: Notify Telegram on stale
         if: failure() && steps.check.outputs.stale == 'true'
         env:
-          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          AGE_HOURS:         ${{ steps.check.outputs.age_hours }}
-          REASON:            ${{ steps.check.outputs.reason }}
-          LATEST:            ${{ steps.check.outputs.latest }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          AGE_HOURS: ${{ steps.check.outputs.age_hours }}
+          REASON:    ${{ steps.check.outputs.reason }}
+          LATEST:    ${{ steps.check.outputs.latest }}
         run: |
-          if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
-              echo "ALERT_WEBHOOK_URL not set — skipping Slack notify."
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping Telegram notify."
               exit 0
           fi
-          PAYLOAD=$(cat <<EOF
-          {
-            "text": ":warning: *Backup pipeline alert* — latest dump is ${AGE_HOURS}h old (reason: ${REASON}).\nLast known: \`${LATEST}\`\nRunbook: trigger \`Diagnose Backup Pipeline\` then \`Restart Backup + Verify\` workflow."
-          }
-          EOF
-          )
-          curl -fsS -X POST -H 'Content-Type: application/json' \
-              --data "$PAYLOAD" \
-              "$ALERT_WEBHOOK_URL"
+          MSG=$(printf '%s\n' \
+              '🔥 <b>BackupStale (S3 probe)</b>' \
+              '' \
+              '<i>severity:</i> <code>critical</code>' \
+              '<i>source:</i>   <code>check-backup-fresh.yml</code>' \
+              '' \
+              "Latest dump is <b>${AGE_HOURS}h</b> old (reason: <code>${REASON}</code>)." \
+              "Last known: <code>${LATEST}</code>" \
+              '' \
+              'Runbook: trigger <i>Diagnose Backup Pipeline</i> then <i>Restart Backup + Verify</i>.')
+          curl -fsS -X POST \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
+                       '{chat_id:$chat, text:$text, parse_mode:"HTML"}')" \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"

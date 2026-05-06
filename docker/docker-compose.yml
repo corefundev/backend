@@ -478,6 +478,25 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── Pushgateway (for batch-job metrics — backup, etc.) ────────
+  # Backup runs once a night. Without pushgateway we'd have to hack
+  # textfile-collector or external freshness probes to know the dump
+  # is fresh. With pushgateway, backup.sh ends with a one-line curl
+  # to push sku_backup_last_success_timestamp_seconds, and Prometheus
+  # picks it up on its next scrape. The BackupStale alert fires if
+  # that timestamp is more than 25h old.
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    restart: unless-stopped
+    # Internal-only — backup pushes from inside docker network,
+    # prometheus scrapes from inside docker network.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   prometheus:
     image: prom/prometheus:v2.51.2
     ports:

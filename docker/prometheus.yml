@@ -80,3 +80,12 @@ scrape_configs:
   # NOTE: minio scrape removed — production uses Beget S3, not MinIO.
   # The corresponding MinIO alerts in alerts.yml are likewise harmless
   # (they reference metrics that never get produced).
+
+  # Pushgateway — receives metrics from batch jobs (backup.sh).
+  # honor_labels: true so the `instance` / `job` labels pushed by the
+  # job survive (otherwise prometheus overwrites them with the scrape
+  # target's pushgateway:9091).
+  - job_name: "pushgateway"
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

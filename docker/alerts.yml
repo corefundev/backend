@@ -181,3 +181,26 @@ groups:
         annotations:
           summary:     "Replica's postgres-exporter unreachable for 2m"
           description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."
+
+  - name: backup
+    rules:
+      # backup.sh pushes sku_backup_last_success_timestamp_seconds to
+      # pushgateway after successful upload. Cron runs at 02:10 UTC,
+      # so any healthy day the metric is < 24h old. 25h threshold gives
+      # 1h slack for cron drift / upload time / scrape delay.
+      #
+      # Two failure modes covered by the same expression:
+      #   • metric exists but is stale  → backup ran, then stopped running
+      #   • metric absent (`absent()`)  → never ran, OR pushgateway was
+      #     wiped, OR backup script never reached the push step
+      - alert: BackupStale
+        expr: |
+          (time() - sku_backup_last_success_timestamp_seconds > 25 * 3600)
+            or absent(sku_backup_last_success_timestamp_seconds)
+        for:   15m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Postgres backup is stale or missing (>25h)"
+          description: "No fresh dump pushed to pushgateway. Run the Diagnose Backup workflow + Restart Backup workflow. History: backup pipeline silently died for 8 days in #176."
