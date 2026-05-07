@@ -125,7 +125,10 @@ docker compose $COMPOSE_ARGS run --rm migrate
 # `up -d` is a no-op. Runs before app recreate so the app tier sees a
 # ready connection-pool layer when (eventually) repointed at it.
 echo "  ensuring infra services are up (pgbouncer)"
-docker compose $COMPOSE_ARGS up -d pgbouncer || true
+# --build picks up changes to Dockerfile.pgbouncer / pgbouncer_entrypoint.sh.
+# Without it, an existing :custom tag from a prior deploy would mask
+# any update we just rsync'd, even after image-recreate.
+docker compose $COMPOSE_ARGS up -d --build pgbouncer || true
 
 # Reconcile S3 lifecycle policy. mc ilm import replaces the entire
 # policy with the JSON the script generates — idempotent, ~2s. Keeps
