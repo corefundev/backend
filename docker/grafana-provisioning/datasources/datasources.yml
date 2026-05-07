@@ -1,0 +1,27 @@
+# Grafana datasource provisioning. Read at container start; safe to
+# rerun (apiVersion=1 + by-name → upserts). Mounted into
+# /etc/grafana/provisioning/datasources/.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Matches the trace_id field promtail extracts from our structured
+      # logs. Once Tempo is wired (#188), Grafana will turn trace_id
+      # values in log lines into clickable links into the trace view.
+      derivedFields:
+        - name: trace_id
+          matcherRegex: 'trace_id=([a-f0-9]+)'
+          url: '$${__value.raw}'
+          datasourceUid: tempo

@@ -1,0 +1,57 @@
+# Promtail tails docker container logs via the docker socket SD,
+# parses our JSON-structured logs (api/worker emit them via
+# src.monitoring.logging_setup), and ships to Loki.
+#
+# Discovered labels:
+#   container — short container name (e.g. docker-api-1)
+#   service   — compose service name (api, worker, scan-worker, ...)
+#   stream    — stdout | stderr
+#   level     — extracted from JSON log line if present (INFO, WARN, ...)
+
+server:
+  http_listen_port: 9080
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: stream
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+    pipeline_stages:
+      # Strip docker's own JSON wrapper {"log": "...", "stream": "...", "time": "..."}.
+      - docker: {}
+      # Extract our app-level structured fields when present (api/worker
+      # emit JSON via structlog). Containers that emit plain text (nginx,
+      # postgres) just pass through with no extra labels.
+      - json:
+          expressions:
+            level:    level
+            logger:   logger
+            trace_id: trace_id
+            ts:       timestamp
+      - labels:
+          level:
+      - timestamp:
+          source: ts
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+          action_on_failure: skip
