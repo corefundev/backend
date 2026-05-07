@@ -262,3 +262,23 @@ groups:
         annotations:
           summary:     "Postgres backup is stale or missing (>25h)"
           description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
+
+      # base_backup.sh runs weekly (Sun 03:30 UTC) — pushes
+      # sku_base_backup_last_success_timestamp_seconds. Without a fresh
+      # base, PITR's restore window starts shrinking: WAL archived
+      # before the last surviving base becomes useless. 9d threshold
+      # gives 7d cadence + 2d slack for one missed run before alerting.
+      # 16d would mean two consecutive failures — by then PITR is at
+      # serious risk of losing its restore window when WAL retention
+      # (14d, see scripts/init_s3_lifecycle.sh) catches up.
+      - alert: BaseBackupStale
+        expr: |
+          (time() - sku_base_backup_last_success_timestamp_seconds > 9 * 86400)
+            or absent(sku_base_backup_last_success_timestamp_seconds)
+        for:   1h
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Postgres weekly base backup stale or missing (>9d)"
+          description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."

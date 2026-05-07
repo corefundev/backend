@@ -1,10 +1,11 @@
 # Postgres Point-in-Time Recovery (PITR) runbook
 
 Restore the postgres database to any specific timestamp within the
-WAL retention window (currently 7-30 days, depending on S3 lifecycle
-config). Used for recovering from logical corruption — accidental
-DROP TABLE, mass DELETE, malicious data tampering — where the data
-exists at one point in time but not another.
+WAL retention window — **14 days** of WAL on top of up to **35 days**
+of weekly base backups (see *Retention* below). Used for recovering
+from logical corruption — accidental DROP TABLE, mass DELETE,
+malicious data tampering — where the data exists at one point in
+time but not another.
 
 ## When to use vs. nightly backup
 
@@ -30,6 +31,32 @@ execute (~30-60 min) compared to using the live replica which is just
 - **Restore** — extract a base into a fresh data dir, configure
   `recovery_target_time` + `restore_command`, start postgres in
   recovery mode. It replays WAL until the target then promotes itself.
+
+## Retention
+
+S3 lifecycle policy (scripts/init_s3_lifecycle.sh) auto-expires:
+
+| Prefix      | Expire after | Why                                                   |
+|-------------|--------------|-------------------------------------------------------|
+| `wal/`      | 14 days      | 2× base-backup cadence — survives one missed weekly   |
+| `base/`     | 35 days      | Keeps ~4 weekly base backups (defense in depth)       |
+| `backups/`  | 30 days      | Encrypted nightly pg_dump (independent of PITR chain) |
+
+What this means in practice:
+
+- **Best case** (everything healthy): you can PITR to any point within
+  the last 14 days. Pick the most recent base ≤ target time, replay WAL.
+- **Edge case** (Sunday's base failed): previous Sunday's base is 8-14d
+  old. WAL covers the gap because it's retained 14d. PITR still works,
+  just from an older base. The `BaseBackupStale` alert (alerts.yml,
+  threshold 9d) fires loud enough to fix before the 14d wall.
+- **Worst case** (two consecutive Sundays failed, 16d): WAL retention
+  may have already deleted some segments. PITR window shrinks to "from
+  whichever base remains, with whatever WAL is left." Don't let it get
+  here — the alert is at 9d for a reason.
+
+Don't change retention values without updating the `BaseBackupStale`
+alert threshold in lockstep — they assume each other's defaults.
 
 ## Recovery procedure
 
