@@ -317,6 +317,26 @@ services:
     image: docker-pgbouncer:custom
     mem_limit: 128m
     cpus: 0.5
+    # Hardening: read-only rootfs + tmpfs for /etc/pgbouncer means
+    # userlist.txt (which holds the SCRAM secret) lives in RAM and is
+    # gone the moment the container stops — no on-disk persistence of
+    # the hash, no rotation-residue, no host-side leak via docker cp.
+    # cap_drop: ALL + no-new-privileges close the standard escalation
+    # surfaces; pgbouncer needs no caps beyond network bind.
+    read_only: true
+    # mode=1777 (world-writable + sticky) matches normal /tmp semantics —
+    # compose tmpfs short syntax doesn't reliably honor uid=/gid= across
+    # docker versions, so the safe portable cell is "everyone can write,
+    # only owner can rm" like the kernel's default. /etc/pgbouncer needs
+    # a higher mode because the entrypoint chown'd it to postgres at
+    # build time and now that chown lives only in the immutable rootfs;
+    # tmpfs mount overrides it back to default ownership.
+    tmpfs:
+      - /etc/pgbouncer:mode=1777
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     environment:
       DB_HOST:           postgres
       DB_PORT:           "5432"
@@ -339,11 +359,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
+    # Auth-aware healthcheck: actually authenticate as DB_USER and SELECT 1
+    # via pgbouncer:6432. Catches userlist.txt corruption / SCRAM mismatch
+    # which the prior pg_isready test would silently miss. Reads password
+    # from /etc/pgbouncer/.healthcheck-pw which the entrypoint stashes
+    # in tmpfs (Docker healthchecks don't inherit Lockbox-bootstrapped
+    # runtime env from PID 1, only Config.Env from container start).
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U sku"]
-      interval: 10s
+      test: ["CMD-SHELL", "PGPASSWORD=$$(cat /etc/pgbouncer/.healthcheck-pw 2>/dev/null) psql -h 127.0.0.1 -p 6432 -U \"$$DB_USER\" -d \"$$DB_NAME\" -tAc 'SELECT 1' >/dev/null"]
+      interval: 15s
       timeout: 5s
       retries: 5
+      start_period: 20s
 
   # ── MinIO (local S3-compatible storage) ───────────────────────
   minio:
@@ -736,6 +763,12 @@ services:
     depends_on:
       loki:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9080/ready 2>/dev/null | grep -q Ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   grafana:
     image: grafana/grafana:10.4.2

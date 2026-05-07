@@ -102,5 +102,16 @@ printf '"%s" "%s"\n' "$DB_USER" "$HASH" > "$USERLIST"
 chmod 600 "$USERLIST"
 echo "[pgbouncer-entrypoint] userlist.txt written (${#HASH} chars of secret)"
 
-# ── 3. exec pgbouncer ─────────────────────────────────────────────────
+# ── 3. password stash for healthcheck (tmpfs only) ───────────────────
+# Docker healthcheck commands inherit Config.Env from the container at
+# creation time — they don't see env exported at PID 1 runtime. So our
+# Lockbox-injected POSTGRES_PASSWORD is invisible to the healthcheck
+# unless we stash it in a file the healthcheck can read. /etc/pgbouncer
+# is a tmpfs (see compose), so this file lives in RAM only and dies
+# with the container.
+PWFILE=/etc/pgbouncer/.healthcheck-pw
+printf '%s' "$DB_PASSWORD" > "$PWFILE"
+chmod 400 "$PWFILE"
+
+# ── 4. exec pgbouncer ─────────────────────────────────────────────────
 exec pgbouncer "$INI"

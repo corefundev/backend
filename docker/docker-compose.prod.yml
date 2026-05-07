@@ -67,6 +67,16 @@ services:
             sleep 12h & wait $!
         done
     restart: unless-stopped
+    # Healthcheck: cert directory must exist + at least one live lineage.
+    # If init_tls.sh never ran or letsencrypt volume got wiped, this fails.
+    # Doesn't catch expiry — that's covered by the ssl-exporter probe job
+    # in prometheus + alerts on cert-not-after < 30d.
+    healthcheck:
+      test: ["CMD-SHELL", "test -d /etc/letsencrypt/live && [ \"$$(ls /etc/letsencrypt/live | wc -l)\" -gt 0 ]"]
+      interval: 5m
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   letsencrypt:
