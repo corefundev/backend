@@ -88,6 +88,9 @@ dvc-s3==3.2.0
 opentelemetry-api>=1.25.0
 opentelemetry-sdk>=1.25.0
 opentelemetry-instrumentation-fastapi>=0.45b0
+# OTLP/gRPC exporter — without this, src/monitoring/tracing.py falls
+# back to console traces even when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0
 python-json-logger==2.0.7
 
 # ── Streaming / Distributed (опционально) ────────────
