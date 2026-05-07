@@ -120,6 +120,13 @@ docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
 echo "  running migrations..."
 docker compose $COMPOSE_ARGS run --rm migrate
 
+# Bring up infra-tier services that don't ship in the GHCR image bundle
+# (pgbouncer, etc). Idempotent: if already running with matching config,
+# `up -d` is a no-op. Runs before app recreate so the app tier sees a
+# ready connection-pool layer when (eventually) repointed at it.
+echo "  ensuring infra services are up (pgbouncer)"
+docker compose $COMPOSE_ARGS up -d pgbouncer || true
+
 if [ "$ENVIRONMENT" = "production" ]; then
     echo "  rolling: workers first (no traffic), then api"
     docker compose $COMPOSE_ARGS up -d --force-recreate worker scan-worker process-worker

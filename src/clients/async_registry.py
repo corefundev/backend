@@ -43,13 +43,20 @@ async def _get_pool():
         import asyncpg
         # Convert psycopg2-style URL to asyncpg format
         dsn = db_url.replace("postgresql+asyncpg://", "postgresql://")
+        # statement_cache_size=0 disables asyncpg's server-side prepared
+        # statements. Required when the DSN points at PgBouncer in
+        # transaction-pool mode (#186): server-side prepared statements
+        # break because each PG conn may serve different clients between
+        # transactions. Safe to leave on regardless — asyncpg falls back
+        # to inline parameterised queries with no observable perf hit.
         _pool = await asyncpg.create_pool(
             dsn      = dsn,
             min_size = 5,
             max_size = 20,
             command_timeout = 30,
+            statement_cache_size = 0,
         )
-        logger.info(f"asyncpg pool created: min=5 max=20")
+        logger.info(f"asyncpg pool created: min=5 max=20 statement_cache=0")
         return _pool
     except ImportError:
         logger.debug("asyncpg not installed — using sync psycopg2 fallback")
