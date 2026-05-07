@@ -127,6 +127,15 @@ docker compose $COMPOSE_ARGS run --rm migrate
 echo "  ensuring infra services are up (pgbouncer)"
 docker compose $COMPOSE_ARGS up -d pgbouncer || true
 
+# Reconcile S3 lifecycle policy. mc ilm import replaces the entire
+# policy with the JSON the script generates — idempotent, ~2s. Keeps
+# wal/ + base/ retention rules in lockstep with the script in git, even
+# if someone changes them manually via the bucket console. Best-effort:
+# don't fail deploy if this step trips.
+echo "  reconciling S3 lifecycle policy (backups/wal/base)"
+docker exec docker-backup-1 sh /scripts/init_s3_lifecycle.sh 2>&1 \
+    | sed 's/^/    /' || echo "    (lifecycle reconcile failed — not blocking)"
+
 if [ "$ENVIRONMENT" = "production" ]; then
     echo "  rolling: workers first (no traffic), then api"
     docker compose $COMPOSE_ARGS up -d --force-recreate worker scan-worker process-worker
