@@ -58,6 +58,9 @@ x-common-env: &common-env
   SANDBOX_WORK_DIR: /var/lib/sku-sandbox
   # MLflow
   MLFLOW_TRACKING_URI: http://mlflow:5000
+  # OTel — api/worker emit traces here. tempo accepts OTLP/gRPC on 4317.
+  # When unset, src/monitoring/tracing.py falls back to a console exporter.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
 
 services:
 
@@ -628,6 +631,25 @@ services:
       start_period: 15s
 
   # ── Grafana ───────────────────────────────────────────────────
+  # ── Tempo (distributed tracing — OTLP backend) ────────────────
+  # Receives spans from api/worker via OTEL_EXPORTER_OTLP_ENDPOINT
+  # (set in their env, points at tempo:4317 gRPC). Filesystem-backed,
+  # 7-day retention. Internal-only — query via Grafana → Explore →
+  # Tempo. Loki's derivedField for trace_id auto-links to traces.
+  tempo:
+    image: grafana/tempo:2.5.0
+    restart: unless-stopped
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+    command: -config.file=/etc/tempo/config.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready 2>/dev/null | grep -q ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ── Loki + Promtail (logs aggregation) ────────────────────────
   # Loki is the storage / query side; promtail tails docker container
   # logs via the local docker socket and ships them to Loki. Both
@@ -675,6 +697,7 @@ services:
     depends_on:
       - prometheus
       - loki
+      - tempo
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q ok"]
@@ -687,6 +710,7 @@ volumes:
   artifacts:
   loki_data:
   redis_data:
+  tempo_data:
   postgres_data:
   minio_data:
   mlflow_data:

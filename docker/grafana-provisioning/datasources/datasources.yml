@@ -17,11 +17,28 @@ datasources:
     url: http://loki:3100
     editable: false
     jsonData:
-      # Matches the trace_id field promtail extracts from our structured
-      # logs. Once Tempo is wired (#188), Grafana will turn trace_id
-      # values in log lines into clickable links into the trace view.
       derivedFields:
         - name: trace_id
           matcherRegex: 'trace_id=([a-f0-9]+)'
           url: '$${__value.raw}'
           datasourceUid: tempo
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    uid: tempo                 # referenced by Loki's derivedFields above
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # Trace → Logs jump-back: from a span in Tempo, find logs in Loki
+      # by matching service + trace_id. service comes from promtail's
+      # docker SD label, trace_id from our app's structured-log emitter.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        tags: [{ key: service.name, value: service }]
+        filterByTraceID: true
+      # Service map from spans
+      serviceMap:
+        datasourceUid: prometheus
