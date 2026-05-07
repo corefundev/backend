@@ -81,15 +81,17 @@ services:
     restart: "no"
 
   # ── Inference API ─────────────────────────────────────────────
+  # Image is published to GHCR by .github/workflows/cd.yml. Local dev
+  # also works: `docker compose build api` produces an image with the
+  # same tag so `up` reuses it without pulling. Pin the tag via env
+  # var API_IMAGE_TAG=<sha>; defaults to :latest for dev.
   api:
-    # Image is published to GHCR by .github/workflows/cd.yml. Local dev
-    # also works: `docker compose build api` produces an image with the
-    # same tag so `up` reuses it without pulling. Pin the tag via env
-    # var API_IMAGE_TAG=<sha>; defaults to :latest for dev.
     image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    mem_limit: 768m
+    cpus: 1.5
     ports:
       - "8000:8000"
     environment:
@@ -113,6 +115,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
+    mem_limit: 1500m   # training: lightgbm + pandas frames can spike
+    cpus: 2.0
     command: rq worker sku-training --url redis://redis:6379
     environment:
       <<: *common-env
@@ -140,6 +144,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
+    mem_limit: 256m
+    cpus: 0.5
     command: rq worker sku-scan --url redis://redis:6379
     environment:
       <<: *common-env
@@ -174,6 +180,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
+    mem_limit: 768m   # sandbox parsing — large CSV/parquet → spike
+    cpus: 1.0
     command: rq worker sku-process --url redis://redis:6379
     environment:
       <<: *common-env
@@ -205,6 +213,8 @@ services:
   # ── ClamAV antivirus ──────────────────────────────────────────
   clamav:
     image: clamav/clamav:1.4
+    mem_limit: 1500m   # baseline ~1G (sig db loaded), spikes during scan
+    cpus: 1.0
     ports: []        # no host ports — internal only
     environment:
       CLAMAV_NO_FRESHCLAMD: "false"
@@ -237,6 +247,8 @@ services:
   # ── Redis ─────────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
+    mem_limit: 256m
+    cpus: 0.5
     ports:
       - "6379:6379"
     volumes:
@@ -259,6 +271,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.postgres
     image: docker-postgres:custom
+    mem_limit: 1500m   # shared_buffers + work_mem for ~10 concurrent
+    cpus: 1.5
     ports:
       - "5432:5432"
     environment:
@@ -325,6 +339,8 @@ services:
     # v3.x clears the 2.x CVE bundle (path traversal, command exec,
     # auth bypass) — see requirements.txt for the matching client pin.
     image: ghcr.io/mlflow/mlflow:v3.11.1
+    mem_limit: 768m
+    cpus: 1.0
     ports:
       - "5000:5000"
     environment:
