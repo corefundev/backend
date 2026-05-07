@@ -1,0 +1,174 @@
+{
+  "title": "SLO — API availability (forecast endpoint)",
+  "uid": "slo-api",
+  "tags": ["slo", "sre"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "30-day Error Budget Remaining",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "100 * (1 - (sum(increase(forecast_requests_total{status=\"error\"}[30d])) / clamp_min(sum(increase(forecast_requests_total[30d])), 1)) / 0.001)",
+        "refId": "A"
+      }],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "red" },
+              { "value": 25, "color": "orange" },
+              { "value": 50, "color": "yellow" },
+              { "value": 75, "color": "green" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Success Rate (last 1h)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "100 * (1 - (sum(rate(forecast_requests_total{status=\"error\"}[1h])) / clamp_min(sum(rate(forecast_requests_total[1h])), 0.001)))",
+        "refId": "A"
+      }],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "red" },
+              { "value": 99, "color": "orange" },
+              { "value": 99.9, "color": "green" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "p95 Latency (last 1h)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "histogram_quantile(0.95, sum by (le) (rate(forecast_latency_seconds_bucket[1h])))",
+        "refId": "A"
+      }],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 1, "color": "yellow" },
+              { "value": 2, "color": "red" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Burn rate windows (multiplier vs. 99.9% SLO)",
+      "description": "Error rate / (1 - SLO). >1 means budget consumed faster than SLO allows. Fast-burn alert fires at 14.4×, slow-burn at 6×.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum(rate(forecast_requests_total{status=\"error\"}[1h])) / clamp_min(sum(rate(forecast_requests_total[1h])), 0.001)) / 0.001",
+          "legendFormat": "1h burn",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum(rate(forecast_requests_total{status=\"error\"}[6h])) / clamp_min(sum(rate(forecast_requests_total[6h])), 0.001)) / 0.001",
+          "legendFormat": "6h burn",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum(rate(forecast_requests_total{status=\"error\"}[24h])) / clamp_min(sum(rate(forecast_requests_total[24h])), 0.001)) / 0.001",
+          "legendFormat": "24h burn",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+        }
+      },
+      "options": { "legend": { "displayMode": "list" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Request rate by status",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (status) (rate(forecast_requests_total[5m]))",
+        "legendFormat": "{{status}}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "id": 6,
+      "title": "Recent api errors (Loki)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "targets": [{
+        "datasource": { "type": "loki", "uid": "loki" },
+        "expr": "{container=\"docker-api-1\"} |= \"ERROR\"",
+        "refId": "A"
+      }],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

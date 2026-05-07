@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning. Reads json files from /etc/grafana/
+# provisioning/dashboards/ and updates the matching dashboard on each
+# Grafana boot. Edits via UI are saved to volume but provisioned files
+# always win on next reload — keep dashboard definitions in git.
+apiVersion: 1
+
+providers:
+  - name: provisioned
+    orgId: 1
+    folder: Provisioned
+    type: file
+    disableDeletion: false
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards
