@@ -299,32 +299,35 @@ services:
   # locks, server-side prepared statements (asyncpg cache disabled),
   # WITH HOLD cursors or session-level SET — see #186 audit notes.
   #
+  # Image choice: edoburu/pgbouncer (alpine-based, community-maintained).
+  # We're not on bitnami/* because Bitnami pulled all free-tier images
+  # off Docker Hub in 2025 (bitnami/pgbouncer:1.22.1 returns 404).
+  #
   # Side-by-side rollout: postgres:5432 stays open. Cutover happens
   # one app at a time by repointing DATABASE_URL → pgbouncer:6432.
   pgbouncer:
-    image: bitnami/pgbouncer:1.22.1
+    image: edoburu/pgbouncer:v1.25.1-p0
     mem_limit: 128m
     cpus: 0.5
     environment:
-      POSTGRESQL_HOST:                postgres
-      POSTGRESQL_PORT:                "5432"
-      POSTGRESQL_USERNAME:            sku
-      POSTGRESQL_PASSWORD:            ${POSTGRES_PASSWORD:-sku}
-      POSTGRESQL_DATABASE:            sku_forecasting
-      PGBOUNCER_DATABASE:             sku_forecasting
-      PGBOUNCER_PORT:                 "6432"
-      PGBOUNCER_AUTH_TYPE:            md5
-      PGBOUNCER_POOL_MODE:            transaction
+      DB_HOST:           postgres
+      DB_PORT:           "5432"
+      DB_USER:           sku
+      DB_PASSWORD:       ${POSTGRES_PASSWORD:-sku}
+      DB_NAME:           sku_forecasting
+      LISTEN_PORT:       "6432"
+      AUTH_TYPE:         md5
+      POOL_MODE:         transaction
       # 25 real PG conns multiplexed across up to 200 client conns —
       # 8× headroom over today's ~50 active conns, room to add another
       # api instance without touching postgres max_connections.
-      PGBOUNCER_DEFAULT_POOL_SIZE:    "25"
-      PGBOUNCER_MAX_CLIENT_CONN:      "200"
-      PGBOUNCER_MAX_DB_CONNECTIONS:   "50"
+      DEFAULT_POOL_SIZE:    "25"
+      MAX_CLIENT_CONN:      "200"
+      MAX_DB_CONNECTIONS:   "50"
       # Wait up to 30s for a free server conn before erroring — matches
       # api command_timeout. Without this, bursty traffic would surface
       # as "no more connections allowed" instead of just queuing.
-      PGBOUNCER_QUERY_WAIT_TIMEOUT:   "30"
+      QUERY_WAIT_TIMEOUT:   "30"
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
