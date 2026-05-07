@@ -313,10 +313,13 @@ jobs:
                   "<i>smoke:</i>   <code>${SMOKE_R}</code>" \
                   "<a href=\"${RUN_URL}\">CD run</a>")
           fi
+          # message_thread_id=40 → "Deploys" topic in the Alert System
+          # supergroup. Same chat as alertmanager critical/warning
+          # threads, just routed to a different forum topic.
           curl -fsS -X POST \
               -H 'Content-Type: application/json' \
               --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
-                       '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}')" \
+                       '{chat_id:$chat, text:$text, message_thread_id:40, parse_mode:"HTML", disable_web_page_preview:true}')" \
               "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
 
   notify-prod:
@@ -358,8 +361,11 @@ jobs:
                   "<i>smoke:</i>   <code>${SMOKE_R}</code>" \
                   "<a href=\"${RUN_URL}\">CD run</a>")
           fi
+          # message_thread_id=40 → "Deploys" topic in the Alert System
+          # supergroup. Same chat as alertmanager critical/warning
+          # threads, just routed to a different forum topic.
           curl -fsS -X POST \
               -H 'Content-Type: application/json' \
               --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
-                       '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}')" \
+                       '{chat_id:$chat, text:$text, message_thread_id:40, parse_mode:"HTML", disable_web_page_preview:true}')" \
               "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"

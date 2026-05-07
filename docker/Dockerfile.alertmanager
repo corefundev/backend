@@ -3,15 +3,20 @@
 # directly from Yandex Lockbox at startup. Avoids ever writing the bot
 # token to /srv/backend/.env.
 #
-# Why a custom image vs upstream prom/alertmanager:v0.27.0:
+# Why a custom image vs upstream prom/alertmanager:
 #   The upstream image is busybox-based — no curl/jq/openssl, so
 #   lockbox_bootstrap.sh (PS256-signed JWT → IAM → Lockbox payload)
 #   can't run there. We rebase on alpine, install the few extra
 #   packages, and copy the alertmanager binary from upstream.
 #
+# Pinned to v0.28.1 (Jan 2025) for `message_thread_id` support in
+# telegram_configs — required by our forum-topic routing
+# (alertmanager.yml). v0.27 silently rejects the field with
+# "field message_thread_id not found in type config.plain".
+#
 # Same Lockbox-fetch pattern as the backup container (Dockerfile.backup).
 
-FROM prom/alertmanager:v0.27.0 AS upstream
+FROM prom/alertmanager:v0.28.1 AS upstream
 
 FROM alpine:3.20
 
@@ -22,8 +27,7 @@ RUN apk add --no-cache \
         coreutils \
         ca-certificates
 
-# Alertmanager binary + bundled defaults from upstream — pinned to
-# the same v0.27.0 we were running before.
+# Alertmanager binary + bundled defaults from upstream.
 COPY --from=upstream /bin/alertmanager /bin/alertmanager
 COPY --from=upstream /bin/amtool       /bin/amtool
 

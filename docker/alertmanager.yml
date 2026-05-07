@@ -1,9 +1,10 @@
-# Alertmanager config — Telegram bot delivery.
+# Alertmanager config — Telegram bot delivery, severity-routed topics.
 #
-# All severity levels go to a single chat (Alert System supergroup),
-# differentiated by a leading emoji and explicit *Severity:* line.
-# When team grows enough to need on-call rotation, split routes into
-# multiple chats / topics here.
+# Topics in supergroup `Alert System` (chat_id $TELEGRAM_ALERT_CHAT_ID):
+#   • Critical (thread 6)   — page-now alerts
+#   • Warning  (thread 37)  — business-hours triage
+#   • Deploys  (thread 40)  — CD success/failure (sent by .github/workflows/cd.yml,
+#                              not by alertmanager)
 #
 # Two env placeholders rendered at startup by the alertmanager
 # service's wrapper entrypoint (sed-based envsubst — see
@@ -15,31 +16,59 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: telegram
+  # Default route catches anything that doesn't match a child — sends to
+  # warning topic so we never silently drop an alert.
+  receiver: telegram-warning
   group_by:        ["alertname", "cluster"]
   group_wait:      30s        # quiet window before first notify
   group_interval:  2m         # gap between notifications in a group
   repeat_interval: 2h         # re-notify if still firing
 
   routes:
+    # Critical → page-now topic, faster cadence
     - matchers:
         - severity = "critical"
-      receiver: telegram
+      receiver: telegram-critical
       group_wait: 10s
       repeat_interval: 5m
 
+    # Warning → triage topic
+    - matchers:
+        - severity = "warning"
+      receiver: telegram-warning
+
 receivers:
-  - name: telegram
+  # 🔥 Critical — thread 6
+  - name: telegram-critical
     telegram_configs:
-      # Alertmanager v0.27 expects the token as bot_token (not _file),
-      # rendered from $TELEGRAM_ALERT_BOT_TOKEN at compose startup.
       - bot_token: "${TELEGRAM_ALERT_BOT_TOKEN}"
-        chat_id:    ${TELEGRAM_ALERT_CHAT_ID}
+        chat_id:           ${TELEGRAM_ALERT_CHAT_ID}
+        message_thread_id: 6
         api_url:    "https://api.telegram.org"
         parse_mode: HTML
         send_resolved: true
         message: |-
-          {{ if eq .CommonLabels.severity "critical" }}🔥{{ else }}⚠️{{ end }} <b>{{ .CommonLabels.alertname }}</b>{{ if eq .CommonLabels.cluster "staging" }} <i>(staging)</i>{{ end }}
+          🔥 <b>{{ .CommonLabels.alertname }}</b>{{ if eq .CommonLabels.cluster "staging" }} <i>(staging)</i>{{ end }}
+
+          <i>cluster:</i>  <code>{{ .CommonLabels.cluster }}</code>
+          <i>severity:</i> <code>{{ .CommonLabels.severity }}</code>
+          <i>status:</i>   <code>{{ .Status }}</code>
+          {{ range .Alerts }}
+          • <b>{{ .Annotations.summary }}</b>
+          {{ .Annotations.description }}
+          {{ end }}
+
+  # ⚠️ Warning — thread 37
+  - name: telegram-warning
+    telegram_configs:
+      - bot_token: "${TELEGRAM_ALERT_BOT_TOKEN}"
+        chat_id:           ${TELEGRAM_ALERT_CHAT_ID}
+        message_thread_id: 37
+        api_url:    "https://api.telegram.org"
+        parse_mode: HTML
+        send_resolved: true
+        message: |-
+          ⚠️ <b>{{ .CommonLabels.alertname }}</b>{{ if eq .CommonLabels.cluster "staging" }} <i>(staging)</i>{{ end }}
 
           <i>cluster:</i>  <code>{{ .CommonLabels.cluster }}</code>
           <i>severity:</i> <code>{{ .CommonLabels.severity }}</code>
