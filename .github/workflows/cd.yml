@@ -150,7 +150,7 @@ jobs:
               -e "ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts" \
               ./ "${USER}@${HOST}:/srv/backend/"
 
-      - name: Pull image, migrate, recreate app services
+      - name: Pull image, migrate, recreate app services (via cd_deploy.sh)
         env:
           HOST:      ${{ secrets.STAGING_HOST }}
           USER:      ${{ secrets.STAGING_USER }}
@@ -159,59 +159,18 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: |
           set -euxo pipefail
-          # Sanity-check the runner-side env vars before sending. Without
-          # set -u, an empty USER/HOST silently produced ssh user@: and
-          # ssh's failure mode there is sometimes exit-0-no-output.
           : "${TAG:?TAG empty — needs.build.outputs.tag missing}"
           : "${HOST:?HOST empty — STAGING_HOST secret missing}"
           : "${USER:?USER empty — STAGING_USER secret missing}"
           : "${GHCR_PW:?GHCR_PW empty — GITHUB_TOKEN missing}"
           echo "  TAG-prefix=${TAG::5}  HOST=${HOST}  USER=${USER}"
-          # Unquoted heredoc — ${TAG}, ${GHCR_*} expanded by the runner
-          # shell now, so the script that lands on the VPS already has
-          # concrete values. \$VAR (with backslash) keeps the $ literal
-          # and is expanded only on the remote bash side.
-          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" bash -s <<EOF
-          set -ex
-          echo "::group::remote bash starting"
-          echo "remote PWD=\$(pwd)  whoami=\$(whoami)  date=\$(date -u +%FT%TZ)"
-          echo "::endgroup::"
-          set -e
-          cd /srv/backend
-          export API_IMAGE_TAG="${TAG}"
-          export WORKER_IMAGE_TAG="${TAG}"
-          echo "${GHCR_PW}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
-
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.staging.yml"
-
-          echo "  pulling api + worker images @ \$API_IMAGE_TAG"
-          docker compose \$COMPOSE_ARGS pull api worker scan-worker process-worker migrate
-
-          EXPECTED="ghcr.io/corefundev/sku-forecasting-api:\$API_IMAGE_TAG"
-          echo "  expected image: \$EXPECTED"
-
-          echo "  running migrations"
-          docker compose \$COMPOSE_ARGS run --rm migrate
-
-          echo "  recreating app services"
-          docker compose \$COMPOSE_ARGS up -d --force-recreate \
-              api worker scan-worker process-worker
-
-          echo "  waiting for api healthy"
-          for i in \$(seq 1 60); do
-              S=\$(docker compose \$COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null)
-              [ "\$S" = "healthy" ] && { echo "    healthy after \${i}s"; break; }
-              sleep 1
-          done
-
-          ACTUAL=\$(docker inspect docker-api-1 --format '{{.Config.Image}}')
-          echo "  api container running image: \$ACTUAL"
-          if [ "\$ACTUAL" != "\$EXPECTED" ]; then
-              echo "::error::image mismatch — expected=\$EXPECTED actual=\$ACTUAL"
-              exit 2
-          fi
-          docker logout ghcr.io
-          EOF
+          # scp the deploy script (stable artifact, no heredoc shenanigans),
+          # then run it via plain ssh with env-vars passed on the command line.
+          scp -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+              ./scripts/cd_deploy.sh "${USER}@${HOST}:/tmp/cd_deploy.sh"
+          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
+              env GHCR_USER="${GHCR_USER}" GHCR_PW="${GHCR_PW}" \
+                  bash /tmp/cd_deploy.sh staging "${TAG}"
 
   smoke-staging:
     name: Smoke → staging
@@ -276,7 +235,7 @@ jobs:
               -e "ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts" \
               ./ "${USER}@${HOST}:/srv/backend/"
 
-      - name: Pull image, migrate, rolling-recreate on prod
+      - name: Pull image, migrate, rolling-recreate on prod (via cd_deploy.sh)
         env:
           HOST:      ${{ secrets.VPS_HOST }}
           USER:      ${{ secrets.VPS_USER }}
@@ -285,54 +244,16 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: |
           set -euxo pipefail
-          : "${TAG:?TAG empty — needs.build.outputs.tag missing (deploy-prod must list build in needs)}"
+          : "${TAG:?TAG empty — needs.build.outputs.tag missing}"
           : "${HOST:?HOST empty — VPS_HOST secret missing}"
           : "${USER:?USER empty — VPS_USER secret missing}"
           : "${GHCR_PW:?GHCR_PW empty — GITHUB_TOKEN missing}"
           echo "  TAG-prefix=${TAG::5}  HOST=${HOST}  USER=${USER}"
-          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" bash -s <<EOF
-          set -ex
-          echo "::group::remote bash starting"
-          echo "remote PWD=\$(pwd)  whoami=\$(whoami)  date=\$(date -u +%FT%TZ)"
-          echo "::endgroup::"
-          set -e
-          cd /srv/backend
-          export API_IMAGE_TAG="${TAG}"
-          export WORKER_IMAGE_TAG="${TAG}"
-          echo "${GHCR_PW}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
-
-          # Prod uses replication.yml overlay (staging doesn't).
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
-
-          echo "  pulling api + worker images @ \$API_IMAGE_TAG"
-          docker compose \$COMPOSE_ARGS pull api worker scan-worker process-worker migrate
-
-          EXPECTED="ghcr.io/corefundev/sku-forecasting-api:\$API_IMAGE_TAG"
-          echo "  expected image: \$EXPECTED"
-
-          echo "  running migrations"
-          docker compose \$COMPOSE_ARGS run --rm migrate
-
-          echo "  rolling: workers first (no traffic), then api"
-          docker compose \$COMPOSE_ARGS up -d --force-recreate worker scan-worker process-worker
-          sleep 5
-          docker compose \$COMPOSE_ARGS up -d --force-recreate api
-
-          echo "  waiting for api healthy"
-          for i in \$(seq 1 60); do
-              S=\$(docker compose \$COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null)
-              [ "\$S" = "healthy" ] && { echo "    healthy after \${i}s"; break; }
-              sleep 1
-          done
-
-          ACTUAL=\$(docker inspect docker-api-1 --format '{{.Config.Image}}')
-          echo "  api container running image: \$ACTUAL"
-          if [ "\$ACTUAL" != "\$EXPECTED" ]; then
-              echo "::error::image mismatch — expected=\$EXPECTED actual=\$ACTUAL"
-              exit 2
-          fi
-          docker logout ghcr.io
-          EOF
+          scp -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+              ./scripts/cd_deploy.sh "${USER}@${HOST}:/tmp/cd_deploy.sh"
+          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
+              env GHCR_USER="${GHCR_USER}" GHCR_PW="${GHCR_PW}" \
+                  bash /tmp/cd_deploy.sh production "${TAG}"
 
   smoke-prod:
     name: Smoke → production
