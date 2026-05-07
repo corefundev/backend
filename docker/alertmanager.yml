@@ -3,7 +3,7 @@
 # Topics in supergroup `Alert System` (chat_id $TELEGRAM_ALERT_CHAT_ID):
 #   • Critical (thread 6)   — page-now alerts
 #   • Warning  (thread 37)  — business-hours triage
-#   • Deploys  (thread 40)  — CD success/failure (sent by .github/workflows/cd.yml,
+#   • Deploys  (thread 44)  — CD success/failure (sent by .github/workflows/cd.yml,
 #                              not by alertmanager)
 #
 # Two env placeholders rendered at startup by the alertmanager

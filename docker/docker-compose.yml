@@ -188,14 +188,21 @@ services:
     command: rq worker sku-process --url redis://redis:6379
     environment:
       <<: *common-env
+      # PgBouncer cutover, step 4 of #186 — process-worker is the most
+      # isolated service (no LISTEN/NOTIFY, no long-lived sessions, no
+      # admin queries), so it cuts over first to validate the txn-pool
+      # path under real workload before we move api + other workers.
+      # vault_agent rewrites DATABASE_URL host:port post-Lockbox-inject.
+      DB_HOST_OVERRIDE: "pgbouncer:6432"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock       # launch sandbox containers
       - sandbox_staging:/var/lib/sku-sandbox
     depends_on:
-      redis:    { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      minio:    { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      redis:     { condition: service_healthy }
+      postgres:  { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }   # cutover dependency — see DB_HOST_OVERRIDE
+      minio:     { condition: service_healthy }
+      migrate:   { condition: service_completed_successfully }
     restart: unless-stopped
     # Process worker checks: Redis + Docker socket reachability.
     healthcheck:

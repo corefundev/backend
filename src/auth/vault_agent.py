@@ -228,6 +228,7 @@ def bootstrap_secrets() -> bool:
         from src.auth.lockbox_agent import load_from_lockbox
         if load_from_lockbox():
             logger.info("Bootstrap: secrets from Yandex Lockbox")
+            _apply_db_host_override()
             return True
     except ImportError:
         pass       # lockbox_agent not deployed
@@ -307,6 +308,38 @@ def bootstrap_secrets() -> bool:
         "  Level 1: JWT_SECRET_KEY + API_KEY (dev only)\n"
         "See README.md section 'Безопасность: три уровня'"
     )
+
+
+# ── DB host override (PgBouncer cutover, #186) ───────────────
+def _apply_db_host_override() -> None:
+    """
+    Rewrite DATABASE_URL's host:port if DB_HOST_OVERRIDE is set in env.
+
+    Used to route a specific service through PgBouncer
+    (DB_HOST_OVERRIDE=pgbouncer:6432) without modifying the Lockbox
+    DATABASE_URL value, which is shared across all services. Per-service
+    cutover is wired in compose env. If unset → no-op.
+    """
+    override = os.environ.get("DB_HOST_OVERRIDE", "").strip()
+    if not override:
+        return
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        logger.warning("DB_HOST_OVERRIDE=%s but DATABASE_URL is empty — no-op", override)
+        return
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parts = urlparse(db_url)
+        # urlparse keeps username/password percent-encoded inside netloc,
+        # so we preserve them as-is by splitting netloc on '@'. parts.hostname
+        # is for logging only.
+        userinfo = parts.netloc.rsplit("@", 1)[0] if "@" in parts.netloc else ""
+        netloc = f"{userinfo}@{override}" if userinfo else override
+        new_url = urlunparse(parts._replace(netloc=netloc))
+        os.environ["DATABASE_URL"] = new_url
+        logger.info("DATABASE_URL host overridden: %s → %s", parts.hostname, override)
+    except Exception as e:           # noqa: BLE001
+        logger.error("DB_HOST_OVERRIDE rewrite failed: %s — leaving DATABASE_URL unchanged", e)
 
 
 # ── Singleton guard ───────────────────────────────────────────
