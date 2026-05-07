@@ -273,3 +273,93 @@ jobs:
           done
           echo "::error::prod /healthz did not return status:ok within 60s"
           exit 1
+
+  # Telegram notifications: one per env (staging, prod). always() so
+  # they fire regardless of whether the deploy / smoke job succeeded —
+  # the message text reflects the actual status. Re-uses the same
+  # @Alertcorebot + Alert System group as alertmanager (#158).
+  notify-staging:
+    name: Notify → Telegram (staging)
+    needs: [build, deploy-staging, smoke-staging]
+    if: ${{ always() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post status to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          TAG:       ${{ needs.build.outputs.tag }}
+          DEPLOY_R:  ${{ needs.deploy-staging.result }}
+          SMOKE_R:   ${{ needs.smoke-staging.result }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping"; exit 0
+          fi
+          if [ "$DEPLOY_R" = "success" ] && [ "$SMOKE_R" = "success" ]; then
+              MSG=$(printf '%s\n' \
+                  '🚀 <b>staging deploy ok</b>' \
+                  '' \
+                  "<i>tag:</i>   <code>${TAG}</code>" \
+                  "<i>cluster:</i> <code>staging</code>" \
+                  "<a href=\"${RUN_URL}\">CD run</a>")
+          else
+              MSG=$(printf '%s\n' \
+                  '❌ <b>staging deploy FAILED</b>' \
+                  '' \
+                  "<i>tag:</i>     <code>${TAG}</code>" \
+                  "<i>deploy:</i>  <code>${DEPLOY_R}</code>" \
+                  "<i>smoke:</i>   <code>${SMOKE_R}</code>" \
+                  "<a href=\"${RUN_URL}\">CD run</a>")
+          fi
+          curl -fsS -X POST \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
+                       '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}')" \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+
+  notify-prod:
+    name: Notify → Telegram (production)
+    needs: [build, deploy-prod, smoke-prod]
+    if: ${{ always() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post status to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          TAG:       ${{ needs.build.outputs.tag }}
+          DEPLOY_R:  ${{ needs.deploy-prod.result }}
+          SMOKE_R:   ${{ needs.smoke-prod.result }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping"; exit 0
+          fi
+          if [ "$DEPLOY_R" = "success" ] && [ "$SMOKE_R" = "success" ]; then
+              MSG=$(printf '%s\n' \
+                  '🚀 <b>prod deploy ok</b>' \
+                  '' \
+                  "<i>tag:</i>   <code>${TAG}</code>" \
+                  "<i>cluster:</i> <code>prod</code>" \
+                  "<a href=\"${RUN_URL}\">CD run</a>")
+          elif [ "$DEPLOY_R" = "skipped" ]; then
+              # Skipped means smoke-staging failed — already alerted by notify-staging
+              echo "deploy-prod skipped (smoke-staging failure already notified) — silent exit"
+              exit 0
+          else
+              MSG=$(printf '%s\n' \
+                  '❌ <b>prod deploy FAILED</b>' \
+                  '' \
+                  "<i>tag:</i>     <code>${TAG}</code>" \
+                  "<i>deploy:</i>  <code>${DEPLOY_R}</code>" \
+                  "<i>smoke:</i>   <code>${SMOKE_R}</code>" \
+                  "<a href=\"${RUN_URL}\">CD run</a>")
+          fi
+          curl -fsS -X POST \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
+                       '{chat_id:$chat, text:$text, parse_mode:"HTML", disable_web_page_preview:true}')" \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
