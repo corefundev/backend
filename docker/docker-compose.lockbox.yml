@@ -173,3 +173,17 @@ services:
       S3_BACKUP_REGION: ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # pgbouncer (custom image — Dockerfile.pgbouncer) needs POSTGRES_PASSWORD
+  # to (a) authenticate against postgres for the SCRAM-secret bootstrap
+  # query and (b) handle SCRAM exchange to upstream once running. The
+  # password is the same one postgres receives — also via Lockbox — so
+  # both containers stay in lockstep when it rotates.
+  pgbouncer:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "POSTGRES_PASSWORD"
+      POSTGRES_PASSWORD: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

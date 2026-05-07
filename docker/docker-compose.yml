@@ -306,7 +306,15 @@ services:
   # Side-by-side rollout: postgres:5432 stays open. Cutover happens
   # one app at a time by repointing DATABASE_URL → pgbouncer:6432.
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    # Custom image — alpine + pgbouncer + postgresql16-client, with an
+    # entrypoint that pulls the SCRAM secret out of pg_authid into
+    # userlist.txt at start time. Off-the-shelf images (edoburu, bitnami-
+    # legacy) generate userlist.txt with md5 hashes which don't match
+    # PG14+'s default scram-sha-256 storage.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pgbouncer
+    image: docker-pgbouncer:custom
     mem_limit: 128m
     cpus: 0.5
     environment:
@@ -316,7 +324,7 @@ services:
       DB_PASSWORD:       ${POSTGRES_PASSWORD:-sku}
       DB_NAME:           sku_forecasting
       LISTEN_PORT:       "6432"
-      AUTH_TYPE:         md5
+      AUTH_TYPE:         scram-sha-256
       POOL_MODE:         transaction
       # 25 real PG conns multiplexed across up to 200 client conns —
       # 8× headroom over today's ~50 active conns, room to add another

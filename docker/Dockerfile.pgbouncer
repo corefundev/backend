@@ -1,0 +1,40 @@
+# Thin pgbouncer image with a startup hook that fetches the SCRAM-SHA-256
+# password hash for $DB_USER from the upstream postgres into
+# /etc/pgbouncer/userlist.txt before launching pgbouncer.
+#
+# Why this isn't `edoburu/pgbouncer` directly:
+#   edoburu auto-generates userlist.txt from DB_PASSWORD using md5, but
+#   Postgres 14+ defaults to scram-sha-256 storage — md5 secrets in the
+#   userlist won't authenticate. Fetching the actual scram secret from
+#   pg_authid at start-time keeps userlist.txt in lockstep with whatever
+#   the server has, so a Lockbox password rotation just needs a
+#   pgbouncer recreate (no separate secret-management dance).
+#
+# Required env at runtime:
+#   DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME — same as edoburu
+#   POOL_MODE, LISTEN_PORT, AUTH_TYPE, DEFAULT_POOL_SIZE,
+#   MAX_CLIENT_CONN, MAX_DB_CONNECTIONS, QUERY_WAIT_TIMEOUT
+FROM alpine:3.20
+
+# pgbouncer + psql (for the bootstrap query) + tools that
+# scripts/lockbox_bootstrap.sh needs (jq, openssl, curl, coreutils for
+# base64). postgresql16-client gives us a psql that speaks PG16's
+# protocol cleanly.
+RUN apk add --no-cache \
+        pgbouncer postgresql16-client tini \
+        jq openssl curl coreutils \
+    && mkdir -p /etc/pgbouncer
+
+COPY scripts/lockbox_bootstrap.sh    /usr/local/bin/lockbox_bootstrap.sh
+COPY scripts/pgbouncer_entrypoint.sh /usr/local/bin/pgbouncer_entrypoint.sh
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/pgbouncer_entrypoint.sh \
+    && chown -R postgres:postgres /etc/pgbouncer
+
+USER postgres
+EXPOSE 6432
+
+# Chain: tini → lockbox_bootstrap.sh (fetch POSTGRES_PASSWORD into DB_PASSWORD
+# via env passthrough) → pgbouncer_entrypoint.sh (render config + fetch SCRAM
+# secret + exec pgbouncer). The Dockerfile.alertmanager / Dockerfile.postgres
+# use the same pattern.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/lockbox_bootstrap.sh", "/usr/local/bin/pgbouncer_entrypoint.sh"]
