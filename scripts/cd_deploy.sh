@@ -14,12 +14,24 @@
 #   GHCR_PW    — GITHUB_TOKEN
 #
 # Behaviour:
-#   1. docker login ghcr.io
-#   2. compose pull api worker scan-worker process-worker migrate
-#   3. compose run --rm migrate
-#   4. recreate app services (rolling for prod: workers first, then api)
-#   5. assert api container's Config.Image matches the expected GHCR tag
-#   6. docker logout
+#   1. Capture PREV_API_IMAGE / PREV_WORKER_IMAGE so we can roll back
+#   2. docker login ghcr.io
+#   3. compose pull api worker scan-worker process-worker migrate
+#   4. compose run --rm migrate
+#   5. recreate app services (rolling for prod: workers first, then api)
+#   6. wait up to 90 s for api healthy
+#   7. assert api+worker Config.Image match expected GHCR tags
+#   8. nginx -s reload (flush upstream DNS cache)
+#   9. docker logout
+#
+# Auto-rollback: if (6) times out OR (7) finds image mismatch, the
+# script re-runs `up -d --force-recreate` with the previous tags
+# extracted in step (1) and exits non-zero so CD job fails. The
+# rollback only works if the previous container was running a
+# GHCR-tagged image (i.e., a previous CD run already shipped). On a
+# brand-new VPS where the previous container was the local-built
+# `docker-api`, rollback isn't possible — the script logs that
+# explicitly and exits with the original failure code.
 
 set -euxo pipefail
 
@@ -57,6 +69,49 @@ EXPECTED_API="ghcr.io/corefundev/sku-forecasting-api:$TAG"
 EXPECTED_WORKER="ghcr.io/corefundev/sku-forecasting-worker:$TAG"
 echo "  expected: api=$EXPECTED_API  worker=$EXPECTED_WORKER"
 
+# ── Capture pre-deploy state for rollback ──────────────────────────
+PREV_API_IMAGE=$(docker inspect docker-api-1 --format '{{.Config.Image}}' 2>/dev/null || echo "")
+PREV_WORKER_IMAGE=$(docker inspect docker-worker-1 --format '{{.Config.Image}}' 2>/dev/null || echo "")
+echo "  prev: api=${PREV_API_IMAGE:-<none>}  worker=${PREV_WORKER_IMAGE:-<none>}"
+
+# ── Rollback helper ────────────────────────────────────────────────
+# Re-runs `up -d --force-recreate` with the previous GHCR tags. Only
+# called from the failure paths below; idempotent (rolling back to
+# the same tag twice is a no-op).
+rollback() {
+    local reason="$1"
+    echo "::warning::rollback initiated — reason: $reason"
+
+    if [ -z "$PREV_API_IMAGE" ] || ! echo "$PREV_API_IMAGE" | grep -q '^ghcr.io/'; then
+        echo "::error::no GHCR-tagged previous image to roll back to (was: '${PREV_API_IMAGE:-<none>}')."
+        echo "         This is normal on a brand-new VPS. Manual recovery needed."
+        return 1
+    fi
+
+    local prev_tag
+    prev_tag=$(echo "$PREV_API_IMAGE" | sed 's|.*:||')
+    echo "  rolling back to API_IMAGE_TAG=$prev_tag"
+    export API_IMAGE_TAG="$prev_tag"
+    export WORKER_IMAGE_TAG="$prev_tag"
+
+    docker compose $COMPOSE_ARGS up -d --force-recreate api worker scan-worker process-worker
+
+    for i in $(seq 1 60); do
+        local s
+        s=$(docker compose $COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null || true)
+        if [ "$s" = "healthy" ]; then
+            echo "  rolled-back api healthy after ${i}s"
+            break
+        fi
+        sleep 1
+    done
+
+    # Re-flush nginx so it sees the rolled-back container's IP.
+    docker exec docker-nginx-1 nginx -s reload 2>/dev/null || true
+    echo "  rollback complete — prod is back on tag $prev_tag"
+}
+
+# ── Forward deploy ─────────────────────────────────────────────────
 echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
 echo "  pulling images..."
@@ -76,11 +131,14 @@ else
         api worker scan-worker process-worker
 fi
 
-echo "  waiting for api healthy..."
-for i in $(seq 1 60); do
+# ── Wait for healthy ───────────────────────────────────────────────
+echo "  waiting for api healthy (90s timeout)..."
+HEALTHY=false
+for i in $(seq 1 90); do
     S=$(docker compose $COMPOSE_ARGS ps api --format '{{.Health}}' 2>/dev/null || true)
     if [ "$S" = "healthy" ]; then
         echo "    healthy after ${i}s"
+        HEALTHY=true
         break
     fi
     sleep 1
@@ -93,17 +151,23 @@ done
 echo "  reloading nginx to refresh upstream DNS"
 docker exec docker-nginx-1 nginx -s reload || true
 
+if [ "$HEALTHY" != "true" ]; then
+    rollback "api never became healthy in 90s after recreate" || true
+    exit 5
+fi
+
+# ── Image-identity assertions ─────────────────────────────────────
 ACTUAL_API=$(docker inspect docker-api-1 --format '{{.Config.Image}}')
 echo "  api container running image: $ACTUAL_API"
 if [ "$ACTUAL_API" != "$EXPECTED_API" ]; then
-    echo "::error::api image mismatch — expected=$EXPECTED_API actual=$ACTUAL_API"
+    rollback "api image mismatch (expected=$EXPECTED_API actual=$ACTUAL_API)" || true
     exit 3
 fi
 
 ACTUAL_WORKER=$(docker inspect docker-worker-1 --format '{{.Config.Image}}')
 echo "  worker container running image: $ACTUAL_WORKER"
 if [ "$ACTUAL_WORKER" != "$EXPECTED_WORKER" ]; then
-    echo "::error::worker image mismatch — expected=$EXPECTED_WORKER actual=$ACTUAL_WORKER"
+    rollback "worker image mismatch (expected=$EXPECTED_WORKER actual=$ACTUAL_WORKER)" || true
     exit 4
 fi
 
