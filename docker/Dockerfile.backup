@@ -46,9 +46,11 @@ RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh
 # so the secrets in the cron environment are always fresh. crond runs
 # jobs with empty env, so without this wrapper the secrets exported in
 # the parent CMD wouldn't be visible to backup.sh.
-RUN echo "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/backup.sh >> /var/log/backup.log 2>&1" \
+RUN printf '%s\n%s\n' \
+        "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/backup.sh >> /var/log/backup.log 2>&1" \
+        "30 3 * * 0 /usr/local/bin/lockbox_bootstrap.sh /scripts/base_backup.sh >> /var/log/base_backup.log 2>&1" \
         | crontab - \
- && touch /var/log/backup.log
+ && touch /var/log/backup.log /var/log/base_backup.log
 
 # Foreground crond — image PID 1.
 # Echo the "backup cron installed" sentinel so scripts/restart-backup

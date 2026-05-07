@@ -249,8 +249,16 @@ services:
       retries: 3
 
   # ── PostgreSQL (client registry) ──────────────────────────────
+  # Custom image — postgres:16-alpine + mc + lockbox_bootstrap.sh so the
+  # WAL archive_command (#183) can push to S3 without any creds living
+  # in /srv/backend/.env. Same pattern as alertmanager / postgres-
+  # exporter / backup. See docker/Dockerfile.postgres + scripts/
+  # postgres_entrypoint.sh + scripts/wal_archive.sh.
   postgres:
-    image: postgres:16-alpine
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.postgres
+    image: docker-postgres:custom
     ports:
       - "5432:5432"
     environment:

@@ -155,3 +155,21 @@ services:
       DATABASE_URL: ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # postgres (custom image — Dockerfile.postgres) bootstraps S3_BACKUP_*
+  # from Lockbox so the WAL archive_command (#183) can push to S3 with
+  # no plaintext creds in /srv/backend/.env. Allowlist gates the
+  # injection — postgres only sees the S3 backup keypair, not the
+  # other 80+ secrets in the Lockbox payload.
+  postgres:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY S3_BACKUP_REGION"
+      S3_BACKUP_BUCKET: ""
+      S3_BACKUP_ENDPOINT_URL: ""
+      S3_BACKUP_ACCESS_KEY_ID: ""
+      S3_BACKUP_SECRET_ACCESS_KEY: ""
+      S3_BACKUP_REGION: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

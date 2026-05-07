@@ -1,0 +1,44 @@
+# Custom postgres image — postgres:16-alpine + mc + lockbox_bootstrap.sh
+# so the postgres process can call S3 from its archive_command without
+# any creds living in /srv/backend/.env.
+#
+# Same Lockbox-fetch pattern as alertmanager / postgres-exporter / backup:
+# entrypoint chain runs lockbox_bootstrap.sh first, exports the
+# S3_BACKUP_* allowlist into the postgres env, then execs the official
+# docker-entrypoint.sh + postgres.
+
+FROM minio/mc:RELEASE.2025-08-13T08-35-41Z AS mc-stage
+
+FROM postgres:16-alpine
+
+# Already in postgres:16-alpine: bash, busybox basics. Need extras for
+# lockbox_bootstrap (curl/jq/openssl) and wal_archive (mc + ca-certs).
+RUN apk add --no-cache \
+        curl \
+        jq \
+        openssl \
+        ca-certificates
+
+COPY --from=mc-stage /usr/bin/mc /usr/local/bin/mc
+
+# Lockbox secret-loader, shared with backup / alertmanager / postgres-
+# exporter (same script, same allowlist mechanism).
+COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
+
+# WAL archive command — invoked by postgres for every WAL segment switch.
+# Reads S3_BACKUP_* from env (filled by lockbox_bootstrap at start),
+# pushes the segment to s3://${S3_BACKUP_BUCKET}/wal/${SEGMENT_NAME}.
+COPY scripts/wal_archive.sh /usr/local/bin/wal_archive.sh
+
+# Entrypoint wrapper — Lockbox-bootstrap chains into postgres's official
+# docker-entrypoint.sh which then execs postgres.
+COPY scripts/postgres_entrypoint.sh /usr/local/bin/postgres_entrypoint.sh
+
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/wal_archive.sh \
+             /usr/local/bin/postgres_entrypoint.sh \
+ && mkdir -p /var/lib/postgresql/.mc \
+ && chown -R postgres:postgres /var/lib/postgresql/.mc
+
+ENTRYPOINT ["/usr/local/bin/postgres_entrypoint.sh"]
+CMD ["postgres"]

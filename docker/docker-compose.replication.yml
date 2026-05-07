@@ -26,13 +26,22 @@ services:
   postgres:
     ports:
       - "5432:5432"
-    # Override default command to enable SSL with CA-chain validation.
-    # primary.crt + primary.key are signed by ca.crt; ssl_ca_file lets
-    # primary verify replica's client cert (mTLS — see #174).
+    # Override default command to enable SSL with CA-chain validation +
+    # WAL archiving for PITR (#183).
+    #
+    # SSL: primary.crt + primary.key signed by ca.crt; ssl_ca_file lets
+    # primary verify replica's client cert (mTLS — #174).
     # /srv/backend/secrets/pg-ssl/ is the host bind mount, owned by
     # uid 70 (alpine postgres user). `hostssl ... clientcert=verify-ca`
     # in pg_hba forces all replication connections to present a cert
-    # signed by the same CA; plaintext + cert-less attempts rejected.
+    # signed by the same CA.
+    #
+    # archive_mode + archive_command + archive_timeout: postgres pushes
+    # each WAL segment to S3 via wal_archive.sh (mc cp baked into our
+    # Dockerfile.postgres). archive_timeout=60 forces a WAL switch every
+    # 60s when there's no traffic, so PITR resolution stays sub-minute
+    # even on a quiet DB. wal_level=replica is already implied by
+    # streaming replication; archive_mode=on requires it.
     command:
       - postgres
       - -c
@@ -43,6 +52,12 @@ services:
       - ssl_key_file=/etc/ssl/pg/primary.key
       - -c
       - ssl_ca_file=/etc/ssl/pg/ca.crt
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=/usr/local/bin/wal_archive.sh %p %f
+      - -c
+      - archive_timeout=60
     volumes:
       - /srv/backend/secrets/pg-ssl:/etc/ssl/pg:ro
 
