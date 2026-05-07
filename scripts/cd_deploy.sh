@@ -86,6 +86,13 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
+# nginx caches upstream IP at config-load time (proxy_pass http://api:8000
+# resolves once when worker starts). After force-recreate api gets a new
+# docker-network IP — nginx connects to the old one → 502 Bad Gateway.
+# Reload nginx workers to flush the resolved-upstream cache.
+echo "  reloading nginx to refresh upstream DNS"
+docker exec docker-nginx-1 nginx -s reload || true
+
 ACTUAL_API=$(docker inspect docker-api-1 --format '{{.Config.Image}}')
 echo "  api container running image: $ACTUAL_API"
 if [ "$ACTUAL_API" != "$EXPECTED_API" ]; then
