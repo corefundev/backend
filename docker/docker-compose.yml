@@ -99,12 +99,19 @@ services:
       - "8000:8000"
     environment:
       <<: *common-env
+      # PgBouncer cutover step 5 of #186 — process-worker (step 4) ran
+      # 5000+ transactions clean over 21h soak. Now api + worker +
+      # scan-worker join the pool. vault_agent rewrites DATABASE_URL
+      # host:port post-Lockbox-inject. Rollback: remove these three
+      # lines, recreate, traffic returns to postgres:5432 directly.
+      DB_HOST_OVERRIDE: "pgbouncer:6432"
     volumes:
       - artifacts:/data/artifacts
     depends_on:
-      postgres: { condition: service_healthy }
-      redis:    { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      postgres:  { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }
+      redis:     { condition: service_healthy }
+      migrate:   { condition: service_completed_successfully }
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -123,12 +130,14 @@ services:
     command: rq worker sku-training --url redis://redis:6379
     environment:
       <<: *common-env
+      DB_HOST_OVERRIDE: "pgbouncer:6432"   # #186 step 5 — see api block
     volumes:
       - artifacts:/data/artifacts
     depends_on:
-      redis:    { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      redis:     { condition: service_healthy }
+      postgres:  { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }
+      migrate:   { condition: service_completed_successfully }
     restart: unless-stopped
     # Healthcheck: worker has no HTTP endpoint, so we verify it can reach
     # Redis (its only hard dependency). If Redis is gone, the worker is
@@ -152,12 +161,14 @@ services:
     command: rq worker sku-scan --url redis://redis:6379
     environment:
       <<: *common-env
+      DB_HOST_OVERRIDE: "pgbouncer:6432"   # #186 step 5 — see api block
     depends_on:
-      redis:    { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      clamav:   { condition: service_healthy }
-      minio:    { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      redis:     { condition: service_healthy }
+      postgres:  { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }
+      clamav:    { condition: service_healthy }
+      minio:     { condition: service_healthy }
+      migrate:   { condition: service_completed_successfully }
     restart: unless-stopped
     # Scan worker additionally needs ClamAV; we probe both.
     healthcheck:
