@@ -345,6 +345,18 @@ groups:
           summary:     "Loki dropping log bytes for 10m"
           description: "{{ $value | humanize }}B/s being rejected. Check promtail positions persistence (#198 fix) and loki ingester health."
 
+      # Promtail unreachable — image is distroless so no docker healthcheck;
+      # prometheus scrape is the only liveness signal we have.
+      - alert: PromtailDown
+        expr:  up{job="promtail"} == 0
+        for:   5m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Promtail :9080 unreachable for 5m"
+          description: "All container logs flowing to Loki stop. Restart docker-promtail-1; positions persist via volume so no replay flood."
+
   - name: certificates
     rules:
       # LE certs for public endpoints. ssl-exporter `ssl_cert_not_after`

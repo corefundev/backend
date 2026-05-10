@@ -118,6 +118,12 @@ scrape_configs:
     static_configs:
       - targets: ["loki:3100"]
 
+  # Promtail scrape — external health check (image has no tools for
+  # docker-side HC). `up{job="promtail"}` is the "is it reachable" signal.
+  - job_name: "promtail"
+    static_configs:
+      - targets: ["promtail:9080"]
+
   # ssl-exporter https probes — LE cert TTL for public endpoints.
   - job_name: "ssl-https"
     metrics_path: /probe

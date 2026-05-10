@@ -894,12 +894,11 @@ services:
     depends_on:
       loki:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9080/ready 2>/dev/null | grep -q Ready"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+    # No docker healthcheck — grafana/promtail:3.0.0 is distroless-ish:
+    # no wget/curl/nc/bash in the image, so any CMD-SHELL fails. Health
+    # is monitored externally via the prometheus `promtail` scrape job
+    # → `up{job="promtail"} == 0` alert (PromtailDown). Same approach
+    # used for ssl-exporter for the same reason.
 
   grafana:
     image: grafana/grafana:10.4.2
