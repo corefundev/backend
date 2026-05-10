@@ -440,13 +440,19 @@ services:
   mlflow:
     # v3.x clears the 2.x CVE bundle (path traversal, command exec,
     # auth bypass) — see requirements.txt for the matching client pin.
+    #
+    # mem_limit 2g (was 1g): mlflow 3.x with uvicorn defaults to 4
+    # workers × ~250-500MB each. At 1g we sat at 78% on cold start and
+    # OOM-killed the moment any artifact streamed → restart loop with
+    # ExitCode=0 (Docker masks the OOM after the kill if reaped fast).
+    # 2g + --workers 1 keeps the math comfortably under: ~600MB peak
+    # observed.
     image: ghcr.io/mlflow/mlflow:v3.11.1
-    mem_limit: 1g
+    mem_limit: 2g
     cpus: 1.0
     ports:
       - "5000:5000"
     environment:
-      MLFLOW_BACKEND_STORE_URI: postgresql://sku:sku@postgres:5432/sku_forecasting
       MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://sku-forecasting/mlflow/
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-minioadmin}
@@ -455,6 +461,7 @@ services:
       mlflow server
       --host 0.0.0.0
       --port 5000
+      --workers 1
       --backend-store-uri postgresql://sku:sku@postgres:5432/sku_forecasting
       --default-artifact-root s3://sku-forecasting/mlflow/
     depends_on:
