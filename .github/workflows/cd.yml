@@ -55,13 +55,12 @@ env:
   IMAGE_WORKER: ghcr.io/corefundev/sku-forecasting-worker
 
 concurrency:
-  group: cd-${{ github.ref }}
-  # Latest commit = latest state. Prior runs that haven't finished get
-  # cancelled — for a CD pipeline this is the correct semantic
-  # (deploying old images on top of a newer push-to-prod is wrong).
-  # Was `false` historically; that left runs stuck pending for days
-  # when GitHub's queue mechanic picked at the wrong serialization
-  # corner case (8f66e28 sat pending 2d with 0 jobs created, 2026-05-08).
+  # Group name is intentionally NEW (-v2) — the prior `cd-${{ github.ref }}`
+  # value held a stale lock from 8f66e28 (2 days pending) that kept
+  # subsequent runs stuck at 0-jobs/pending even after we set
+  # cancel-in-progress: true. Rotating the group name forces the
+  # scheduler to pick a fresh lock state.
+  group: cd-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
