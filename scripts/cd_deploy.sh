@@ -1,5 +1,6 @@
 #!/bin/bash
 # scripts/cd_deploy.sh
+# CD pipeline retrigger 2026-05-10 (prior 8f66e28 stuck pending 2 days).
 #
 # Pulls the freshly-built api+worker images from GHCR and recreates
 # the app-tier containers on the local VPS. Called by .github/workflows/cd.yml
