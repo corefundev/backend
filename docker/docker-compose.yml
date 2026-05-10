@@ -166,7 +166,12 @@ services:
       redis:     { condition: service_healthy }
       postgres:  { condition: service_healthy }
       pgbouncer: { condition: service_healthy }
-      clamav:    { condition: service_healthy }
+      # service_started (not service_healthy) — clamav freshclam reloads
+      # transiently flap the healthcheck; we don't want one stuck-unhealthy
+      # event to block scan-worker recreate during a deploy. scan-worker's
+      # job code already gracefully fails individual scan tasks if clamav
+      # is unreachable. autoheal restarts clamav anyway.
+      clamav:    { condition: service_started }
       minio:     { condition: service_healthy }
       migrate:   { condition: service_completed_successfully }
     restart: unless-stopped
@@ -234,6 +239,11 @@ services:
   # ── ClamAV antivirus ──────────────────────────────────────────
   clamav:
     image: clamav/clamav:1.4
+    # Opt into autoheal — clamd socket transiently drops during freshclam
+    # signature reloads (~hourly); without autoheal the container ends up
+    # in "unhealthy" forever and blocks scan-worker recreate via depends_on.
+    labels:
+      autoheal: "true"
     mem_limit: 1500m   # baseline ~1G (sig db loaded), spikes during scan
     cpus: 1.0
     ports: []        # no host ports — internal only
@@ -658,6 +668,30 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── autoheal — auto-restart any unhealthy container ─────────────
+  # Watches docker events, restarts containers stuck in `unhealthy`
+  # state. Closes a long-tail of "X stuck unhealthy after weeks of
+  # uptime" issues — clamav specifically did this 3 times in a single
+  # session (clamd socket transiently drops during signature reloads,
+  # healthcheck retries fail, container shows unhealthy but Docker's
+  # restart-policy doesn't react to healthcheck — only crash). Without
+  # autoheal, the only recovery path was manual `docker restart`.
+  #
+  # Picks up only containers labeled `autoheal=true` (we'll opt-in
+  # narrowly to avoid surprise restarts of services that consider
+  # unhealthy a soft state).
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    mem_limit: 32m
+    cpus: 0.1
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: "autoheal"
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
   # ── cAdvisor (per-container metrics — restart loops, CPU/mem/IO) ─
   # Source for ContainerRestartLoop alert — exposes
