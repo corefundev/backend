@@ -282,3 +282,51 @@ groups:
         annotations:
           summary:     "Postgres weekly base backup stale or missing (>9d)"
           description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
+
+  - name: host-resources
+    rules:
+      # Postgres pg_wal/ lives on the host's data volume. If S3 archive
+      # fails (e.g. Beget S3 outage), WAL backs up locally — uncapped.
+      # Filling the volume = postgres stops accepting writes = api error
+      # surge. Alert at 80% so ops has time to either restore S3 access
+      # or evacuate WAL manually before postgres locks up.
+      - alert: HostDiskFillingUp
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"}
+                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"})
+          > 80
+        for:   15m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Host disk usage >80% on {{ $labels.instance }}"
+          description: "Filesystem at {{ $labels.mountpoint }} is {{ $value | printf \"%.1f\" }}% full. Likely cause: pg_wal backup if S3 archive_command failing, or container logs / docker images bloat. Run `docker system df` and check S3 archive health."
+
+      # Critical at 92% — postgres starts to fail at ~95%.
+      - alert: HostDiskCritical
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"}
+                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"})
+          > 92
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Host disk usage >92% on {{ $labels.instance }} — postgres at risk"
+          description: "Postgres will stop accepting writes when the disk fills. Evacuate large files NOW. {{ $value | printf \"%.1f\" }}% used."
+
+      # Sustained memory pressure — a leaking container can OOM-kill
+      # neighbours when host memory fills.
+      - alert: HostMemoryHigh
+        expr: |
+          100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          > 90
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Host memory >90% used for 30m on {{ $labels.instance }}"
+          description: "{{ $value | printf \"%.1f\" }}% used. Check for memory-leak suspects (mlflow has had crash loops; api / worker can spike during training)."

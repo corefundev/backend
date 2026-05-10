@@ -647,6 +647,11 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
+    # Linux docker doesn't auto-resolve host.docker.internal — add it
+    # explicitly so the node-exporter scrape target (running in host
+    # network mode on :9100) is reachable.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
@@ -658,6 +663,37 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── node_exporter (host filesystem + memory + cpu metrics) ────
+  # Closes #198 — pg_wal disk-pressure alert needs filesystem metrics
+  # for the postgres data volume mountpoint. Bind-mount the host's
+  # /, /proc, /sys read-only and use --path.rootfs=/host so node_exporter
+  # reports HOST filesystems, not container's. Standard prom-community
+  # pattern (see prometheus-community/node-exporter#1490).
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    pid: host                           # see real host PIDs (for --collector.processes)
+    network_mode: host                  # :9100 listens on host directly
+    mem_limit: 64m
+    cpus: 0.2
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/host/root"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      - "--collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$"
+      - "--web.listen-address=127.0.0.1:9100"   # bound to localhost; prometheus scrapes via host net
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9100/metrics 2>/dev/null | grep -q node_filesystem_avail_bytes"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Nightly Postgres backup ───────────────────────────────────
   # Runs at 02:10 UTC daily via busybox crond. Uses backup.sh with
