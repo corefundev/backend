@@ -814,6 +814,12 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       # Docker socket for SD (discovers running containers + their labels).
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Persistent positions file. Without this, every container recreate
+      # makes promtail re-read all docker container logs from offset 0,
+      # which floods loki with timestamps older than its 7d acceptance
+      # window — Loki then logs "timestamp too old" errors for every
+      # rejected entry. Anonymous volume keeps positions across restarts.
+      - promtail_positions:/var/lib/promtail
     command: -config.file=/etc/promtail/config.yaml
     depends_on:
       loki:
@@ -863,3 +869,4 @@ volumes:
   sandbox_staging:
   alertmanager_data:
   backups:
+  promtail_positions:

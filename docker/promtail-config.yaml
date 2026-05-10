@@ -13,7 +13,11 @@ server:
   log_level: warn
 
 positions:
-  filename: /tmp/positions.yaml
+  # Persistent path (named volume in compose). /tmp would be tmpfs and
+  # wipe on container recreate — promtail would then re-tail every
+  # docker log file from offset 0, flooding Loki with "timestamp too old"
+  # rejections for entries older than the 7d acceptance window.
+  filename: /var/lib/promtail/positions.yaml
 
 clients:
   - url: http://loki:3100/loki/api/v1/push

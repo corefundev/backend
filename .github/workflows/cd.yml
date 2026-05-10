@@ -56,13 +56,20 @@ env:
 
 concurrency:
   group: cd-${{ github.ref }}
-  cancel-in-progress: false
+  # Latest commit = latest state. Prior runs that haven't finished get
+  # cancelled — for a CD pipeline this is the correct semantic
+  # (deploying old images on top of a newer push-to-prod is wrong).
+  # Was `false` historically; that left runs stuck pending for days
+  # when GitHub's queue mechanic picked at the wrong serialization
+  # corner case (8f66e28 sat pending 2d with 0 jobs created, 2026-05-08).
+  cancel-in-progress: true
 
 jobs:
 
   build:
     name: Build & push images to GHCR
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -116,6 +123,7 @@ jobs:
     needs: build
     if: ${{ ! inputs.skip_staging }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: staging
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -176,6 +184,7 @@ jobs:
     name: Smoke → staging
     needs: deploy-staging
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: /healthz returns 200 + status:ok
         run: |
@@ -204,6 +213,7 @@ jobs:
     needs: [build, smoke-staging]
     if: ${{ always() && (needs.smoke-staging.result == 'success' || inputs.skip_staging) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -259,6 +269,7 @@ jobs:
     name: Smoke → production
     needs: deploy-prod
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: /healthz returns 200 + status:ok
         run: |
@@ -283,6 +294,7 @@ jobs:
     needs: [build, deploy-staging, smoke-staging]
     if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Post status to Telegram
         env:
@@ -327,6 +339,7 @@ jobs:
     needs: [build, deploy-prod, smoke-prod]
     if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Post status to Telegram
         env:
