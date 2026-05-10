@@ -96,16 +96,14 @@ scrape_configs:
     static_configs:
       - targets: ["pushgateway:9091"]
 
-  # node_exporter — host filesystem / memory / cpu metrics.
-  # Runs in host-network mode bound to 127.0.0.1:9100; prometheus
-  # reaches it via the docker host's gateway address.
+  # node_exporter — host filesystem / memory / cpu metrics (#198).
+  # Runs on the docker network with pid:host so it sees real host
+  # processes/filesystems via /host/* binds. Reachable as
+  # `node-exporter:9100` from the prometheus service.
   - job_name: "node-exporter"
     static_configs:
-      - targets: ["host.docker.internal:9100"]
+      - targets: ["node-exporter:9100"]
     relabel_configs:
-      # Linux docker doesn't have host.docker.internal by default —
-      # we add it via extra_hosts on the prometheus service. On macOS
-      # it's native. Either way it resolves to the docker host IP.
       - source_labels: [__address__]
         target_label: instance
         replacement: "api.testcore.ru"

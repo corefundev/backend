@@ -647,11 +647,6 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
-    # Linux docker doesn't auto-resolve host.docker.internal — add it
-    # explicitly so the node-exporter scrape target (running in host
-    # network mode on :9100) is reachable.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
@@ -666,14 +661,14 @@ services:
 
   # ── node_exporter (host filesystem + memory + cpu metrics) ────
   # Closes #198 — pg_wal disk-pressure alert needs filesystem metrics
-  # for the postgres data volume mountpoint. Bind-mount the host's
-  # /, /proc, /sys read-only and use --path.rootfs=/host so node_exporter
-  # reports HOST filesystems, not container's. Standard prom-community
-  # pattern (see prometheus-community/node-exporter#1490).
+  # for the postgres data volume mountpoint. Runs on the docker network
+  # (so other containers can scrape it as `node-exporter:9100`) but with
+  # pid:host + a read-only bind of /, /proc, /sys so it reports HOST
+  # filesystems and processes. Not exposing :9100 on the host so it
+  # stays internal to the docker network.
   node-exporter:
     image: prom/node-exporter:v1.8.1
-    pid: host                           # see real host PIDs (for --collector.processes)
-    network_mode: host                  # :9100 listens on host directly
+    pid: host
     mem_limit: 64m
     cpus: 0.2
     command:
@@ -682,7 +677,6 @@ services:
       - "--path.rootfs=/host/root"
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
       - "--collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$"
-      - "--web.listen-address=127.0.0.1:9100"   # bound to localhost; prometheus scrapes via host net
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
