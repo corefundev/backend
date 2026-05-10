@@ -659,6 +659,42 @@ services:
       retries: 3
       start_period: 20s
 
+  # ── cAdvisor (per-container metrics — restart loops, CPU/mem/IO) ─
+  # Source for ContainerRestartLoop alert — exposes
+  # `container_start_time_seconds`, which changes on every restart, so
+  # `count(changes(container_start_time_seconds[15m]) > 5)` catches
+  # crash-loops like the mlflow OOM episode (RestartCount=10458 in 3
+  # days before the 1g→2g fix). Read-only mounts only — cAdvisor never
+  # writes to the host.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    mem_limit: 256m
+    cpus: 0.3
+    privileged: true        # cAdvisor needs CAP_SYS_PTRACE for /proc/N/ns
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    command:
+      - "--housekeeping_interval=30s"
+      - "--docker_only=true"
+      - "--store_container_labels=false"
+      - "--whitelisted_container_labels=com.docker.compose.service"
+      # Disable noisy collectors that produce no actionable signal —
+      # we only want container-level lifecycle + resource metrics.
+      - "--disable_metrics=disk,diskIO,tcp,udp,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   # ── node_exporter (host filesystem + memory + cpu metrics) ────
   # Closes #198 — pg_wal disk-pressure alert needs filesystem metrics
   # for the postgres data volume mountpoint. Runs on the docker network

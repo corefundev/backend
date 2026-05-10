@@ -67,3 +67,30 @@ scrape_configs:
       - source_labels: [__address__]
         target_label: instance
         replacement: "staging.testcore.ru"
+
+  # cAdvisor — per-container metrics (#203).
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # Loki internal — distributor lines/bytes (#203).
+  - job_name: "loki"
+    static_configs:
+      - targets: ["loki:3100"]
+
+  # ssl-exporter https probe — LE cert TTL (#203).
+  - job_name: "ssl-https"
+    metrics_path: /probe
+    params:
+      module: [https]
+    static_configs:
+      - targets:
+          - "https://api.staging.testcore.ru"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label:  __param_target
+      - source_labels: [__param_target]
+        target_label:  instance
+      - target_label: __address__
+        replacement:   ssl-exporter:9219
+    scrape_interval: 5m

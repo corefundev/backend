@@ -283,6 +283,94 @@ groups:
           summary:     "Postgres weekly base backup stale or missing (>9d)"
           description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
 
+  - name: container-lifecycle
+    rules:
+      # Crash loop — `container_start_time_seconds` changes on every
+      # container start; if it changes >5 times in 15min that's a clear
+      # restart-loop. Would have caught the mlflow OOM episode
+      # (RestartCount=10458 over 3d before mem_limit 1g→2g fix).
+      - alert: ContainerRestartLoop
+        expr: |
+          count by (name) (changes(container_start_time_seconds{name=~"docker-.+"}[15m])) > 5
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Container {{ $labels.name }} restart-looping (>5 starts/15m)"
+          description: "Container is restarting too fast for the unless-stopped policy to be normal recovery. Common causes: OOM (check mem_limit + actual usage), bad config, dependency unhealthy. ExitCode=0 + Docker restart-policy hides this from `docker inspect` — only metric-side detection works."
+
+      # OOM-killed — cAdvisor exposes `container_oom_events_total`.
+      # Counter resets on container recreate, so alert on rate, not value.
+      - alert: ContainerOOMKilled
+        expr: |
+          increase(container_oom_events_total[10m]) > 0
+        for:   1m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Container {{ $labels.name }} OOM-killed"
+          description: "Out-of-memory kill in last 10m. Bump mem_limit or investigate leak."
+
+  - name: monitoring-pipeline
+    rules:
+      # Pushgateway is a single point for all push-based metrics
+      # (backup, base_backup). If it's down, BackupStale and
+      # BaseBackupStale go silent — and if pushgateway dies right after
+      # a successful backup push, we'd never know subsequent pushes
+      # failed because the metric stays "fresh" until pushgateway loses
+      # state. Fire on any down state immediately.
+      - alert: PushgatewayDown
+        expr:  up{job="pushgateway"} == 0
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Pushgateway is down — batch metrics blind"
+          description: "BackupStale / BaseBackupStale / future push-metrics depend on this. Restart docker-pushgateway-1 and verify it accepts pushes."
+
+      # Loki rejecting log entries — promtail re-tailing old logs after
+      # restart, ingester OOM, network partition. Metric:
+      # `loki_distributor_bytes_dropped_total`.
+      - alert: LokiPushFailure
+        expr: |
+          rate(loki_distributor_bytes_dropped_total[5m]) > 0
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Loki dropping log bytes for 10m"
+          description: "{{ $value | humanize }}B/s being rejected. Check promtail positions persistence (#198 fix) and loki ingester health."
+
+  - name: certificates
+    rules:
+      # LE certs for public endpoints. ssl-exporter `ssl_cert_not_after`
+      # is unix-timestamp seconds. <14d → warn, <3d → critical.
+      - alert: LeCertExpiringSoon
+        expr: |
+          (ssl_cert_not_after{job="ssl-https"} - time()) / 86400 < 14
+        for:   1h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "LE cert {{ $labels.instance }} expires in <14d ({{ $value | printf \"%.1f\" }}d)"
+          description: "Certbot should auto-renew at 30d remaining. If we're at 14d, cron isn't firing or renewal is failing. Inspect certbot container logs."
+
+      - alert: LeCertExpiringCritical
+        expr: |
+          (ssl_cert_not_after{job="ssl-https"} - time()) / 86400 < 3
+        for:   15m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "LE cert {{ $labels.instance }} expires in <3 DAYS"
+          description: "User-facing TLS will break. Run certbot manually now and check renewal cron."
+
   - name: host-resources
     rules:
       # Postgres pg_wal/ lives on the host's data volume. If S3 archive
@@ -292,8 +380,8 @@ groups:
       # or evacuate WAL manually before postgres locks up.
       - alert: HostDiskFillingUp
         expr: |
-          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"}
-                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"})
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/"}
+                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/"})
           > 80
         for:   15m
         labels:
@@ -306,8 +394,8 @@ groups:
       # Critical at 92% — postgres starts to fail at ~95%.
       - alert: HostDiskCritical
         expr: |
-          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"}
-                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/host/root"})
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/"}
+                    / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/"})
           > 92
         for:   5m
         labels:

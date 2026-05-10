@@ -20,3 +20,12 @@ modules:
       # Built-in postgres StartTLS handler — sends SSLRequest, expects
       # 'S', upgrades to TLS, then introspects the server cert.
       starttls: postgres
+
+  https:
+    # Public HTTPS endpoints (LE certs). Standard chain validation —
+    # if the cert is expired or chain broken, the metric `ssl_verified_cert_not_after`
+    # remains absent. Alert on `ssl_cert_not_after` < 14 days.
+    prober: https
+    # ssl-exporter v2.4.3's `https:` schema only takes tls_config + url
+    # query overrides; ip_protocol_fallback is blackbox-exporter syntax,
+    # not ssl-exporter. Empty body = use defaults (chain verify on).
