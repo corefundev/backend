@@ -206,10 +206,43 @@ jobs:
           echo "  issuer: $ISSUER"
           echo "$ISSUER" | grep -q "Let's Encrypt" || { echo "::error::cert not Let's Encrypt"; exit 1; }
 
+  # "Approval needed" Telegram ping — fires the moment staging smoke is
+  # green, before deploy-prod hits its environment gate. Gives ops a
+  # direct link to approve without needing to watch the Actions tab.
+  notify-prod-approval-needed:
+    name: Notify → Telegram (prod approval needed)
+    needs: [build, smoke-staging]
+    if: ${{ always() && (needs.smoke-staging.result == 'success' || inputs.skip_staging) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Post approval-needed to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          TAG:       ${{ needs.build.outputs.tag }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* not set — skipping"; exit 0
+          fi
+          MSG=$(printf '%s\n' \
+              '⏸ <b>backend: prod approval needed</b>' \
+              '' \
+              "<i>tag:</i>     <code>${TAG}</code>" \
+              '<i>staging:</i> <code>smoke ok</code>' \
+              "<a href=\"${RUN_URL}\">Approve in GitHub</a>")
+          curl -fsS -X POST \
+              -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg chat "$CHAT_ID" --arg text "$MSG" \
+                       '{chat_id:$chat, text:$text, message_thread_id:44, parse_mode:"HTML", disable_web_page_preview:true}')" \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+
   deploy-prod:
     name: Deploy → production
     # Need build for outputs.tag; smoke-staging gates the rollout.
-    needs: [build, smoke-staging]
+    needs: [build, smoke-staging, notify-prod-approval-needed]
     if: ${{ always() && (needs.smoke-staging.result == 'success' || inputs.skip_staging) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
