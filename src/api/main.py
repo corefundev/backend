@@ -2374,6 +2374,59 @@ async def list_plans():
     return {"plans": all_specs_as_dicts()}
 
 
+# ══════════════════════════════════════════════════════════════
+# Legal documents (privacy policy, ToS)
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/legal/{doc_id}", tags=["legal"])
+async def get_legal_doc(doc_id: str):
+    """
+    Public endpoint — fetches a legal document by id. Used by /privacy
+    page and the signup-flow checkbox link. No auth required.
+    """
+    from src.storage.legal import get_legal_store
+    doc = get_legal_store().get(doc_id)
+    if not doc:
+        raise HTTPException(404, f"unknown legal document: {doc_id}")
+    return {
+        "doc_id":     doc.doc_id,
+        "title":      doc.title,
+        "content":    doc.content,
+        "version":    doc.version,
+        "updated_at": doc.updated_at.isoformat(),
+    }
+
+
+@app.put("/admin/legal/{doc_id}", tags=["legal"])
+async def update_legal_doc(
+    doc_id: str,
+    body: dict,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Admin endpoint — overwrite the document's title + content. Bumps
+    version automatically. Requires admin role.
+    """
+    auth.require_role("admin")
+    title   = (body.get("title")   or "").strip()
+    content = (body.get("content") or "").strip()
+    if not title or not content:
+        raise HTTPException(400, "title and content are required")
+    from src.storage.legal import get_legal_store
+    doc = get_legal_store().upsert(
+        doc_id=doc_id,
+        title=title,
+        content=content,
+        updated_by=auth.client_id,
+    )
+    return {
+        "doc_id":     doc.doc_id,
+        "title":      doc.title,
+        "version":    doc.version,
+        "updated_at": doc.updated_at.isoformat(),
+    }
+
+
 @app.get("/clients/{client_id}/usage", tags=["plans"])
 async def get_client_usage(
     client_id: str,
