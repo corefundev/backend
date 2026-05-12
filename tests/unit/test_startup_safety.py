@@ -22,8 +22,8 @@ import pytest
 
 
 def _get_check():
-    from src.api.main import _assert_production_config_safe
-    return _assert_production_config_safe
+    from src.api.startup_safety import assert_production_config_safe
+    return assert_production_config_safe
 
 
 @pytest.fixture
