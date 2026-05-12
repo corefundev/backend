@@ -173,13 +173,20 @@ class PostgresOtpStore(OtpStore):
         return int(row[0]) if row else 0
 
     def purge_old(self, older_than_hours: int = 24) -> int:
+        # Parameterized — Postgres `INTERVAL` doesn't accept a bind value
+        # directly, so we build it via `make_interval(hours := %s)` which
+        # IS safe for binding. Never use `sql % …` here: even though the
+        # only current caller is an internal cron with a hardcoded 24,
+        # the pattern is one refactor away from real injection.
+        if not isinstance(older_than_hours, int) or older_than_hours < 0:
+            raise ValueError(f"older_than_hours must be a non-negative int, got {older_than_hours!r}")
         sql = """
         DELETE FROM sku_otp_codes
-        WHERE created_at < NOW() - INTERVAL '%s hours'
+        WHERE created_at < NOW() - make_interval(hours => %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql % older_than_hours)
+                cur.execute(sql, (older_than_hours,))
                 count = cur.rowcount
             conn.commit()
         return count

@@ -50,6 +50,22 @@ def _month_start(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _next_month_start(dt: datetime) -> datetime:
+    """
+    First instant of the calendar month AFTER `dt`.
+
+    Avoids the `+ timedelta(days=32)` trick — that overshoots into
+    month+2 on end-of-month timestamps (e.g. May 31 + 32d = July 2,
+    which would round to July 1, skipping June entirely). Year
+    rollover is handled explicitly.
+    """
+    if dt.month == 12:
+        return dt.replace(year=dt.year + 1, month=1, day=1,
+                          hour=0, minute=0, second=0, microsecond=0)
+    return dt.replace(month=dt.month + 1, day=1,
+                      hour=0, minute=0, second=0, microsecond=0)
+
+
 # ── Public result types ───────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -134,8 +150,9 @@ def check_training_quota(record: ClientRecord) -> QuotaStatus:
         )
 
     if status.training_runs_remaining == 0:
-        # Monthly cap hit.
-        next_month_start = _month_start(_now() + timedelta(days=32)).replace(day=1)
+        # Monthly cap hit. See `_next_month_start` for why we can't
+        # just add 32 days and snap to day=1.
+        next_month_start = _next_month_start(_now())
         retry = int((next_month_start - _now()).total_seconds())
         raise QuotaExceeded(
             f"Monthly training cap reached on plan '{status.plan}' "

@@ -145,9 +145,14 @@ def decode_access_token(token: str) -> dict:
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
     except Exception as e:
+        # NEVER reflect the PyJWT exception back to the client — its
+        # error messages leak algorithm hints, signature-mismatch
+        # specifics, key-derivation state, etc. Log the underlying
+        # cause server-side; tell the client only "Invalid token".
+        logger.warning("JWT decode failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {e}",
+            detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

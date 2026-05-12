@@ -16,6 +16,7 @@ from src.clients.registry import ClientRecord
 from src.plans.plans import Plan, PLAN_SPECS, all_specs_as_dicts, get_plan_spec
 from src.plans.quota import (
     QuotaExceeded, check_training_quota, get_status,
+    _next_month_start,
 )
 from src.plans.enforcement import (
     PlanDenied, PlanLimitExceeded,
@@ -248,3 +249,32 @@ def test_get_status_shape_for_each_plan():
         st = get_status(_rec(plan=plan.value))
         assert st.plan == plan.value
         assert st.model_display_name in {"Notus", "Aether", "Chronos"}
+
+
+# ── _next_month_start — regression for the +32d overshoot bug ─────────────
+#
+# Old impl `_month_start(_now() + timedelta(days=32)).replace(day=1)`
+# overshoots into month+2 on end-of-month timestamps and skips a calendar
+# month entirely. The audit on 2026-05-13 caught this; the fix uses
+# explicit month+1 arithmetic with year-rollover handling.
+
+@pytest.mark.parametrize(
+    "today,expected",
+    [
+        # Mid-month — old impl happened to be right by luck.
+        (datetime(2026, 5, 15, tzinfo=timezone.utc), datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        # End-of-31-day month — the bug case. Old: +32d → Jul 2 → Jul 1.
+        # Should be Jun 1.
+        (datetime(2026, 5, 31, tzinfo=timezone.utc), datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        # End-of-30-day month.
+        (datetime(2026, 4, 30, tzinfo=timezone.utc), datetime(2026, 5, 1, tzinfo=timezone.utc)),
+        # End-of-February (leap-year boundary handled by replace).
+        (datetime(2024, 2, 29, tzinfo=timezone.utc), datetime(2024, 3, 1, tzinfo=timezone.utc)),
+        # Year-rollover — December → next January.
+        (datetime(2026, 12, 15, tzinfo=timezone.utc), datetime(2027, 1, 1, tzinfo=timezone.utc)),
+        (datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+         datetime(2027, 1, 1, tzinfo=timezone.utc)),
+    ],
+)
+def test_next_month_start_never_skips_a_month(today, expected):
+    assert _next_month_start(today) == expected

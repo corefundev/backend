@@ -199,9 +199,54 @@ def _emit_secret_rotation_event_if_changed() -> None:
     )
 
 
+def _assert_production_config_safe() -> None:
+    """
+    Fail-fast guard against dev-mode flags leaking into production.
+
+    A Lockbox rollout mistake or a stale .env on a fresh VPS could
+    flip the API into a state where signup runs without captcha, or
+    OTPs are dumped to console logs instead of being emailed. Those
+    states are silent (the API keeps serving requests) — by the time
+    anyone notices, real users have already been affected.
+
+    This check raises on container start when `APP_ENV=production`
+    and any of the dev-only toggles are still active. The CD smoke
+    test then catches the failure before the prod approval gate.
+    """
+    env = (os.environ.get("APP_ENV") or "").lower()
+    if env != "production":
+        return
+
+    problems: list[str] = []
+    if os.environ.get("DISABLE_CAPTCHA") == "1":
+        problems.append("DISABLE_CAPTCHA=1 (signup/login would run without captcha)")
+    email_provider = (os.environ.get("EMAIL_PROVIDER") or "").lower()
+    if email_provider == "console":
+        problems.append("EMAIL_PROVIDER=console (OTPs would be printed to logs, not emailed)")
+    if email_provider not in ("smtp", "resend"):
+        problems.append(
+            f"EMAIL_PROVIDER={email_provider!r} — production must be `smtp` or `resend`"
+        )
+    if not os.environ.get("EMAIL_FROM"):
+        problems.append("EMAIL_FROM is empty")
+    if not os.environ.get("JWT_SECRET"):
+        problems.append("JWT_SECRET is empty (Lockbox bootstrap likely didn't run)")
+
+    if problems:
+        # RuntimeError → container exits non-zero → CD smoke fails →
+        # prod approval gate never gets the green light.
+        raise RuntimeError(
+            "Refusing to start: APP_ENV=production but unsafe flags detected:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Vault bootstrap already done at module level (before imports) ──
+    # ── Production-config sanity check (fail-fast on dev flags) ──
+    _assert_production_config_safe()
+
     # ── Setup structured logging ──────────────────────────────
     try:
         from src.monitoring.logging_setup import configure_structured_logging
