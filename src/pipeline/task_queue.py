@@ -331,7 +331,14 @@ def _generate_and_store_forecasts(
 
     registry = get_registry()
     record   = registry.get(client_id)
-    plan_max = get_plan_spec(record.plan if record else None).max_horizon_days
+    plan_spec = get_plan_spec(record.plan if record else None)
+    plan_max  = plan_spec.max_horizon_days
+    # SKU cap mirrors `assert_sku_count_within_limit` at train-enqueue.
+    # Without it, batch inference would still loop over every SKU in
+    # the user's dataset even though the model was only trained on
+    # `plan_spec.max_skus` of them — 200 redundant recursive forecasts
+    # for a Free user who uploaded 200 SKUs.
+    plan_max_skus = plan_spec.max_skus
 
     # Effective config = system config + per-client overrides. The
     # user's chosen horizon (Settings → "Дней вперёд") lives there;
@@ -364,7 +371,9 @@ def _generate_and_store_forecasts(
         return
     model = storage.load_model()
     forecasts = forecast_all_skus(
-        model, df, feature_cols, config, horizon=horizon,
+        model, df, feature_cols, config,
+        horizon=horizon,
+        max_skus=plan_max_skus,
     )
 
     if forecasts.empty:

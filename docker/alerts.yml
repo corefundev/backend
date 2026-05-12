@@ -182,6 +182,26 @@ groups:
           summary:     "Replica's postgres-exporter unreachable for 2m"
           description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."
 
+      - alert: PgReplicaScrapeFailed
+        # `up` is Prometheus' built-in scrape indicator (1 if the
+        # target HTTP endpoint answered, 0 if not). Distinct from
+        # `pg_up` above: if the exporter IP rotates / DNS alias goes
+        # stale / network path breaks, the target is unreachable
+        # entirely and `pg_up` won't even produce a value — so the
+        # PgReplicaWalReceiverDown alert above won't fire. This one
+        # catches that case. Added 2026-05-13 after audit found the
+        # replica IP was a checked-in hardcode (now alias via
+        # extra_hosts → REPLICA_EXPORTER_HOST env).
+        expr: |
+          up{job="postgres-replica"} == 0
+        for:   3m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Prometheus can't scrape postgres-replica for 3m"
+          description: "Likely cause: REPLICA_EXPORTER_HOST env on primary doesn't match the current replica IP (rotate via prod .env + recreate prometheus), OR replica firewall dropped our IP, OR the replica VPS is down."
+
   - name: slo
     rules:
       # SLO: 99.9% availability of /forecast endpoint over 30 days.

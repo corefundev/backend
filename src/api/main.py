@@ -1499,12 +1499,17 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
 
 @app.get("/health", tags=["ops"])
 async def health():
-    """Legacy alias for /healthz — kept for backward compat."""
-    return {
-        "status": "ok",
-        "models_cached": list(_services.keys()),
-        "storage_backend": os.getenv("STORAGE_BACKEND", "local"),
-    }
+    """
+    Legacy alias for /healthz — kept for backward compat.
+
+    Never leak internal state from this endpoint: it's reachable
+    without auth. The old payload included `models_cached` (a list
+    of client_ids whose models were currently in memory), which let
+    an unauthenticated caller enumerate tenants. That's now gone —
+    if you need it for ops debugging, use the authenticated
+    `/internal/state` endpoint instead.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/healthz", tags=["ops"])
@@ -1516,6 +1521,28 @@ async def healthz():
     the container.
     """
     return {"status": "ok"}
+
+
+@app.get("/internal/state", tags=["ops"])
+async def internal_state(auth: AuthContext = Depends(get_current_client)):
+    """
+    Authenticated diagnostic — what state is the API currently in?
+
+    Returns the list of clients whose models are in memory (was
+    formerly leaked via /health) plus a few non-sensitive runtime
+    knobs. Requires JWT or API-key auth so it can't be hit by an
+    unauthenticated scanner.
+
+    Not used by the frontend; intended for ops debugging via curl
+    with a valid token.
+    """
+    return {
+        "status": "ok",
+        "models_cached": list(_services.keys()),
+        "storage_backend": os.getenv("STORAGE_BACKEND", "local"),
+        "auth_method": auth.auth_method,
+        "client_id": auth.client_id,
+    }
 
 
 @app.get("/readyz", tags=["ops"])
@@ -2255,9 +2282,42 @@ async def predict_batch(
     req: BatchPredictRequest,
     auth: AuthContext = Depends(get_current_client),
 ):
+    """
+    Batch inference: many predict requests for one client in parallel.
+
+    Two correctness properties this implementation has that the
+    previous one (sequential awaits + no cache lock) didn't:
+
+    1. The N predict calls actually run concurrently via
+       `asyncio.gather`. Sequential awaits made batch latency = N ×
+       single-request latency.
+
+    2. We acquire and HOLD the per-client model-cache lock for the
+       whole batch. Without it, a concurrent `/reload` for the same
+       client could evict the model mid-batch, forcing some requests
+       to wait for an unrelated reload and silently doubling tail
+       latency on the survivors.
+
+       The lock is the same `threading.Lock` `_get_service` uses, so
+       reload waits but other clients' predict batches are not
+       blocked (per-client lock, not global). `asyncio.to_thread`
+       wraps the blocking lock acquire so we don't stall the event
+       loop.
+    """
     require_client_access(client_id, auth)
-    results = [await predict(client_id, r, auth) for r in req.requests]
-    return {"client_id": client_id, "results": results, "count": len(results)}
+
+    import asyncio as _asyncio
+    lk = _client_lock(client_id)
+    await _asyncio.to_thread(lk.acquire)
+    try:
+        results = await _asyncio.gather(
+            *(predict(client_id, r, auth) for r in req.requests),
+            return_exceptions=False,
+        )
+    finally:
+        lk.release()
+
+    return {"client_id": client_id, "results": list(results), "count": len(results)}
 
 @app.post("/clients/{client_id}/reload", tags=["ops"])
 async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):

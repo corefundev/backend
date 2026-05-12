@@ -661,6 +661,13 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
       - "--web.enable-lifecycle"   # allows reload via HTTP POST /-/reload
+    # DNS indirection for replica postgres-exporter. prometheus.yml
+    # scrapes `postgres-replica.internal:9187`; we resolve that alias
+    # here so the replica IP can be rotated via REPLICA_EXPORTER_HOST
+    # in .env / Lockbox without editing checked-in YAML. Default falls
+    # back to the current prod replica IP for backward compat.
+    extra_hosts:
+      - "postgres-replica.internal:${REPLICA_EXPORTER_HOST:-212.8.226.233}"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]

@@ -68,16 +68,20 @@ scrape_configs:
         replacement:   ssl-exporter:9219
     scrape_interval: 1m
 
-  # Postgres — replica VPS (db-replica.testcore.ru / 212.8.226.233).
-  # Replica runs its own postgres-exporter sidecar (see
-  # docker/docker-compose.replica.yml). Replica-firewall sidecar there
-  # restricts source IP to this primary, so anyone else gets DROPed.
-  # 15s scrape interval is fine for lag tracking; pg_replication_slots
-  # + pg_stat_wal_receiver expose written/flushed/replayed LSNs which
-  # let Grafana plot lag in MB.
+  # Postgres — replica VPS (db-replica.testcore.ru, default IP
+  # 212.8.226.233). Replica runs its own postgres-exporter sidecar
+  # (see docker/docker-compose.replica.yml). Replica-firewall sidecar
+  # there restricts source IP to this primary, so anyone else gets
+  # DROPed.
+  #
+  # IMPORTANT: the host part of the target is the docker-compose
+  # `extra_hosts` alias `postgres-replica.internal`, NOT a hardcoded
+  # IP. The real IP lives in env `REPLICA_EXPORTER_HOST` so it can
+  # rotate on failover without a code change. See compose.yml for
+  # the alias declaration.
   - job_name: "postgres-replica"
     static_configs:
-      - targets: ["212.8.226.233:9187"]
+      - targets: ["postgres-replica.internal:9187"]
         labels:
           replica: "1"
           host:    "db-replica.testcore.ru"

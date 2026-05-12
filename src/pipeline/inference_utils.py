@@ -277,6 +277,7 @@ def forecast_all_skus(
     feature_cols: list[str],
     config:       dict,
     horizon:      int | None = None,
+    max_skus:     int | None = None,
 ) -> pd.DataFrame:
     """
     Run recursive_forecast for every SKU in df.
@@ -286,6 +287,13 @@ def forecast_all_skus(
     used by the post-training batch step so the per-plan ceiling
     (Free 7d / Start 30d / Business 90d) wins over whatever value
     is in the system config.
+
+    `max_skus` caps how many distinct SKUs we forecast in this call,
+    matching the per-plan SKU cap. Without it, a Free user with
+    200 SKUs in their dataset would still run 200 recursive forecasts
+    even though their plan caps training at 30 — the post-training
+    batch was unbounded. SKUs are iterated in their groupby order
+    (stable across reruns); the cap truncates the tail.
     """
     sku_col    = config["data"]["sku_col"]
     date_col   = config["data"]["date_col"]
@@ -293,7 +301,10 @@ def forecast_all_skus(
     horizon    = horizon if horizon is not None else config["model"]["horizon"]
 
     all_rows = []
+    processed = 0
     for sku, group in df.groupby(sku_col, sort=False):
+        if max_skus is not None and processed >= max_skus:
+            break
         history = group.sort_values(date_col).copy()
         rows    = recursive_forecast(
             model=model,
@@ -306,5 +317,6 @@ def forecast_all_skus(
             target_col=target_col,
         )
         all_rows.extend(rows)
+        processed += 1
 
     return pd.DataFrame(all_rows)
