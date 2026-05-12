@@ -209,36 +209,57 @@ def _assert_production_config_safe() -> None:
     states are silent (the API keeps serving requests) — by the time
     anyone notices, real users have already been affected.
 
-    This check raises on container start when `APP_ENV=production`
-    and any of the dev-only toggles are still active. The CD smoke
-    test then catches the failure before the prod approval gate.
+    Two enforcement tiers:
+
+    • **Hard fail** (raises RuntimeError → container exits non-zero
+      → CD smoke catches before prod approval) on the two flags that
+      definitely break security in prod:
+        - DISABLE_CAPTCHA=1
+        - EMAIL_PROVIDER=console
+      These have no legitimate reason to be set on prod.
+
+    • **Warn** (logged at warning level, container starts normally)
+      on softer signals like missing EMAIL_FROM or unrecognised
+      EMAIL_PROVIDER values. These can happen during a controlled
+      rollout (e.g., switching providers, blank-string Lockbox
+      probes) and shouldn't take down prod — but ops should see them.
+
+    The hard-fail set deliberately matches the dev-only toggles that
+    `.env.staging.example` and `compose.staging.yml` set. Anything
+    that fires here is unambiguously a misconfig.
     """
     env = (os.environ.get("APP_ENV") or "").lower()
     if env != "production":
         return
 
-    problems: list[str] = []
+    hard_fails: list[str] = []
     if os.environ.get("DISABLE_CAPTCHA") == "1":
-        problems.append("DISABLE_CAPTCHA=1 (signup/login would run without captcha)")
-    email_provider = (os.environ.get("EMAIL_PROVIDER") or "").lower()
+        hard_fails.append("DISABLE_CAPTCHA=1 (signup/login would run without captcha)")
+    email_provider = (os.environ.get("EMAIL_PROVIDER") or "").strip().lower()
     if email_provider == "console":
-        problems.append("EMAIL_PROVIDER=console (OTPs would be printed to logs, not emailed)")
-    if email_provider not in ("smtp", "resend"):
-        problems.append(
-            f"EMAIL_PROVIDER={email_provider!r} — production must be `smtp` or `resend`"
-        )
-    if not os.environ.get("EMAIL_FROM"):
-        problems.append("EMAIL_FROM is empty")
-    if not os.environ.get("JWT_SECRET"):
-        problems.append("JWT_SECRET is empty (Lockbox bootstrap likely didn't run)")
+        hard_fails.append("EMAIL_PROVIDER=console (OTPs would be printed to logs, not emailed)")
 
-    if problems:
-        # RuntimeError → container exits non-zero → CD smoke fails →
-        # prod approval gate never gets the green light.
+    if hard_fails:
         raise RuntimeError(
             "Refusing to start: APP_ENV=production but unsafe flags detected:\n  - "
-            + "\n  - ".join(problems)
+            + "\n  - ".join(hard_fails)
         )
+
+    # Soft signals — warn but don't block. Ops surfaces these via
+    # Loki + the StartupConfigWarning alert (TODO: add the alert rule
+    # in alerts.yml in a follow-up).
+    soft_warnings: list[str] = []
+    if email_provider and email_provider not in ("smtp", "resend"):
+        soft_warnings.append(
+            f"EMAIL_PROVIDER={email_provider!r} is not the usual `smtp` or `resend`"
+        )
+    if not os.environ.get("EMAIL_FROM"):
+        soft_warnings.append("EMAIL_FROM is empty")
+    if not os.environ.get("JWT_SECRET"):
+        soft_warnings.append("JWT_SECRET is empty (Lockbox bootstrap may have skipped)")
+
+    for w in soft_warnings:
+        logger.warning("production-config check: %s", w)
 
 
 @asynccontextmanager
