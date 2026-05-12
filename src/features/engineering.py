@@ -162,4 +162,13 @@ def get_feature_columns(df: pd.DataFrame, config: dict) -> list[str]:
         config["data"]["target_col"],
         "price", "promo", "stock", "is_anomaly",
     }
+    # `is_gap_day` is emitted by data/loader._fill_time_gaps so the
+    # model CAN distinguish imputed-zero rows from real-zero sales,
+    # but it's opt-in: existing trained models don't have this in
+    # their feature vector and would fail at predict-time if we
+    # silently started passing it. Flip
+    # `features.is_gap_day_enabled: true` in the client's config to
+    # train a new model that uses it.
+    if not config.get("features", {}).get("is_gap_day_enabled", False):
+        exclude.add("is_gap_day")
     return [c for c in df.columns if c not in exclude]

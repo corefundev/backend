@@ -128,16 +128,54 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 
 def _fill_time_gaps(
-    df: pd.DataFrame, date_col: str, sku_col: str, target_col: str
+    df: pd.DataFrame, date_col: str, sku_col: str, target_col: str,
+    warn_gap_ratio: float = 0.10,
 ) -> pd.DataFrame:
-    """Ensure every SKU has a continuous daily time series."""
+    """
+    Ensure every SKU has a continuous daily time series.
+
+    Adds an `is_gap_day` boolean column (1 if the row was imputed,
+    0 if it came from the source data) so downstream feature
+    engineering can opt into using it as a signal. The audit on
+    2026-05-13 caught that without this column, models silently
+    learn `target=0` as real demand for closed-store / no-data days.
+
+    The column is exposed unconditionally — but the feature pipeline
+    only includes it in the model's feature vector when
+    `features.is_gap_day_enabled` is set in config. That keeps
+    existing trained models working (their feature shape doesn't
+    change) while letting new trainings opt in.
+
+    Per-SKU diagnostic: when more than `warn_gap_ratio` (default
+    10%) of a SKU's date range had to be imputed, we log a warning.
+    Ops can grep Loki for these and reach out to the customer
+    ("we noticed a 30-day gap in your data, was that intentional?").
+    """
     filled = []
     for sku, group in df.groupby(sku_col):
         full_idx = pd.date_range(group[date_col].min(), group[date_col].max(), freq="D")
+        original_dates = set(group[date_col])
         group = group.set_index(date_col).reindex(full_idx).copy()
         group[sku_col] = sku
+        # Mark imputed rows BEFORE filling the target. A row's date
+        # was missing iff it wasn't in the original input — checking
+        # `target.isna()` after-the-fact would also flag real zero
+        # sales days (which were genuinely zero in the source).
+        group["is_gap_day"] = (~group.index.isin(original_dates)).astype("int8")
         group[target_col] = group[target_col].fillna(0)
         group.index.name = date_col
         group = group.reset_index()
+
+        gap_ratio = float(group["is_gap_day"].mean())
+        if gap_ratio > warn_gap_ratio:
+            logger.warning(
+                "SKU %s: %.1f%% of dates were imputed (%d of %d) — "
+                "likely a long closed-store gap. Consider enabling "
+                "features.is_gap_day_enabled in client config so the "
+                "model can distinguish imputed zeros from real low sales.",
+                sku, gap_ratio * 100,
+                int(group["is_gap_day"].sum()), len(group),
+            )
+
         filled.append(group)
     return pd.concat(filled, ignore_index=True)
