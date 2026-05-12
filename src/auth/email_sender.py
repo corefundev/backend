@@ -36,6 +36,9 @@ Required env per provider
         SMTP_PASSWORD=...
         SMTP_USE_TLS=1
         EMAIL_FROM=noreply@yourdomain.example
+        EMAIL_FROM_NAME=SKU Forecasting       (display name, optional)
+        EMAIL_REPLY_TO=support@yourdomain.example   (optional)
+        EMAIL_UNSUBSCRIBE=unsubscribe@yourdomain.example  (optional; defaults to EMAIL_FROM)
 
     Console (dev only):
         EMAIL_PROVIDER=console
@@ -50,6 +53,7 @@ import smtplib
 import urllib.error
 import urllib.request
 from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -111,11 +115,24 @@ class ResendEmailSender:
             raise RuntimeError("EMAIL_FROM not set")
 
     def send(self, *, to: str, subject: str, body: str) -> None:
-        payload = {
-            "from":    f"{self.from_name} <{self.from_addr}>" if self.from_name else self.from_addr,
+        # Deliverability headers — see SmtpEmailSender.send() for the
+        # full rationale. mail.ru in particular grades non-human mail
+        # without List-Unsubscribe as spam regardless of SPF/DKIM/DMARC.
+        unsub_addr = os.environ.get("EMAIL_UNSUBSCRIBE", self.from_addr)
+        reply_to   = os.environ.get("EMAIL_REPLY_TO")
+        headers: dict[str, str] = {
+            "List-Unsubscribe":      f"<mailto:{unsub_addr}?subject=unsubscribe>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        }
+        if reply_to:
+            headers["Reply-To"] = reply_to
+
+        payload: dict[str, object] = {
+            "from":    formataddr((self.from_name, self.from_addr)) if self.from_name else self.from_addr,
             "to":      [to],
             "subject": subject,
             "text":    body,
+            "headers": headers,
         }
         req = urllib.request.Request(
             self.API_URL,
@@ -150,20 +167,33 @@ class SmtpEmailSender:
     """
 
     def __init__(self):
-        self.host     = os.environ.get("SMTP_HOST")
-        self.port     = int(os.environ.get("SMTP_PORT", "587"))
-        self.user     = os.environ.get("SMTP_USER")
-        self.password = os.environ.get("SMTP_PASSWORD")
-        self.use_tls  = os.environ.get("SMTP_USE_TLS", "1") == "1"
-        self.from_addr = os.environ.get("EMAIL_FROM")
+        self.host       = os.environ.get("SMTP_HOST")
+        self.port       = int(os.environ.get("SMTP_PORT", "587"))
+        self.user       = os.environ.get("SMTP_USER")
+        self.password   = os.environ.get("SMTP_PASSWORD")
+        self.use_tls    = os.environ.get("SMTP_USE_TLS", "1") == "1"
+        self.from_addr  = os.environ.get("EMAIL_FROM")
+        self.from_name  = os.environ.get("EMAIL_FROM_NAME", "")
+        self.reply_to   = os.environ.get("EMAIL_REPLY_TO")
+        # mail.ru/yandex 2024+ require List-Unsubscribe on automated mail
+        # even when it's transactional (OTP, password reset). The mailbox
+        # doesn't have to exist for the heuristic to pass — but having a
+        # real one (`unsubscribe@<domain>`) is cleaner.
+        self.unsub_addr = os.environ.get("EMAIL_UNSUBSCRIBE", self.from_addr)
         if not (self.host and self.from_addr):
             raise RuntimeError("SMTP_HOST and EMAIL_FROM must be set")
 
     def send(self, *, to: str, subject: str, body: str) -> None:
         msg = EmailMessage()
-        msg["From"]    = self.from_addr
+        msg["From"]    = formataddr((self.from_name, self.from_addr)) if self.from_name else self.from_addr
         msg["To"]      = to
         msg["Subject"] = subject
+        if self.reply_to:
+            msg["Reply-To"] = self.reply_to
+        # Deliverability headers — mail.ru's `X-Mailru-Noreply: yes`
+        # heuristic auto-spams `noreply@` senders unless these are set.
+        msg["List-Unsubscribe"]      = f"<mailto:{self.unsub_addr}?subject=unsubscribe>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
         msg.set_content(body)
 
         # Port 465 is SMTP-over-SSL (TLS handshake at connection time);
