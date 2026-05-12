@@ -28,6 +28,20 @@
 
 services:
 
+  # Postgres — staging doesn't apply replication.yml (no read-replica),
+  # but we still want WAL archiving for PITR (#183). Override the
+  # postgres command here to enable archive_mode + archive_command.
+  # Same wal_archive.sh + S3_BACKUP_* env via Lockbox as prod.
+  postgres:
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=/usr/local/bin/wal_archive.sh %p %f
+      - -c
+      - archive_timeout=60
+
   # Override prometheus config to use the staging variant — adds
   # cluster=staging external_label and drops scrape jobs that only
   # exist on the prod stack (postgres-replica, ssl-pg-tls).
