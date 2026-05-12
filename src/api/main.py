@@ -684,11 +684,11 @@ async def auth_signup(req: SignupRequest, http_req: Request):
     store.create(email=canonical, purpose=f"{PURPOSE_SIGNUP}:display", code_hash=email)
 
     ttl_min = int(otp_ttl().total_seconds() / 60)
-    subject, body = render_otp_email(code=code, purpose=PURPOSE_SIGNUP, ttl_minutes=ttl_min)
+    subject, body, html = render_otp_email(code=code, purpose=PURPOSE_SIGNUP, ttl_minutes=ttl_min)
     try:
         # Send to the user-typed address (not the canonical) — that's
         # what they read; canonical is internal only.
-        get_email_sender().send(to=email, subject=subject, body=body)
+        get_email_sender().send(to=email, subject=subject, body=body, html=html)
     except EmailDeliveryError as e:
         logger.error("signup email failed for %s: %s", email, e)
         raise HTTPException(status_code=503, detail="Could not send email; try again")
@@ -917,9 +917,9 @@ async def auth_login_email(req: LoginEmailRequest, http_req: Request):
         store = get_otp_store()
         code  = generate_otp()
         store.create(email=canonical, purpose=PURPOSE_LOGIN, code_hash=hash_otp(code))
-        subject, body = render_otp_email(code=code, purpose=PURPOSE_LOGIN, ttl_minutes=ttl_min)
+        subject, body, html = render_otp_email(code=code, purpose=PURPOSE_LOGIN, ttl_minutes=ttl_min)
         try:
-            get_email_sender().send(to=email, subject=subject, body=body)
+            get_email_sender().send(to=email, subject=subject, body=body, html=html)
         except EmailDeliveryError as e:
             logger.error("login email failed for %s: %s", email, e)
             # Still return 202 — don't leak that the user exists by

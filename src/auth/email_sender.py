@@ -62,7 +62,8 @@ logger = logging.getLogger(__name__)
 # ── Public protocol ─────────────────────────────────────────────────────
 
 class EmailSender(Protocol):
-    def send(self, *, to: str, subject: str, body: str) -> None: ...
+    def send(self, *, to: str, subject: str, body: str,
+             html: str | None = None) -> None: ...
 
 
 class EmailDeliveryError(RuntimeError):
@@ -77,16 +78,18 @@ class ConsoleEmailSender:
     where you want to see OTPs in `docker compose logs api` without
     leaving the laptop.
     """
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(self, *, to: str, subject: str, body: str,
+             html: str | None = None) -> None:
         logger.warning(
             "\n"
             "═══════════════════ EMAIL (console) ═══════════════════\n"
             "  To:      %s\n"
             "  Subject: %s\n"
+            "  HTML?:   %s\n"
             "  ---\n"
             "  %s\n"
             "════════════════════════════════════════════════════════",
-            to, subject, body.replace("\n", "\n  "),
+            to, subject, "yes" if html else "no", body.replace("\n", "\n  "),
         )
 
 
@@ -114,7 +117,8 @@ class ResendEmailSender:
         if not self.from_addr:
             raise RuntimeError("EMAIL_FROM not set")
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(self, *, to: str, subject: str, body: str,
+             html: str | None = None) -> None:
         # Deliverability headers — see SmtpEmailSender.send() for the
         # full rationale. mail.ru in particular grades non-human mail
         # without List-Unsubscribe as spam regardless of SPF/DKIM/DMARC.
@@ -134,6 +138,8 @@ class ResendEmailSender:
             "text":    body,
             "headers": headers,
         }
+        if html:
+            payload["html"] = html
         req = urllib.request.Request(
             self.API_URL,
             data=json.dumps(payload).encode("utf-8"),
@@ -183,7 +189,8 @@ class SmtpEmailSender:
         if not (self.host and self.from_addr):
             raise RuntimeError("SMTP_HOST and EMAIL_FROM must be set")
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(self, *, to: str, subject: str, body: str,
+             html: str | None = None) -> None:
         msg = EmailMessage()
         msg["From"]    = formataddr((self.from_name, self.from_addr)) if self.from_name else self.from_addr
         msg["To"]      = to
@@ -194,7 +201,12 @@ class SmtpEmailSender:
         # heuristic auto-spams `noreply@` senders unless these are set.
         msg["List-Unsubscribe"]      = f"<mailto:{self.unsub_addr}?subject=unsubscribe>"
         msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        # Plain text is the canonical part; HTML is the alternative.
+        # Order matters: clients pick the LAST acceptable alternative,
+        # so HTML must come second to win in HTML-capable clients.
         msg.set_content(body)
+        if html:
+            msg.add_alternative(html, subtype="html")
 
         # Port 465 is SMTP-over-SSL (TLS handshake at connection time);
         # port 587 is STARTTLS (upgrade after plaintext greeting). Beget
@@ -251,27 +263,99 @@ def reset_for_tests() -> None:
 
 # ── OTP message templates ───────────────────────────────────────────────
 
-def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str, str]:
+def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str, str, str]:
     """
-    Return (subject, body). Plain-text only on purpose — better for
-    spam-filter scores and avoids the HTML-render security surface.
+    Return (subject, text_body, html_body).
+
+    Both alternatives are returned so the sender can attach them as
+    multipart/alternative. HTML-capable clients render the styled
+    version; plain-text clients (and spam filters) get the text body.
+    The two MUST convey the same information — Gmail/mail.ru penalise
+    HTML/text mismatch as a phishing signal.
     """
     if purpose == "signup":
         subject = "Подтверждение регистрации в SKU Forecasting"
-        body = (
-            f"Здравствуйте,\n\n"
-            f"Ваш код для завершения регистрации: {code}\n\n"
-            f"Введите его в приложении в течение {ttl_minutes} минут.\n"
-            f"Если вы не запрашивали регистрацию, просто проигнорируйте письмо.\n\n"
-            f"— SKU Forecasting"
+        intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
+        note    = (
+            "Проигнорируйте это письмо, если вы не пытались "
+            "зарегистрироваться в SKU Forecasting."
         )
     else:  # login
         subject = "Код для входа в SKU Forecasting"
-        body = (
-            f"Здравствуйте,\n\n"
-            f"Ваш код для входа: {code}\n\n"
-            f"Действителен {ttl_minutes} минут. Если вы не запрашивали "
-            f"вход, измените пароль почтового ящика — кто-то знает ваш email.\n\n"
-            f"— SKU Forecasting"
+        intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
+        note    = (
+            "Если вы не запрашивали вход, проигнорируйте письмо и "
+            "смените пароль почтового ящика — возможно, ваш адрес знает кто-то ещё."
         )
-    return subject, body
+
+    text_body = (
+        f"{intro}\n\n"
+        f"{code}\n\n"
+        f"Код действителен {ttl_minutes} минут.\n\n"
+        f"{note}\n\n"
+        f"С уважением,\n"
+        f"Команда SKU Forecasting"
+    )
+    html_body = _render_otp_html(code=code, intro=intro, note=note, ttl_minutes=ttl_minutes)
+    return subject, text_body, html_body
+
+
+def _render_otp_html(*, code: str, intro: str, note: str, ttl_minutes: int) -> str:
+    """
+    Minimal, OpenAI-style transactional email.
+
+    Inline styles only — most webmail clients (Gmail, mail.ru) strip
+    <style> blocks and `class=`. Layout is a single centred column on
+    a white card with a tiny brand mark, the code in a highlighted
+    box, a one-line note, and a hairline footer.
+    """
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>SKU Forecasting</title>
+  </head>
+  <body style="margin:0;padding:0;background:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#020817;-webkit-font-smoothing:antialiased;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F8FAFC;">
+      <tr>
+        <td align="center" style="padding:40px 16px;">
+          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:8px;">
+            <tr>
+              <td style="padding:32px 32px 28px 32px;">
+                <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;color:#020817;margin-bottom:28px;">
+                  SKU Forecasting
+                </div>
+                <div style="font-size:14px;line-height:20px;color:#64748B;margin-bottom:12px;">
+                  {intro}
+                </div>
+                <div style="background:#F1F5F9;border-radius:6px;padding:18px 20px;font-size:22px;font-weight:600;letter-spacing:0.18em;color:#020817;font-family:'SFMono-Regular',Menlo,Consolas,monospace;margin-bottom:20px;">
+                  {code}
+                </div>
+                <div style="font-size:13px;line-height:18px;color:#94A3B8;margin-bottom:24px;">
+                  Код действителен {ttl_minutes} минут.<br>
+                  {note}
+                </div>
+                <div style="font-size:13px;line-height:18px;color:#64748B;">
+                  С уважением,<br>
+                  Команда SKU Forecasting
+                </div>
+                <div style="height:1px;background:#E2E8F0;margin:28px 0 20px 0;"></div>
+                <div style="font-size:13px;font-weight:600;color:#020817;margin-bottom:8px;">
+                  SKU Forecasting
+                </div>
+                <div style="font-size:12px;line-height:18px;">
+                  <a href="https://skusystem.ru/" style="color:#64748B;text-decoration:underline;">Веб-кабинет</a>
+                  &nbsp;·&nbsp;
+                  <a href="https://skusystem.ru/plans" style="color:#64748B;text-decoration:underline;">Тарифы</a>
+                  &nbsp;·&nbsp;
+                  <a href="mailto:dochub.org@gmail.com" style="color:#64748B;text-decoration:underline;">Поддержка</a>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
