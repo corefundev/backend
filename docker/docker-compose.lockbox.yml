@@ -60,6 +60,7 @@ x-lockbox-blanks: &lockbox-blanks
   API_KEY:                         ""
   ADMIN_API_KEY:                   ""
   MODEL_SIGNING_KEY:               ""
+  AUDIT_LOG_HMAC_KEY:              ""  # 32-byte hex; tamper-evidence chain over audit_log (H4)
   BACKUP_PASSPHRASE:               ""
   GRAFANA_PASSWORD:                ""
   POSTGRES_PASSWORD:               ""

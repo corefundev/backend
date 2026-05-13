@@ -1488,6 +1488,38 @@ async def healthz():
     return {"status": "ok"}
 
 
+@app.get("/internal/audit/verify", tags=["ops"])
+async def internal_audit_verify(
+    limit: int = 10_000,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Admin-only: walk the audit_log HMAC chain and report whether it's
+    intact. Returns the first broken row id if any, plus a diagnostic
+    string. See `src.audit.log.verify_chain` for the algorithm.
+
+    Use cases:
+      • Post-incident: after a DB credential rotation, run this to
+        confirm nobody silently rewrote audit during the window.
+      • Routine: schedule a daily cron (`gh workflow run audit-verify`)
+        + Telegram alert on `ok=false`.
+
+    Requires `admin` role. The `limit` query param caps how many signed
+    rows the walk inspects (default 10k, covers ~100 days of normal
+    audit activity).
+    """
+    auth.require_role("admin")
+    from src.audit import verify_chain
+    result = verify_chain(limit=limit)
+    return {
+        "ok":            result.ok,
+        "rows_checked":  result.rows_checked,
+        "first_bad_id":  result.first_bad_id,
+        "reason":        result.reason,
+        "detail":        result.detail,
+    }
+
+
 @app.get("/internal/state", tags=["ops"])
 async def internal_state(auth: AuthContext = Depends(get_current_client)):
     """

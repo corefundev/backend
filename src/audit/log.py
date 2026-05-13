@@ -18,6 +18,8 @@ Design rules:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,6 +28,98 @@ from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ── Tamper-evidence (audit M migration 010) ────────────────────────
+#
+# Every signed row carries (prev_signature, signature) where
+#   signature = HMAC-SHA256(key, prev_signature || canonical_json(row))
+# This turns audit_log into a hash chain — any rewrite of a past row
+# breaks the chain at that point and downstream signatures.
+#
+# Key (AUDIT_LOG_HMAC_KEY, 32-byte hex) lives in Lockbox. Compromise
+# of Postgres credentials alone is no longer enough to silently
+# rewrite history — the attacker would also need the HMAC key, which
+# is held outside the DB.
+#
+# Failure modes:
+#   • Key not configured → fall back to unsigned insert (signature NULL).
+#     Chain doesn't extend; verify_chain skips legacy/unsigned rows.
+#   • DB error during sign → unsigned insert (same fallback).
+#   • Concurrent inserts → serialised by pg_advisory_xact_lock.
+
+_AUDIT_HMAC_LOCK_ID = 0x4155_4449_544C_4F47  # "AUDITLOG" hex; arbitrary
+_GENESIS_SIGNATURE  = "0" * 64               # chain head before any signed row
+
+
+def _audit_hmac_key() -> Optional[bytes]:
+    """Return the HMAC key as raw bytes, or None if not configured.
+
+    Caller is expected to fall back to unsigned insert when None.
+    """
+    hex_key = os.environ.get("AUDIT_LOG_HMAC_KEY")
+    if not hex_key:
+        return None
+    try:
+        key = bytes.fromhex(hex_key.strip())
+    except ValueError:
+        logger.warning(
+            "AUDIT_LOG_HMAC_KEY is not valid hex — signing disabled, "
+            "rows will be inserted unsigned until the key is fixed.",
+        )
+        return None
+    if len(key) < 16:
+        logger.warning(
+            "AUDIT_LOG_HMAC_KEY is too short (%d bytes); refusing to use. "
+            "Generate via `openssl rand -hex 32`.", len(key),
+        )
+        return None
+    return key
+
+
+def _canonical_row(*, ts_iso: str, client_id: Optional[str],
+                   actor_email: Optional[str], event_type: str,
+                   event_subtype: Optional[str], target_type: Optional[str],
+                   target_id: Optional[str], ip: Optional[str],
+                   user_agent: Optional[str], success: bool,
+                   metadata: dict) -> str:
+    """
+    Deterministic, sorted-key JSON representation used as the HMAC
+    message payload. Keep this stable across deploys — any change
+    breaks signatures of pre-existing rows.
+
+    `id` is intentionally excluded (it's a BIGSERIAL assigned by
+    Postgres, not security-relevant) and `ts` comes from the app
+    side (not DB default) so the value we sign is the value the
+    row will carry.
+    """
+    return json.dumps(
+        {
+            "ts":             ts_iso,
+            "client_id":      client_id,
+            "actor_email":    actor_email,
+            "event_type":     event_type,
+            "event_subtype":  event_subtype,
+            "target_type":    target_type,
+            "target_id":      target_id,
+            "ip":             ip,
+            "user_agent":     user_agent,
+            "success":        bool(success),
+            "metadata":       metadata or {},
+        },
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def _compute_signature(key: bytes, prev_sig: str, canonical: str) -> str:
+    """HMAC-SHA256(key, prev_sig || canonical) → hex digest."""
+    return hmac.new(
+        key,
+        (prev_sig + canonical).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 # ── Event-type taxonomy ────────────────────────────────────────────
@@ -158,24 +252,78 @@ def record_event(
     if conn is None:
         return
     try:
+        key = _audit_hmac_key()
+        ts_iso = _now_iso()
+        meta_obj = metadata or {}
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO audit_log
-                    (client_id, actor_email,
-                     event_type, event_subtype,
-                     target_type, target_id,
-                     ip, user_agent, success, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                """,
-                (
-                    client_id, actor_email,
-                    event_type, event_subtype,
-                    target_type, target_id,
-                    ip, user_agent, success,
-                    json.dumps(metadata or {}),
-                ),
-            )
+            if key is not None:
+                # Signed path: serialise inserts on an advisory xact lock so
+                # two concurrent record_event calls can't both read the same
+                # `prev_signature` and produce a forked chain. Lock auto-
+                # releases at COMMIT/ROLLBACK.
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_AUDIT_HMAC_LOCK_ID,))
+                cur.execute(
+                    """
+                    SELECT signature
+                      FROM audit_log
+                     WHERE signature IS NOT NULL
+                  ORDER BY id DESC
+                     LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                prev_sig = row[0] if row else _GENESIS_SIGNATURE
+                canonical = _canonical_row(
+                    ts_iso=ts_iso,
+                    client_id=client_id, actor_email=actor_email,
+                    event_type=event_type, event_subtype=event_subtype,
+                    target_type=target_type, target_id=target_id,
+                    ip=ip, user_agent=user_agent, success=success,
+                    metadata=meta_obj,
+                )
+                new_sig = _compute_signature(key, prev_sig, canonical)
+                cur.execute(
+                    """
+                    INSERT INTO audit_log
+                        (ts, client_id, actor_email,
+                         event_type, event_subtype,
+                         target_type, target_id,
+                         ip, user_agent, success, metadata,
+                         prev_signature, signature)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    """,
+                    (
+                        ts_iso, client_id, actor_email,
+                        event_type, event_subtype,
+                        target_type, target_id,
+                        ip, user_agent, success,
+                        json.dumps(meta_obj),
+                        prev_sig, new_sig,
+                    ),
+                )
+            else:
+                # Unsigned legacy path — used when the HMAC key isn't
+                # configured. Audit must never fail-closed on a logging
+                # issue, so we accept losing tamper-evidence for these
+                # rows. They'll appear as signature=NULL and the verifier
+                # skips them.
+                cur.execute(
+                    """
+                    INSERT INTO audit_log
+                        (client_id, actor_email,
+                         event_type, event_subtype,
+                         target_type, target_id,
+                         ip, user_agent, success, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        client_id, actor_email,
+                        event_type, event_subtype,
+                        target_type, target_id,
+                        ip, user_agent, success,
+                        json.dumps(meta_obj),
+                    ),
+                )
         conn.commit()
     except Exception:
         logger.exception(
@@ -268,6 +416,120 @@ def recent_failed_logins(
             conn.close()
         except Exception:
             pass
+
+
+@dataclass
+class ChainVerifyResult:
+    """Outcome of verify_chain — admin endpoint surfaces this verbatim."""
+    ok:              bool
+    rows_checked:    int
+    first_bad_id:    Optional[int]    # the row where chain breaks, if any
+    reason:          str              # "ok", "prev_signature_mismatch", "signature_mismatch", or error
+    detail:          Optional[str]    # human-readable diagnostic when not ok
+
+
+def verify_chain(*, limit: int = 10_000) -> ChainVerifyResult:
+    """
+    Walk the signed audit_log chain from oldest to newest, recomputing
+    each signature and verifying it matches what's stored. Returns
+    structured result so the admin endpoint can render it.
+
+    Read-only — never writes. Suitable for a cron schedule (e.g., daily)
+    plus an on-demand /internal/audit/verify hit from the support panel.
+
+    `limit` caps how many signed rows the walk will inspect. For chains
+    longer than ~10k rows, the caller should re-invoke with an offset
+    or use a paginated variant. For a typical SaaS workload (low audit
+    write rate, ~100s/day), 10k covers ~100 days of history.
+    """
+    key = _audit_hmac_key()
+    if key is None:
+        return ChainVerifyResult(
+            ok=False, rows_checked=0, first_bad_id=None,
+            reason="key_not_configured",
+            detail="AUDIT_LOG_HMAC_KEY not set — cannot verify chain",
+        )
+
+    conn = _connect_read()
+    if conn is None:
+        return ChainVerifyResult(
+            ok=False, rows_checked=0, first_bad_id=None,
+            reason="db_unavailable",
+            detail="audit_log read connection failed",
+        )
+
+    try:
+        import psycopg2.extras
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, ts, client_id, actor_email,
+                       event_type, event_subtype, target_type, target_id,
+                       host(ip) AS ip, user_agent, success, metadata,
+                       prev_signature, signature
+                  FROM audit_log
+                 WHERE signature IS NOT NULL
+              ORDER BY id ASC
+                 LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.exception("audit: verify_chain SELECT failed")
+        return ChainVerifyResult(
+            ok=False, rows_checked=0, first_bad_id=None,
+            reason="db_error", detail=str(e)[:200],
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    expected_prev = _GENESIS_SIGNATURE
+    checked = 0
+    for r in rows:
+        checked += 1
+        actual_prev = r.get("prev_signature") or _GENESIS_SIGNATURE
+        if actual_prev != expected_prev:
+            return ChainVerifyResult(
+                ok=False, rows_checked=checked, first_bad_id=int(r["id"]),
+                reason="prev_signature_mismatch",
+                detail=(
+                    f"row id={r['id']} prev_signature={actual_prev[:8]}… "
+                    f"but expected {expected_prev[:8]}… "
+                    f"(predecessor was rewritten or deleted)"
+                ),
+            )
+        ts_val = r["ts"]
+        ts_iso = ts_val.isoformat() if hasattr(ts_val, "isoformat") else str(ts_val or "")
+        canonical = _canonical_row(
+            ts_iso=ts_iso,
+            client_id=r.get("client_id"), actor_email=r.get("actor_email"),
+            event_type=r["event_type"], event_subtype=r.get("event_subtype"),
+            target_type=r.get("target_type"), target_id=r.get("target_id"),
+            ip=r.get("ip"), user_agent=r.get("user_agent"),
+            success=r.get("success", True),
+            metadata=r.get("metadata") or {},
+        )
+        expected_sig = _compute_signature(key, actual_prev, canonical)
+        if expected_sig != r["signature"]:
+            return ChainVerifyResult(
+                ok=False, rows_checked=checked, first_bad_id=int(r["id"]),
+                reason="signature_mismatch",
+                detail=(
+                    f"row id={r['id']} signature={r['signature'][:8]}… "
+                    f"recomputed={expected_sig[:8]}… "
+                    f"(row content was edited after insert)"
+                ),
+            )
+        expected_prev = r["signature"]
+
+    return ChainVerifyResult(
+        ok=True, rows_checked=checked, first_bad_id=None,
+        reason="ok", detail=None,
+    )
 
 
 def _row_to_event(row: dict) -> AuditEvent:

@@ -1,8 +1,10 @@
 from src.audit.log import (
     AuditEvent,
+    ChainVerifyResult,
     record_event,
     list_for_client,
     recent_failed_logins,
+    verify_chain,
     EVT_LOGIN,
     EVT_LOGOUT,
     EVT_OTP_SEND,
@@ -21,9 +23,11 @@ from src.audit.log import (
 
 __all__ = [
     "AuditEvent",
+    "ChainVerifyResult",
     "record_event",
     "list_for_client",
     "recent_failed_logins",
+    "verify_chain",
     "EVT_LOGIN",
     "EVT_LOGOUT",
     "EVT_OTP_SEND",
