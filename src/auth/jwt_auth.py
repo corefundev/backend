@@ -119,12 +119,22 @@ _api_key_h = APIKeyHeader(name="x-api-key", auto_error=False)
 # ── Token creation ────────────────────────────────────────────
 
 def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
-    """Create a signed JWT for the given client_id."""
+    """
+    Create a signed JWT for the given client_id.
+
+    Each token carries a unique `jti` claim (UUID4 hex) — together with
+    the Redis-backed revocation set (see `revoke_token` /
+    `is_token_revoked`) this lets us invalidate a token BEFORE its
+    natural exp, instead of waiting up to JWT_EXPIRE_MIN minutes.
+    Without `jti`, a compromised token has to be assumed valid until
+    expiry, which is unacceptable for high-trust workflows.
+    """
     try:
         import jwt as pyjwt
     except ImportError:
         raise RuntimeError("PyJWT not installed: pip install PyJWT")
 
+    import uuid
     now     = datetime.now(timezone.utc)
     payload = {
         "sub":       client_id,
@@ -132,18 +142,23 @@ def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
         "roles":     roles or ["forecast"],
         "iat":       now,
         "exp":       now + timedelta(minutes=JWT_EXPIRE_MIN),
+        "jti":       uuid.uuid4().hex,
     }
     _ensure_secrets_loaded()
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
-    """Decode and validate a JWT. Raises HTTPException on failure."""
+    """Decode and validate a JWT. Raises HTTPException on failure.
+
+    If the token has a `jti` claim AND that jti is in the revocation
+    set, raise 401 — the token was explicitly revoked (logout /
+    forced-invalidation) before its natural exp.
+    """
     try:
         import jwt as pyjwt
         _ensure_secrets_loaded()
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
     except Exception as e:
         # NEVER reflect the PyJWT exception back to the client — its
         # error messages leak algorithm hints, signature-mismatch
@@ -156,14 +171,113 @@ def decode_access_token(token: str) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    jti = payload.get("jti")
+    if jti and is_token_revoked(jti):
+        logger.info("rejected revoked token jti=%s sub=%s", jti, payload.get("sub"))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+
+# ── Revocation set (Redis-backed; in-memory fallback for dev) ─────────
+
+def _revocation_ttl_seconds() -> int:
+    """Revoked-jti entries auto-expire after the max JWT lifetime so
+    Redis doesn't grow unbounded. Anything older than this would have
+    expired naturally anyway."""
+    return JWT_EXPIRE_MIN * 60 + 60  # +60s slack for clock drift
+
+
+_inmem_revoked: set[str] = set()
+
+
+def _redis_client():
+    """Return a redis client or None if Redis isn't reachable.
+
+    Cached on first call; failure returns None and we fall back to the
+    in-memory set (single-process correctness only — fine for dev).
+    """
+    try:
+        import redis
+    except ImportError:
+        return None
+    url = os.environ.get("REDIS_URL") or "redis://redis:6379/0"
+    try:
+        client = redis.from_url(url, socket_connect_timeout=1, socket_timeout=1)
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+
+def revoke_token(jti: str) -> None:
+    """
+    Mark a token as revoked. Future decode_access_token calls with this
+    jti will be rejected. The entry auto-expires after the JWT's max
+    lifetime so Redis storage stays bounded.
+
+    Called by `/auth/logout` and any "force-invalidate this session"
+    flow. Idempotent — re-revoking is a no-op.
+    """
+    if not jti:
+        return
+    client = _redis_client()
+    if client is None:
+        _inmem_revoked.add(jti)
+        return
+    try:
+        client.setex(f"jwt:revoked:{jti}", _revocation_ttl_seconds(), "1")
+    except Exception as e:
+        logger.warning("Redis revoke_token failed for jti=%s: %s — using in-memory fallback", jti, e)
+        _inmem_revoked.add(jti)
+
+
+def is_token_revoked(jti: str) -> bool:
+    """True iff `jti` is in the revocation set."""
+    if not jti:
+        return False
+    if jti in _inmem_revoked:
+        return True
+    client = _redis_client()
+    if client is None:
+        return False
+    try:
+        return bool(client.exists(f"jwt:revoked:{jti}"))
+    except Exception as e:
+        # Fail-open: a Redis hiccup must NOT brick auth. The 1h JWT
+        # exp still bounds exposure to the original max-lifetime risk.
+        logger.warning("Redis is_token_revoked failed for jti=%s: %s — failing open", jti, e)
+        return False
+
+
+def reset_revocation_set_for_tests() -> None:
+    """Wipe both in-memory and Redis revocation entries. Test-only."""
+    _inmem_revoked.clear()
+    client = _redis_client()
+    if client is None:
+        return
+    try:
+        for key in client.scan_iter(match="jwt:revoked:*", count=500):
+            client.delete(key)
+    except Exception:
+        pass
+
 
 # ── Auth context ──────────────────────────────────────────────
 
 class AuthContext:
-    def __init__(self, client_id: str, roles: list[str], auth_method: str = "jwt"):
+    def __init__(self, client_id: str, roles: list[str], auth_method: str = "jwt",
+                 jti: str | None = None):
         self.client_id   = client_id
         self.roles       = roles
         self.auth_method = auth_method
+        # JWT-only: the unique token ID, used by /auth/logout to revoke
+        # the current session. None for api_key auth (api keys are
+        # revoked via key rotation, not per-token).
+        self.jti         = jti
 
     def require_role(self, role: str) -> None:
         if role not in self.roles:
@@ -201,6 +315,7 @@ async def get_current_client(
             client_id   = payload.get("client_id", payload.get("sub", "unknown")),
             roles       = payload.get("roles", ["forecast"]),
             auth_method = "jwt",
+            jti         = payload.get("jti"),
         )
 
     if api_key:

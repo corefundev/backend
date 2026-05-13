@@ -1071,6 +1071,31 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     )
 
 
+@app.post("/auth/logout", status_code=204, tags=["auth"])
+async def auth_logout(auth: AuthContext = Depends(get_current_client)):
+    """
+    Revoke the current JWT. Future requests bearing this token will
+    receive 401, even though the token's natural `exp` may still be
+    in the future.
+
+    Implementation: per-token revocation via the `jti` claim
+    (UUID4 hex, set by `create_access_token`). The revocation entry
+    is stored in Redis with TTL = JWT_EXPIRE_MIN + slack, so storage
+    is bounded — anything older than that would have expired
+    naturally anyway.
+
+    No state on the client: the frontend should delete its stored
+    token after a 204. If the user is on an API-key auth method
+    (no JWT, no jti) the call is a no-op — there's nothing to revoke
+    because API keys are revoked via /clients/{id}/api-key/rotate.
+    """
+    from src.auth.jwt_auth import revoke_token
+    jti = auth.jti
+    if jti:
+        revoke_token(jti)
+        logger.info("revoked jti=%s for client=%s", jti, auth.client_id)
+
+
 # ══════════════════════════════════════════════════════════════════
 # OAuth (Phase 8) — Google, Yandex
 #
