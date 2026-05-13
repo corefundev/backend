@@ -201,9 +201,17 @@ def recursive_forecast(
         # Ensure missing feature columns (e.g. holiday/weather not
         # carried over) default to whatever the last historical row
         # had — predict-side columns must exist or the model errors.
+        #
+        # NaN guard (audit M4, 2026-05-13): if the carry-source value
+        # is NaN itself (weather API failure on the most recent
+        # training day → NaN gets stored → carried forward), the model
+        # either crashes with "cannot convert NaN to float" or returns
+        # NaN. Fall back to 0.0 so prediction completes and downstream
+        # gets a valid (if mediocre) number rather than a corruption.
         for c in feature_cols:
             if c not in cur_df.columns:
-                cur_df[c] = last_row[c].iloc[0] if c in last_row.columns else 0.0
+                val = last_row[c].iloc[0] if c in last_row.columns else 0.0
+                cur_df[c] = val if pd.notna(val) else 0.0
 
         # Pass the FULL cur_df (with sku_col + carry cols), not just the
         # feature slice — EnsembleForecaster needs the sku column to

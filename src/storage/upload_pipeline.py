@@ -259,16 +259,40 @@ def run_process(
         )
 
     # Move output to the PROCESSED zone.
+    #
+    # Atomicity: if the parquet upload succeeds but the manifest upload
+    # then fails, PROCESSED ends up with an orphan parquet — sku_count
+    # never gets populated, the upload row stays in PROCESSING_FAIL
+    # forever, and the next reconciliation pass has nothing to match
+    # the orphan against. Audit M3 (2026-05-13).
+    #
+    # Fix: if manifest upload fails, roll back the parquet upload
+    # before marking the row failed. Both-or-neither — the only
+    # surviving state on disk is "no parquet AND no manifest".
     processed = z.get_zone_backend(z.Zone.PROCESSED)
     processed_key = z.processed_key(record.client_id, upload_id)
     manifest_key  = z.processed_manifest_key(record.client_id, upload_id)
+    parquet_uploaded = False
     try:
         processed.upload(result.output_path, processed_key)
+        parquet_uploaded = True
         processed.upload_bytes(
             json.dumps(result.manifest or {}, indent=2, default=str).encode("utf-8"),
             manifest_key,
         )
     except Exception as e:
+        if parquet_uploaded:
+            # Rollback: best-effort delete of the orphan parquet so we
+            # don't pollute PROCESSED. Failure here just means a stale
+            # parquet sits until manual cleanup — not corrupt state.
+            try:
+                processed.delete(processed_key)
+                logger.info("rolled back orphan parquet %s after manifest upload failed", processed_key)
+            except Exception as cleanup_err:
+                logger.warning(
+                    "orphan parquet %s could not be rolled back: %s",
+                    processed_key, cleanup_err,
+                )
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
             error_message=f"processed write failed: {e}",
