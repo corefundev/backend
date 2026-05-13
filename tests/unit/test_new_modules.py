@@ -141,8 +141,16 @@ class TestJWTAuth:
         assert payload["sub"] == "client_123"
         assert "forecast" in payload["roles"]
 
-    def test_expired_token_raises(self):
-        """Simulate an expired token by setting exp in the past."""
+    def test_expired_token_raises(self, caplog):
+        """
+        Simulate an expired token by setting exp in the past.
+
+        Per audit C2 (2026-05-13): the client-facing detail must NOT
+        include the PyJWT-specific reason ("Signature has expired", etc.) —
+        that's an info-leak. The server still logs the real cause at
+        WARNING level so ops can introspect.
+        """
+        import logging
         import jwt
         from src.auth.jwt_auth import _get_jwt_secret, JWT_ALGORITHM, decode_access_token
         from datetime import datetime, timedelta, timezone
@@ -154,10 +162,14 @@ class TestJWTAuth:
         }
         token = jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
         from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc:
-            decode_access_token(token)
+        with caplog.at_level(logging.WARNING, logger="src.auth.jwt_auth"):
+            with pytest.raises(HTTPException) as exc:
+                decode_access_token(token)
         assert exc.value.status_code == 401
-        assert "expired" in exc.value.detail.lower()
+        # Client sees ONLY the generic message — no PyJWT internals.
+        assert exc.value.detail == "Invalid token"
+        # But the server-side warning log still records the real cause.
+        assert any("expired" in r.message.lower() for r in caplog.records)
 
     def test_invalid_token_raises(self):
         from src.auth.jwt_auth import decode_access_token
