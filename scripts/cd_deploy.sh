@@ -118,6 +118,15 @@ echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 echo "  pulling images..."
 docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
 
+# Sandbox dir for process-worker. Lives outside the GHCR image (it's a
+# host bind-mount per docker-compose.minimal.yml / .prod.yml) so on a
+# fresh VPS the path doesn't exist, the mount fails silently, and
+# subsequent sandbox jobs can't spawn. Idempotent — `mkdir -p` is a
+# no-op if it already exists. Audit M8 (2026-05-13).
+echo "  ensuring /srv/backend/sandbox-staging exists (idempotent)"
+mkdir -p /srv/backend/sandbox-staging
+chmod 1777 /srv/backend/sandbox-staging
+
 echo "  running migrations..."
 docker compose $COMPOSE_ARGS run --rm migrate
 

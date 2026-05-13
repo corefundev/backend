@@ -85,26 +85,13 @@ groups:
           summary:     "Queue {{ $labels.queue }} has >100 pending jobs"
           description: "Consider scaling the matching worker."
 
-  - name: storage
-    rules:
-      - alert: MinioDiskFillingUp
-        expr:  minio_cluster_disk_free_bytes / minio_cluster_disk_total_bytes < 0.15
-        for:   30m
-        labels:
-          severity: warning
-          team:     forecasting
-        annotations:
-          summary:     "MinIO free space <15%"
-          description: "Free = {{ $value | humanizePercentage }}. Prune old uploads / backups."
-
-      - alert: MinioDiskCritical
-        expr:  minio_cluster_disk_free_bytes / minio_cluster_disk_total_bytes < 0.05
-        for:   10m
-        labels:
-          severity: critical
-          team:     forecasting
-        annotations:
-          summary:     "MinIO free space <5%"
+  # NOTE: MinIO alerts removed 2026-05-13 (audit M6). Production uses
+  # Beget S3 for backups + Beget S3 for the four data zones, not MinIO.
+  # The corresponding scrape job was already removed from prometheus.yml
+  # (see comment line 86); the rules here referenced metrics that never
+  # got produced. S3 bucket fullness is monitored via Beget's own panel
+  # + the BackupStale/BaseBackupStale alerts which fire if push to S3
+  # actually stops working — that's the failure mode we care about.
 
   - name: database
     rules:
@@ -302,6 +289,25 @@ groups:
         annotations:
           summary:     "Postgres weekly base backup stale or missing (>9d)"
           description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
+
+      # Pre-warmup at 8d — surfaces a missed run BEFORE we hit the 9d
+      # critical threshold. Audit M7 (2026-05-13) caught that without
+      # this, ops only learns of a problem after 9d, by which time PITR
+      # has lost 1-2 days of restore window (WAL retention is 14d, so
+      # every day past the last base shrinks the recoverable window).
+      # `warning` severity routes to the business-hours channel — not
+      # an after-hours page, just "fix it before it turns red".
+      - alert: BaseBackupWarning
+        expr: |
+          (time() - sku_base_backup_last_success_timestamp_seconds > 8 * 86400)
+            or absent(sku_base_backup_last_success_timestamp_seconds)
+        for:   1h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Postgres weekly base backup is overdue (>8d)"
+          description: "Backup hasn't been pushed in 8 days — one day short of the 9d critical threshold. Inspect backup container logs while there's still a healthy PITR window. Suppressed by BaseBackupStale once it fires (see alertmanager inhibit rules)."
 
   - name: container-lifecycle
     rules:

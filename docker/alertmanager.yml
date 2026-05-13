@@ -79,8 +79,21 @@ receivers:
           {{ end }}
 
 inhibit_rules:
-  # When the API is down, every dependent alert fires too. Suppress the
-  # noise so on-call sees the root cause first.
+  # When the API is down, dependent telemetry alerts fire too (replica
+  # lag, log shipper down, container metrics gap). Suppress just those
+  # — NOT business-critical signals like mail delivery failures or
+  # backup staleness, which are independent of API uptime and need to
+  # be visible during an incident. Audit M9 (2026-05-13) caught the
+  # original `target_matchers: [severity = "warning"]` was too broad.
   - source_matchers: [severity = "critical", alertname = "ApiDown"]
-    target_matchers: [severity = "warning"]
+    target_matchers:
+      - severity = "warning"
+      - alertname =~ "^(PgReplica.*|Promtail.*|Cadvisor.*|Node.*|ContainerRestartLoop)$"
+    equal: ["cluster"]
+
+  # BaseBackupStale (critical, 9d) supersedes BaseBackupWarning
+  # (warning, 8d) — same condition, escalated severity. Once the
+  # critical fires the warning is redundant noise.
+  - source_matchers: [alertname = "BaseBackupStale"]
+    target_matchers: [alertname = "BaseBackupWarning"]
     equal: ["cluster"]
