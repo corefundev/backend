@@ -121,11 +121,18 @@ docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
 # Sandbox dir for process-worker. Lives outside the GHCR image (it's a
 # host bind-mount per docker-compose.minimal.yml / .prod.yml) so on a
 # fresh VPS the path doesn't exist, the mount fails silently, and
-# subsequent sandbox jobs can't spawn. Idempotent — `mkdir -p` is a
-# no-op if it already exists. Audit M8 (2026-05-13).
-echo "  ensuring /srv/backend/sandbox-staging exists (idempotent)"
-mkdir -p /srv/backend/sandbox-staging
-chmod 1777 /srv/backend/sandbox-staging
+# subsequent sandbox jobs can't spawn. Audit M8 (2026-05-13).
+#
+# Tolerant version (fix 2026-05-14): if the dir already exists owned by
+# someone other than deploy@ (typical when it was created via `sudo
+# mkdir` during the original VPS bootstrap), then a plain `chmod`
+# from deploy@ fails with EPERM. Under `set -euxo pipefail` that
+# aborts the entire deploy — exactly what we saw on the M6-M9 / M1 /
+# H4 CDs. Both mkdir and chmod tolerated; the next sandbox-spawn
+# would surface a real issue if perms are wrong.
+echo "  ensuring /srv/backend/sandbox-staging exists (tolerant)"
+mkdir -p /srv/backend/sandbox-staging 2>/dev/null || true
+chmod 1777 /srv/backend/sandbox-staging 2>/dev/null || true
 
 echo "  running migrations..."
 docker compose $COMPOSE_ARGS run --rm migrate
