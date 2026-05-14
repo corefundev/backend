@@ -179,8 +179,10 @@ class SKUClusterer:
 
     @classmethod
     def load(cls, path: str | Path) -> "SKUClusterer":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md.
         with open(path, "rb") as f:
-            state = pickle.load(f)
+            state = pickle.load(f)  # nosec — see SECURITY.md
         obj = cls(n_clusters=state["n_clusters"])
         obj._kmeans         = state["kmeans"]
         obj._scaler         = state["scaler"]
@@ -284,8 +286,10 @@ class ClusteredForecaster:
 
     @classmethod
     def load(cls, path: str | Path, config: dict) -> "ClusteredForecaster":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md.
         with open(path, "rb") as f:
-            state = pickle.load(f)
+            state = pickle.load(f)  # nosec — see SECURITY.md
         obj = cls(config)
         obj.models       = state["models"]
         obj.clusterer    = state["clusterer"]

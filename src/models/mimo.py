@@ -196,8 +196,11 @@ class MIMOForecaster:
 
     @classmethod
     def load(cls, path: str | Path, config: dict) -> "MIMOForecaster":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md. Prod loads MUST go through
+        # src.pipeline.inference_utils.load_model_any_format.
         with open(path, "rb") as f:
-            state = pickle.load(f)
+            state = pickle.load(f)  # nosec — see SECURITY.md
         obj = cls(config)
         obj.models_       = state["models"]
         obj.q_models_     = state.get("q_models", {})

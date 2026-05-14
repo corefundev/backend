@@ -156,8 +156,10 @@ class IncrementalForecaster:
 
     @classmethod
     def load(cls, path: str | Path, config: dict) -> "IncrementalForecaster":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md.
         with open(path, "rb") as f:
-            state = pickle.load(f)
+            state = pickle.load(f)  # nosec — see SECURITY.md
         obj = cls(config)
         obj.model            = state["model"]
         obj.feature_cols     = state["feature_cols"]

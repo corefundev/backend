@@ -128,8 +128,10 @@ class SKUForecaster:
 
     @classmethod
     def load(cls, path: str | Path, config: dict) -> "SKUForecaster":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md.
         with open(path, "rb") as f:
-            state = pickle.load(f)
+            state = pickle.load(f)  # nosec — see SECURITY.md
         forecaster = cls(config)
         forecaster.model = state["model"]
         forecaster.feature_cols = state["feature_cols"]

@@ -251,6 +251,8 @@ class EnsembleForecaster:
 
     @classmethod
     def load(cls, path: str | Path, config: dict) -> "EnsembleForecaster":
+        # AUDIT R2-16: raw pickle.load — NOT for production paths.
+        # See src/models/SECURITY.md. Prod uses load_model_any_format.
         import pickle
         with open(path, "rb") as f:
-            return pickle.load(f)
+            return pickle.load(f)  # nosec — see SECURITY.md
