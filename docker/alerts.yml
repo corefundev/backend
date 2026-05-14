@@ -456,3 +456,90 @@ groups:
         annotations:
           summary:     "Host memory >90% used for 30m on {{ $labels.instance }}"
           description: "{{ $value | printf \"%.1f\" }}% used. Check for memory-leak suspects (mlflow has had crash loops; api / worker can spike during training)."
+
+  # Security-event alerts (audit R2-8, 2026-05-15).
+  #
+  # These fire on PATTERNS in audit_log + log volume that suggest
+  # active attacks — coordinated brute force, token-replay attempts,
+  # OAuth CSRF probes, worker silence after a deploy gone bad. All
+  # routed to the same Telegram severity-lanes as the rest.
+  - name: security-events
+    rules:
+      # Loki-side log-volume spike. Promtail labels each log line with
+      # `logger_name`; we count `src.auth.jwt_auth` lines at WARNING
+      # level over a 5-minute window. Baseline is near-zero — a sudden
+      # rate >1/sec for 3 min is almost certainly a token brute force.
+      - alert: JwtDecodeFailureSpike
+        expr: |
+          sum(rate({logger_name="src.auth.jwt_auth", level="warning"} |~ "JWT decode failed" [5m])) > 1
+        for:   3m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "JWT decode failures >1/sec for 3 min — possible token brute force"
+          description: "Source IPs likely concentrated; correlate in Loki: `{logger_name=\"src.auth.jwt_auth\"} |= \"JWT decode failed\"`. If a single client_id repeats, that account is being targeted."
+
+      # OTP brute-force: a single canonical email producing >10 failed
+      # OTP verify events over 10 min is well past the per-row attempt
+      # cap (5) AND the audit-log lockout window (15-min sliding). If
+      # this fires, the lockout is firing too — but the alert surfaces
+      # WHICH email is being targeted so ops can pro-actively block.
+      - alert: OtpBruteForce
+        expr: |
+          sum by (actor_email) (
+            increase(audit_log_event_failure_total{event_type=~"login|otp_verify"}[10m])
+          ) > 10
+        for:   2m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "OTP brute force against {{ $labels.actor_email }} (>10 fails / 10m)"
+          description: "The audit-log lockout will block this email automatically. Verify in audit_log: `SELECT * FROM audit_log WHERE actor_email='{{ $labels.actor_email }}' AND ts > NOW() - INTERVAL '10 minutes' ORDER BY ts DESC;`"
+
+      # OAuth state rejection — every callback whose state HMAC fails
+      # is a CSRF probe (or a stale browser-back). A handful per day
+      # is normal; sustained rate suggests a CSRF campaign.
+      - alert: OauthStateRejectedSpike
+        expr: |
+          sum(rate({logger_name="src.auth.oauth"} |~ "state (mismatch|invalid|expired)" [10m])) > 0.1
+        for:   5m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "OAuth state rejections >6/min sustained for 5 min"
+          description: "Each rejection means the callback URL was hit with a state token that didn't match a fresh nonce cookie. Stale browser-back fits 1-2/min; sustained higher = CSRF campaign or broken integration."
+
+      # RQ worker silence — no job has finished in the last 30 min on
+      # any queue. Either workers are deadlocked, the queue is empty
+      # AND no one is queuing (acceptable!), or something is wedged.
+      # `rq_jobs_finished_total` is a counter from rq-exporter.
+      - alert: RqWorkerSilent
+        expr: |
+          absent(rq_jobs_finished_total)
+            or sum(increase(rq_jobs_finished_total[30m])) < 1
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "No RQ jobs finished in 30 min"
+          description: "Either zero traffic (verify with rq_queue_jobs_count) or workers are stuck. Inspect: `docker logs docker-worker-1 --tail 50`. If workers are running but not consuming, restart them: `docker compose restart worker scan-worker process-worker`."
+
+      # Lockbox bootstrap failure — when the api/worker fails to
+      # source secrets at startup, it falls back to env vars and runs
+      # in degraded mode (audit-log tamper-evidence off, signed-pickle
+      # off, etc.). The startup_safety guard catches the WORST flags
+      # but soft-warnings still let degraded mode happen.
+      - alert: LockboxBootstrapFailed
+        expr: |
+          sum(rate({logger_name="vault.bootstrap", level="warning"} |~ "Vault bootstrap failed|Lockbox bootstrap failed" [10m])) > 0
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Lockbox/Vault bootstrap failures in the last 5m"
+          description: "Container failed to fetch secrets at startup; running on whatever env vars were present. Check container logs for the exact missing key. Rotate the SA key or fix the secret payload in YC Lockbox."
