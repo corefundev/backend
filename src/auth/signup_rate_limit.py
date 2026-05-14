@@ -188,6 +188,42 @@ def check_signup_attempt(ip: str) -> None:
         )
 
 
+def check_token_attempt(ip: str) -> None:
+    """
+    Per-IP rate-limit for /auth/token (api-key → JWT exchange).
+
+    bcrypt cost=12 already throttles single-host brute-force to ~4 req/sec,
+    but distributed attacks aren't bounded by that. Without an IP-level
+    cap, an attacker with botnet-scale fanout can iterate the api_key
+    keyspace across many origins.
+
+    Bucket: same /24 subnet logic as `check_signup_attempt`. Limit
+    defaults to 20/hour (override via env `TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET`).
+    Failing open on Redis outage matches signup behaviour — auth must
+    not fail-closed on a Redis hiccup.
+
+    Audit R2-4 (2026-05-15).
+    """
+    r = _redis()
+    if r is None:
+        return                  # fail open
+
+    bucket = subnet(ip)
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    key = f"rl:token:attempt:{bucket}:{hour}"
+
+    count = _incr_with_ttl(r, key, 3600)
+
+    limit = int(os.environ.get("TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET", "20"))
+    if count > limit:
+        ttl = int(r.ttl(key) or 3600)
+        raise RateLimited(
+            f"Too many token-exchange attempts from your network. "
+            f"Try again in {ttl // 60 + 1} minutes.",
+            retry_after_sec=max(1, ttl),
+        )
+
+
 def record_signup_success(ip: str) -> None:
     """
     Bump the per-day success counter. Call AFTER /auth/signup/verify

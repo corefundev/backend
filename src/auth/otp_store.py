@@ -97,6 +97,7 @@ class OtpCode:
 class OtpStore:
     def create(self, email: str, purpose: str, code_hash: str) -> OtpCode: ...
     def find_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
+    def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
     def mark_used(self, otp_id: int) -> None: ...
     def increment_attempts(self, otp_id: int) -> int: ...
     def purge_old(self, older_than_hours: int = 24) -> int: ...
@@ -157,6 +158,52 @@ class PostgresOtpStore(OtpStore):
             with conn.cursor() as cur:
                 cur.execute(sql, (otp_id,))
             conn.commit()
+
+    def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]:
+        """
+        Atomic find_active + mark_used.
+
+        The two-step `find_active(...) → verify_otp(...) → mark_used(...)`
+        flow has a race window: two parallel `/auth/login/verify` requests
+        can both SELECT the active OTP, both pass `verify_otp`, and both
+        proceed before either UPDATE marks it used. That bypasses single-
+        use semantics (audit R2-3, 2026-05-15).
+
+        This method picks the same row but with `FOR UPDATE SKIP LOCKED`,
+        and in the SAME transaction stamps `used_at = NOW()`. The first
+        request to arrive wins; concurrent callers either get `None`
+        (no eligible row) or block briefly then see `used_at IS NOT NULL`
+        on re-select.
+
+        Returns the OtpCode as it WAS at claim time (with original
+        `used_at=None`), so the caller can run the secret-equality check
+        against `code_hash`. The DB row is already marked used by then.
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE sku_otp_codes
+                       SET used_at = NOW()
+                     WHERE id = (
+                            SELECT id FROM sku_otp_codes
+                             WHERE LOWER(email) = LOWER(%s)
+                               AND purpose = %s
+                               AND used_at IS NULL
+                               AND expires_at > NOW()
+                          ORDER BY created_at DESC
+                             LIMIT 1
+                              FOR UPDATE SKIP LOCKED
+                           )
+                    RETURNING id, email, purpose, code_hash, attempts,
+                              expires_at, NULL::timestamptz AS used_at,
+                              created_at
+                    """,
+                    (email, purpose),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return None if row is None else self._row(dict(row))
 
     def increment_attempts(self, otp_id: int) -> int:
         sql = """
@@ -256,6 +303,31 @@ class LocalFileOtpStore(OtpStore):
             if r["id"] == otp_id:
                 r["used_at"] = datetime.now(timezone.utc).isoformat()
         self._save(data)
+
+    def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]:
+        """File-backed analogue of PostgresOtpStore.claim_active.
+
+        Atomicity is single-process here (the file load/save is mutexed
+        by GIL within a CPython process); cross-process safety is N/A
+        for the dev fallback. Same return-shape contract as the Postgres
+        version: returns the OTP row as it WAS pre-mark, or None.
+        """
+        data = self._load()
+        candidates = [
+            OtpCode(**r) for r in data["rows"]
+            if r["email"].lower() == email.lower()
+            and r["purpose"] == purpose
+        ]
+        candidates = [c for c in candidates if c.is_active()]
+        if not candidates:
+            return None
+        winner = max(candidates, key=lambda c: c.created_at)
+        # Mark used in-place before returning the snapshot.
+        for r in data["rows"]:
+            if r["id"] == winner.id:
+                r["used_at"] = datetime.now(timezone.utc).isoformat()
+        self._save(data)
+        return winner
 
     def increment_attempts(self, otp_id: int) -> int:
         data = self._load()

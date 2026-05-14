@@ -75,6 +75,39 @@ from src.plans.enforcement import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _email_hash(s: str) -> str:
+    """
+    Short SHA-256 prefix used in logs/audit instead of raw email addresses.
+
+    Logs are shared territory — Loki, Grafana, and any operator with read
+    access shouldn't be able to enumerate registered emails from log
+    aggregators. The hash lets ops still correlate "same address again"
+    across log lines without exposing the address itself. 12 hex chars is
+    ~48 bits — collision-resistant enough for log correlation and short
+    enough to read.
+    """
+    import hashlib as _hashlib
+    return _hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
+
+
+def _assert_json_depth(obj: object, max_depth: int = 10, _cur: int = 0) -> None:
+    """Recursive guard against deeply-nested JSON in user-supplied config.
+
+    Python's recursion limit is ~1000 by default; a malicious payload
+    nested 200 levels deep would trip Pydantic/JSON decoders well before
+    application code sees it. Used as a `@field_validator` in request
+    models that accept `dict` fields. Audit R2-6 (2026-05-15).
+    """
+    if _cur > max_depth:
+        raise ValueError(f"config nesting exceeds {max_depth} levels")
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _assert_json_depth(v, max_depth, _cur + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            _assert_json_depth(v, max_depth, _cur + 1)
+
 CONFIG_PATH = os.getenv("CONFIG_PATH", "configs/config.yaml")
 
 # ── Prometheus ────────────────────────────────────────────────────────────────
@@ -314,20 +347,30 @@ app.include_router(uploads_router)
 # ══════════════════════════════════════════════════════════════════
 
 class TokenRequest(BaseModel):
-    client_id: str
-    secret: str
+    # Length bounds: client_id matches our generated id format
+    # (≤64 chars); secret holds either ADMIN_API_KEY, an `sku_*` api-key
+    # (~40 chars), or the legacy API_KEY env value (≤256 chars).
+    # Audit R2-6 (2026-05-15) — DoS-via-huge-body protection.
+    client_id: str = Field(..., min_length=1, max_length=64)
+    secret:    str = Field(..., min_length=1, max_length=256)
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
 class RegisterClientRequest(BaseModel):
-    client_id: str
+    client_id: str = Field(..., min_length=1, max_length=64)
     config: dict = Field(default_factory=dict)
     # Business plan allows up to 365 days; plan-specific clipping enforced later.
     horizon: int = Field(14, ge=1, le=365)
-    notes: Optional[str] = None
-    plan: str = Field("free", description="free | start | business")
+    notes: Optional[str] = Field(None, max_length=2000)
+    plan: str = Field("free", min_length=1, max_length=16, description="free | start | business")
+
+    @field_validator("config")
+    @classmethod
+    def _config_depth_bounded(cls, v: dict) -> dict:
+        _assert_json_depth(v, max_depth=10)
+        return v
 
 class TrainRequest(BaseModel):
     data_path: str = Field(..., description="Local path or s3:// URI")
@@ -357,7 +400,9 @@ class TrainResponse(BaseModel):
     message: str
 
 class PredictRequest(BaseModel):
-    sku: str
+    # SKU must be a real catalog identifier — anything >256 chars is
+    # someone abusing the parser. Audit R2-6.
+    sku: str = Field(..., min_length=1, max_length=256)
     # Either inline history (legacy CLI / external API users) OR
     # an upload_id (UI flow — backend reads history from the processed
     # parquet for the given upload). Validated post-init below.
@@ -439,7 +484,7 @@ class BatchPredictRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════
 
 @app.post("/auth/token", response_model=TokenResponse, tags=["auth"])
-async def get_token(req: TokenRequest):
+async def get_token(req: TokenRequest, http_req: Request):
     """
     Exchange client_id + secret for JWT.
 
@@ -463,9 +508,27 @@ async def get_token(req: TokenRequest):
     Timing safety: the bcrypt verify in path 2 always runs (even when
     the client_id doesn't exist) so response time can't be used to
     enumerate valid client_ids.
+
+    Rate-limit (audit R2-4): per-/24 subnet, 20/hour by default. bcrypt
+    cost=12 throttles single-host brute-force to ~4 req/sec but a
+    distributed attack across botnets isn't bounded by that. The IP
+    cap forces an attacker to fan out across many subnets to brute-
+    force the api_key keyspace, raising operational cost meaningfully.
     """
     import hmac as _hmac
     from src.auth.api_keys import is_well_formed, verify_api_key
+    from src.auth.signup_rate_limit import (
+        check_token_attempt, client_ip as _client_ip, RateLimited,
+    )
+
+    try:
+        check_token_attempt(_client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
 
     api_key_legacy = os.environ.get("API_KEY") or ""
     admin_api_key  = os.environ.get("ADMIN_API_KEY") or ""
@@ -660,15 +723,8 @@ async def auth_signup(req: SignupRequest, http_req: Request):
 
     registry = get_registry()
 
-    # 6. Uniqueness — by canonical (catches +alias / dot tricks)
-    # Logs use a short hash of the email — leaking real addresses to
-    # log aggregators (and any operator who can read them) is an
-    # enumeration vector. Hash lets us still correlate "this same email
-    # tried again" without exposing the address.
-    import hashlib as _hashlib
-    def _email_hash(s: str) -> str:
-        return _hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
-
+    # 6. Uniqueness — by canonical (catches +alias / dot tricks).
+    # Logs use the module-level _email_hash helper instead of raw addresses.
     if registry.get_by_email(email) is not None:
         logger.info("signup: duplicate email_hash=%s", _email_hash(canonical))
         raise HTTPException(status_code=409, detail="Email or client_id already in use")
@@ -696,7 +752,10 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         # what they read; canonical is internal only.
         get_email_sender().send(to=email, subject=subject, body=body, html=html)
     except EmailDeliveryError as e:
-        logger.error("signup email failed for %s: %s", email, e)
+        # Hash the email — operator log access shouldn't be an enumeration
+        # vector. Same hash as the dedup log line above so ops can still
+        # correlate "this address signed up earlier" with "send failed".
+        logger.error("signup email failed for email_hash=%s: %s", _email_hash(email), e)
         raise HTTPException(status_code=503, detail="Could not send email; try again")
 
     return SignupAcceptedResponse(email=email, expires_in_minutes=ttl_min)
@@ -927,7 +986,8 @@ async def auth_login_email(req: LoginEmailRequest, http_req: Request):
         try:
             get_email_sender().send(to=email, subject=subject, body=body, html=html)
         except EmailDeliveryError as e:
-            logger.error("login email failed for %s: %s", email, e)
+            # Hash email — same enumeration-defence pattern as signup.
+            logger.error("login email failed for email_hash=%s: %s", _email_hash(email), e)
             # Still return 202 — don't leak that the user exists by
             # returning 503 selectively. Better the user sees "email
             # never arrived" once than enumeration becomes possible.
@@ -1014,15 +1074,25 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     from src.auth.otp_store import get_otp_store, otp_max_attempts, PURPOSE_LOGIN
 
     store  = get_otp_store()
-    # OTP rows for this purpose were stored under canonical email by /auth/login
-    record = store.find_active(canonical, PURPOSE_LOGIN)
+    # OTP rows for this purpose were stored under canonical email by /auth/login.
+    #
+    # `claim_active` atomically picks the latest active OTP and stamps
+    # `used_at = NOW()` in one transaction (SELECT ... FOR UPDATE SKIP
+    # LOCKED on Postgres). This closes the audit R2-3 race where two
+    # parallel /auth/login/verify requests could both pass with the
+    # same code before either had marked it used. After this call the
+    # row is single-use regardless of how the verify_otp / lockout
+    # branches resolve.
+    record = store.claim_active(canonical, PURPOSE_LOGIN)
     is_match = verify_otp(req.code, record.code_hash if record else None)
 
     if not is_match:
         if record is not None:
-            new_attempts = store.increment_attempts(record.id)
-            if new_attempts >= otp_max_attempts():
-                store.mark_used(record.id)
+            # The row is already used (claim_active stamped it).
+            # increment_attempts is a no-op in terms of replay safety
+            # but keeps the audit counter accurate; cap is enforced by
+            # the existing audit-log lockout (recent_failed_logins).
+            store.increment_attempts(record.id)
         record_event(
             event_type=EVT_LOGIN, event_subtype="failure",
             actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
@@ -1045,7 +1115,8 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     if client is None or client.email_verified_at is None:
         # The email had a valid OTP but the user is gone (deleted between
         # /auth/login and /auth/login/verify). Don't leak this — keep the
-        # response indistinguishable from a wrong-code path.
+        # response indistinguishable from a wrong-code path. Row is
+        # already used by claim_active; no extra cleanup needed.
         record_event(
             event_type=EVT_LOGIN, event_subtype="failure",
             actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
@@ -1053,8 +1124,7 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
             metadata={"reason": "client_gone"},
         )
         raise HTTPException(status_code=401, detail="Invalid or expired code")
-
-    store.mark_used(record.id)
+    # Row already marked used by claim_active — no extra mark_used here.
 
     # Email-login → forecast role. Admin role is reserved for the
     # ADMIN_API_KEY path; you don't get to be admin via email-OTP.
@@ -2338,10 +2408,16 @@ class ClientConfigRequest(BaseModel):
     """Full replacement of client config override."""
     config: dict = Field(..., description="Only the keys that differ from system defaults")
 
+    @field_validator("config")
+    @classmethod
+    def _depth_bounded(cls, v: dict) -> dict:
+        _assert_json_depth(v, max_depth=10)
+        return v
+
 class ClientConfigPatchRequest(BaseModel):
     """Patch a single key using dot notation."""
-    key:   str = Field(..., example="model.horizon")
-    value: object = Field(..., example=28)
+    key:   str = Field(..., min_length=1, max_length=200, examples=["model.horizon"])
+    value: object = Field(..., examples=[28])
 
 class ClientConfigResponse(BaseModel):
     client_id: str

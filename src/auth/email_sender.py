@@ -77,7 +77,23 @@ class ConsoleEmailSender:
     Logs the email to stdout/loggers. Useful for tests and local dev
     where you want to see OTPs in `docker compose logs api` without
     leaving the laptop.
+
+    Defense in depth: refuses to instantiate when APP_ENV=production.
+    `src/api/startup_safety.py` already hard-fails on
+    `EMAIL_PROVIDER=console` at lifespan startup, but that check can
+    be bypassed by direct instantiation (e.g., a test fixture mock
+    that forgets to also set APP_ENV). This class-level guard catches
+    that path too. Audit R2-2 (2026-05-15).
     """
+
+    def __init__(self) -> None:
+        if (os.environ.get("APP_ENV") or "").strip().lower() == "production":
+            raise RuntimeError(
+                "ConsoleEmailSender refuses to start in production: "
+                "OTP codes would be printed to logs. "
+                "Set EMAIL_PROVIDER=smtp or =resend in Lockbox."
+            )
+
     def send(self, *, to: str, subject: str, body: str,
              html: str | None = None) -> None:
         logger.warning(
