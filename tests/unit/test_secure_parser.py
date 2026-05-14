@@ -62,14 +62,30 @@ def test_rejects_missing_columns(tmp_path):
     assert rc == 3
 
 
-def test_rejects_formula_injection(tmp_path):
+def test_sanitizes_formula_injection(tmp_path):
+    """Audit R2-22 (2026-05-15) changed the contract from "reject" to
+    "sanitize-by-prefix". The malicious cell value (`=cmd|" /c calc"!A1`)
+    is no longer rejected — instead it gets a leading `'` prepended so
+    Excel/LibreOffice render it as literal text, not a formula. From
+    the pipeline's perspective the row is benign data; the test just
+    asserts (1) the parser succeeds (rc=0) and (2) the output Parquet
+    contains the sanitised value, not the original."""
+    import pandas as pd
+
     src = tmp_path / "in.csv"
     src.write_text(
         "date,sku,sales\n"
         '2024-01-01,=cmd|" /c calc"!A1,10\n'
     )
-    rc, _, _ = _run(src, tmp_path)
-    assert rc == 3
+    rc, out_path, _ = _run(src, tmp_path)
+    assert rc == 0, "formula injection should be sanitized, not rejected"
+
+    df = pd.read_parquet(out_path)
+    # SKU column starts with apostrophe — Excel-safe.
+    sku_value = df["sku"].iloc[0]
+    assert sku_value.startswith("'="), (
+        f"expected leading-apostrophe sanitisation, got {sku_value!r}"
+    )
 
 
 def test_rejects_negative_sales(tmp_path):
