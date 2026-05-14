@@ -118,6 +118,15 @@ _api_key_h = APIKeyHeader(name="x-api-key", auto_error=False)
 
 # ── Token creation ────────────────────────────────────────────
 
+# Issuer / audience claims (audit R2-17, 2026-05-15).
+# `iss` identifies who signed the token; `aud` identifies who's meant
+# to consume it. Both pinned here so that a JWT issued in one
+# environment can't be replayed against another even if both share the
+# same secret (e.g., compromised dev → prod). Decode verifies both.
+JWT_ISSUER   = os.environ.get("JWT_ISSUER",   "sku-forecasting-api")
+JWT_AUDIENCE = os.environ.get("JWT_AUDIENCE", "sku-forecasting-api")
+
+
 def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
     """
     Create a signed JWT for the given client_id.
@@ -128,6 +137,10 @@ def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
     natural exp, instead of waiting up to JWT_EXPIRE_MIN minutes.
     Without `jti`, a compromised token has to be assumed valid until
     expiry, which is unacceptable for high-trust workflows.
+
+    Also carries `iss` + `aud` (audit R2-17) so the decoder rejects
+    tokens minted for a different service or environment, even if
+    they were signed with the same JWT_SECRET_KEY.
     """
     try:
         import jwt as pyjwt
@@ -143,6 +156,8 @@ def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
         "iat":       now,
         "exp":       now + timedelta(minutes=JWT_EXPIRE_MIN),
         "jti":       uuid.uuid4().hex,
+        "iss":       JWT_ISSUER,
+        "aud":       JWT_AUDIENCE,
     }
     _ensure_secrets_loaded()
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -158,7 +173,25 @@ def decode_access_token(token: str) -> dict:
     try:
         import jwt as pyjwt
         _ensure_secrets_loaded()
-        payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # Backward-compat aud/iss handling (audit R2-17). Tokens issued
+        # before this commit have no `aud`/`iss`; we accept them. New
+        # tokens (Phase 6+) carry both; we verify the values. The
+        # `unverified` peek is safe — the next decode does the full
+        # signature check; we just look at which claims exist.
+        unverified = pyjwt.decode(
+            token, options={"verify_signature": False, "verify_exp": False},
+        )
+        has_aud = "aud" in unverified
+        has_iss = "iss" in unverified
+        payload = pyjwt.decode(
+            token, JWT_SECRET, algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE if has_aud else None,
+            issuer=JWT_ISSUER if has_iss else None,
+            options={
+                "verify_aud": has_aud,
+                "verify_iss": has_iss,
+            },
+        )
     except Exception as e:
         # NEVER reflect the PyJWT exception back to the client — its
         # error messages leak algorithm hints, signature-mismatch

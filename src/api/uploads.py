@@ -12,8 +12,11 @@ The client polls `/uploads/{upload_id}` until status is `processed` (or a
 terminal error state), then calls the training endpoint with the
 processed-zone path.
 
-Training can optionally be triggered automatically — see the `auto_train`
-field in the upload request.
+Auto-training is NOT supported — the `auto_train` form parameter was
+removed in audit R2-27 (2026-05-15) because it was parsed but never
+wired, silently misleading clients who set it to true. The standard
+flow is: POST upload → poll until status=processed → POST
+/clients/{id}/train.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ import logging
 import os
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
@@ -83,7 +86,6 @@ def _max_bytes() -> int:
 async def upload_file(
     client_id: str,
     file: UploadFile = File(..., description="CSV or XLSX (≤ MAX_UPLOAD_BYTES)"),
-    auto_train: bool = Form(False),   # reserved for future — wired in phase 3
     auth: AuthContext = Depends(get_current_client),
 ):
     require_client_access(client_id, auth)

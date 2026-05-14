@@ -47,15 +47,15 @@ def fresh_revocation(monkeypatch):
 def test_created_token_has_jti_claim(fresh_revocation):
     from src.auth.jwt_auth import create_access_token, _get_jwt_secret, JWT_ALGORITHM
     token = create_access_token("client_a", roles=["forecast"])
-    decoded = pyjwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    decoded = pyjwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})
     assert "jti" in decoded
     assert len(decoded["jti"]) == 32  # UUID4 hex
 
 
 def test_two_tokens_have_distinct_jti(fresh_revocation):
     from src.auth.jwt_auth import create_access_token, _get_jwt_secret, JWT_ALGORITHM
-    t1 = pyjwt.decode(create_access_token("a"), _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
-    t2 = pyjwt.decode(create_access_token("a"), _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    t1 = pyjwt.decode(create_access_token("a"), _get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})
+    t2 = pyjwt.decode(create_access_token("a"), _get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})
     assert t1["jti"] != t2["jti"]
 
 
@@ -75,7 +75,7 @@ def test_revoked_token_is_rejected(fresh_revocation):
         _get_jwt_secret, JWT_ALGORITHM,
     )
     token = create_access_token("client_a")
-    jti = pyjwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])["jti"]
+    jti = pyjwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})["jti"]
     revoke_token(jti)
     with pytest.raises(HTTPException) as exc:
         decode_access_token(token)
@@ -100,7 +100,7 @@ def test_revoking_one_token_doesnt_affect_another(fresh_revocation):
     )
     t1 = create_access_token("a")
     t2 = create_access_token("a")
-    jti1 = pyjwt.decode(t1, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])["jti"]
+    jti1 = pyjwt.decode(t1, _get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})["jti"]
     revoke_token(jti1)
     # t1 is revoked → 401
     from fastapi import HTTPException

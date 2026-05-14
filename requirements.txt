@@ -67,7 +67,9 @@ prometheus-client==0.20.0
 evidently==0.5.0           # 0.5.x: стабильный API, совместим с otel>=1.25
 
 # ── База данных ───────────────────────────────────────
-psycopg2-binary==2.9.9
+# psycopg2-binary 2.9.9 → 2.9.11 (audit R2-29, 2026-05-15) —
+# cumulative bug fixes; no semver-breaking changes documented.
+psycopg2-binary==2.9.11
 asyncpg==0.29.0
 
 # ── Конфигурация ─────────────────────────────────────

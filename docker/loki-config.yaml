@@ -30,7 +30,11 @@ schema_config:
         period: 24h
 
 limits_config:
-  retention_period: 720h           # 30 days
+  # Audit R2-21 (2026-05-15): 30d → 90d. Aligns post-incident-forensics
+  # window with typical enterprise compliance requirements. audit_log
+  # table has its OWN 2-year retention via migration 012 — this is
+  # for app/access logs only.
+  retention_period: 2160h          # 90 days
   reject_old_samples: true
   reject_old_samples_max_age: 168h # 7 days
   ingestion_rate_mb: 10

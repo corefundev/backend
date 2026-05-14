@@ -68,10 +68,18 @@ def _audit_hmac_key() -> Optional[bytes]:
             "rows will be inserted unsigned until the key is fixed.",
         )
         return None
-    if len(key) < 16:
+    # Min length tightened to 32 bytes (audit R2-18, 2026-05-15).
+    # SHA-256 spec recommends key length ≥ block size = 64 bytes for
+    # full security margin; we draw the line at 32 bytes (256 bits)
+    # which is the digest output size and meets RFC 2104 §3 floor.
+    # 16 bytes was the prior fallback but offered only 128-bit margin —
+    # acceptable for non-security HMAC but borderline for tamper
+    # evidence under a compromised-DB threat model.
+    if len(key) < 32:
         logger.warning(
             "AUDIT_LOG_HMAC_KEY is too short (%d bytes); refusing to use. "
-            "Generate via `openssl rand -hex 32`.", len(key),
+            "Generate via `openssl rand -hex 32` (yields 32 raw bytes).",
+            len(key),
         )
         return None
     return key

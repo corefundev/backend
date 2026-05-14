@@ -83,6 +83,34 @@ def _looks_like_formula(value: Any) -> bool:
 
 # ── File readers ──────────────────────────────────────────────────────────────
 
+_FORMULA_PREFIXES = ("=", "+", "@", "-")
+
+
+def _strip_formula_prefix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    CSV/XLSX formula-injection defence (audit R2-22, 2026-05-15).
+
+    A malicious cell value like `=cmd|'/C calc'!A0` is benign as a
+    string in our DataFrame, but the moment someone opens our exported
+    output in Excel / LibreOffice / Numbers, the leading `=` makes it
+    a formula → code execution on the recipient's machine. Same with
+    `+`, `@`, and `-` (legacy Lotus convention).
+
+    We prepend a single `'` (apostrophe) to any string cell that starts
+    with one of these prefixes — Excel treats the apostrophe as a
+    text-quote and renders the rest as literal text without
+    evaluating. The data we use server-side (numerics, dates) is
+    unaffected because they come from numeric/date columns.
+    """
+    text_cols = df.select_dtypes(include="object").columns
+    for c in text_cols:
+        # `.str.startswith` with a tuple matches any prefix.
+        mask = df[c].astype(str).str.startswith(_FORMULA_PREFIXES, na=False)
+        if mask.any():
+            df.loc[mask, c] = "'" + df.loc[mask, c].astype(str)
+    return df
+
+
 def _read_csv(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
     # chunksize = None would load everything — we check size via `nrows` first.
     with path.open("rb") as f:
@@ -100,7 +128,7 @@ def _read_csv(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
     df = pd.read_csv(path, nrows=max_rows + 1, dtype=str, keep_default_na=False)
     if len(df) > max_rows:
         raise ValueError(f"too many rows: > {max_rows}")
-    return df
+    return _strip_formula_prefix(df)
 
 
 def _read_excel(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
@@ -120,7 +148,7 @@ def _read_excel(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
         raise ValueError(f"too many columns: {len(df.columns)} > {max_columns}")
     if len(df) > max_rows:
         raise ValueError(f"too many rows: > {max_rows}")
-    return df
+    return _strip_formula_prefix(df)
 
 
 # ── Schema validation ─────────────────────────────────────────────────────────

@@ -318,8 +318,19 @@ class S3StorageBackend(StorageBackend):
             self._s3.head_object(Bucket=self.bucket, Key=self._key(remote_key))
             return True
         except Exception as e:
-            if "404" in str(e) or "NoSuchKey" in str(e):
-                return False
+            # Audit R2-26 (2026-05-15): proper ClientError-code matching
+            # instead of brittle `"404" in str(e)`. The string form is
+            # not stable across boto3 versions and S3-compatible
+            # backends (Beget vs Minio vs AWS); the .response['Error']
+            # ['Code'] field is the contract.
+            try:
+                from botocore.exceptions import ClientError
+                if isinstance(e, ClientError):
+                    code = e.response.get("Error", {}).get("Code", "")
+                    if code in ("404", "NoSuchKey", "NoSuchBucket"):
+                        return False
+            except ImportError:
+                pass  # botocore not available — fall through to raise
             raise
 
     def list_keys(self, prefix: str) -> list[str]:

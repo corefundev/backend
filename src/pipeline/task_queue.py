@@ -124,8 +124,11 @@ def _training_job(
                         run_id, status=FAILED, ended_at=_now(),
                         error=f"dataset merge failed: {e}",
                     )
-                except Exception:
-                    pass
+                except Exception as upd_err:  # noqa: BLE001 — audit R2-25
+                    logger.warning(
+                        "training_runs FAILED update failed for run_id=%s: %s",
+                        run_id, upd_err,
+                    )
             raise
 
     from src.pipeline.train import run_training_pipeline
@@ -147,13 +150,13 @@ def _training_job(
         try:
             from src.notifications.training_email import notify_training_failed as _email_fail
             _email_fail(client_id=client_id, error=str(e))
-        except Exception:    # noqa: BLE001
-            pass
+        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+            logger.info("notify_training_failed (email) skipped: %s", notif_err)
         try:
             from src.notifications.telegram import notify_training_failed as _tg_fail
             _tg_fail(client_id=client_id, error=str(e))
-        except Exception:    # noqa: BLE001
-            pass
+        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+            logger.info("notify_training_failed (telegram) skipped: %s", notif_err)
         raise
 
     # Persist final metrics so the History tab can show them after
@@ -200,13 +203,13 @@ def _training_job(
     try:
         from src.notifications.training_email import notify_training_finished as _email
         _email(**notif_args)
-    except Exception:    # noqa: BLE001
-        pass
+    except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+        logger.info("notify_training_finished (email) skipped: %s", notif_err)
     try:
         from src.notifications.telegram import notify_training_finished as _tg
         _tg(**notif_args)
-    except Exception:    # noqa: BLE001
-        pass
+    except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+        logger.info("notify_training_finished (telegram) skipped: %s", notif_err)
 
     # ── Auto-batch-forecast for the whole catalogue ──────────────
     # The user shouldn't have to pick an SKU + horizon by hand after

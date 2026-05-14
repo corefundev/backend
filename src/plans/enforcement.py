@@ -15,10 +15,13 @@ Public surface:
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 from src.clients.registry import ClientRecord
 from src.plans.plans import PlanSpec, get_plan_spec
+
+logger = logging.getLogger(__name__)
 
 
 # ── Domain exceptions ────────────────────────────────────────────────────────
@@ -80,6 +83,10 @@ def assert_config_keys_allowed(record: ClientRecord, override: dict) -> None:
 
     if whitelist == frozenset():
         if override:
+            logger.warning(
+                "plan denied: %s rejected config override (no keys allowed) — client=%s",
+                spec.id.value, record.client_id,
+            )
             raise PlanDenied(
                 f"Plan '{spec.id.value}' ({spec.display_name}) "
                 f"does not allow config overrides. Upgrade to a higher tier."
@@ -88,6 +95,10 @@ def assert_config_keys_allowed(record: ClientRecord, override: dict) -> None:
 
     bad = [k for k in _iter_dotted_keys(override) if k not in whitelist]
     if bad:
+        logger.warning(
+            "plan denied: %s rejected keys %s — client=%s",
+            spec.id.value, sorted(bad), record.client_id,
+        )
         raise PlanDenied(
             f"Plan '{spec.id.value}' ({spec.display_name}) does not allow "
             f"overriding: {sorted(bad)}. Allowed keys: {sorted(whitelist)}."
@@ -97,10 +108,16 @@ def assert_config_keys_allowed(record: ClientRecord, override: dict) -> None:
 # ── SKU cap ─────────────────────────────────────────────────────────────────
 
 def assert_sku_count_within_limit(record: ClientRecord, sku_count: int) -> None:
+    """Audit R2-24: also logs at WARNING so ops can spot plan-cap
+    saturation patterns in Loki without sifting through audit_log."""
     spec = get_plan_spec(record.plan)
     if spec.max_skus is None:
         return
     if sku_count > spec.max_skus:
+        logger.warning(
+            "plan limit: %s SKU cap exceeded (%d > %d) — client=%s",
+            spec.id.value, sku_count, spec.max_skus, record.client_id,
+        )
         raise PlanLimitExceeded(
             f"Plan '{spec.id.value}' allows up to {spec.max_skus} SKUs; "
             f"dataset contains {sku_count}.",

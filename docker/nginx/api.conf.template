@@ -51,8 +51,12 @@ server {
     # Modern profile — drops everything below TLS 1.2. Matches Mozilla's
     # "intermediate" recommendation as of 2026-01.
     ssl_protocols             TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-    ssl_ciphers               'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+    # Audit R2-23 (2026-05-15): server picks cipher in TLS 1.2
+    # negotiations. No effect on TLS 1.3 (protocol decides). Forces
+    # the order we list — AES-256-GCM / CHACHA20-POLY1305 ahead of
+    # AES-128 variants.
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers               'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256';
 
     ssl_session_cache        shared:API_TLS:10m;
     ssl_session_timeout      1d;

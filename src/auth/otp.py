@@ -50,10 +50,12 @@ def hash_otp(code: str) -> str:
     import bcrypt
     if not code or not code.isdigit() or len(code) != OTP_LENGTH:
         raise ValueError(f"OTP must be {OTP_LENGTH} digits")
-    # cost=10 — slightly cheaper than api_key (12). OTP brute is bounded
-    # by the attempt-cap, so we don't need to make /verify slower than
-    # ~50ms on modern CPUs.
-    return bcrypt.hashpw(code.encode("ascii"), bcrypt.gensalt(rounds=10)).decode("ascii")
+    # cost=12 — matches BCRYPT_ROUNDS used for api_keys (audit R2-30,
+    # 2026-05-15). Was 10; bumped for consistency. OTP brute is also
+    # bounded by attempt-cap + audit-log lockout, so the 5× factor in
+    # /verify wall-time (50ms → 250ms) is acceptable given the
+    # signup/login OTP flow only runs once per session.
+    return bcrypt.hashpw(code.encode("ascii"), bcrypt.gensalt(rounds=12)).decode("ascii")
 
 
 def verify_otp(code: str, hashed: str | None) -> bool:
@@ -91,6 +93,6 @@ def _dummy_hash() -> str:
     if _dummy_hash_cached is None:
         import bcrypt
         _dummy_hash_cached = bcrypt.hashpw(
-            secrets.token_bytes(16), bcrypt.gensalt(rounds=10),
+            secrets.token_bytes(16), bcrypt.gensalt(rounds=12),  # audit R2-30
         ).decode("ascii")
     return _dummy_hash_cached
