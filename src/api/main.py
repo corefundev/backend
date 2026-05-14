@@ -76,37 +76,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _email_hash(s: str) -> str:
-    """
-    Short SHA-256 prefix used in logs/audit instead of raw email addresses.
-
-    Logs are shared territory — Loki, Grafana, and any operator with read
-    access shouldn't be able to enumerate registered emails from log
-    aggregators. The hash lets ops still correlate "same address again"
-    across log lines without exposing the address itself. 12 hex chars is
-    ~48 bits — collision-resistant enough for log correlation and short
-    enough to read.
-    """
-    import hashlib as _hashlib
-    return _hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
-
-
-def _assert_json_depth(obj: object, max_depth: int = 10, _cur: int = 0) -> None:
-    """Recursive guard against deeply-nested JSON in user-supplied config.
-
-    Python's recursion limit is ~1000 by default; a malicious payload
-    nested 200 levels deep would trip Pydantic/JSON decoders well before
-    application code sees it. Used as a `@field_validator` in request
-    models that accept `dict` fields. Audit R2-6 (2026-05-15).
-    """
-    if _cur > max_depth:
-        raise ValueError(f"config nesting exceeds {max_depth} levels")
-    if isinstance(obj, dict):
-        for v in obj.values():
-            _assert_json_depth(v, max_depth, _cur + 1)
-    elif isinstance(obj, list):
-        for v in obj:
-            _assert_json_depth(v, max_depth, _cur + 1)
+# Helpers extracted to src/api/_helpers.py so unit tests can import
+# them without triggering the FastAPI app construction (which would
+# re-register Prometheus counters and explode on second import). Keep
+# pure-stdlib utilities there, not in this module.
+from src.api._helpers import (
+    email_hash as _email_hash,
+    assert_json_depth as _assert_json_depth,
+)
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "configs/config.yaml")
 
