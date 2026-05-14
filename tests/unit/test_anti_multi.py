@@ -59,6 +59,30 @@ def test_canonical_idempotent():
     assert once == twice == "vasya@gmail.com"
 
 
+# ── DB-schema invariant guard (audit M2) ─────────────────────────────────
+#
+# Migration 011 adds a CHECK constraint that refuses any
+# `sku_clients.email_canonical` value where `lower(x) != x`. The
+# Python helper must always produce lowercase output so the application
+# never trips the constraint — otherwise an unrelated bug becomes a
+# 500 on signup.
+
+@pytest.mark.parametrize("raw", [
+    "VASYA@ACME.RU",
+    "Mixed.Case+x@Gmail.COM",
+    "USER@yandex.com",
+    "Test@ProtonMail.com",
+    "  Whitespace@Outlook.com  ",
+])
+def test_canonical_output_is_always_lowercase(raw):
+    out = canonical_email(raw)
+    assert out == out.lower(), (
+        f"canonical_email({raw!r}) returned {out!r} which has uppercase "
+        "letters — this would violate the DB CHECK constraint "
+        "sku_clients_email_canonical_lowercase (migration 011)."
+    )
+
+
 # ── Disposable domains ───────────────────────────────────────────────────
 
 def test_disposable_known_temp_services(tmp_path, monkeypatch):
