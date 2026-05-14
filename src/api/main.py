@@ -120,11 +120,24 @@ FALLBACK_COUNT  = Counter("fallback_model_used_total",  "Fallback model uses", [
 # the same client used to race, triggering a double model load and, worse,
 # a half-initialized service being cached. Lock-per-client so different
 # clients don't serialize. We also enforce a soft timeout on fallback load.
+#
+# Bounded LRU (audit R2-7, 2026-05-15): both `_services` and
+# `_per_client_locks` previously had no eviction policy — every client
+# that ever hit /predict left a permanent entry. At 10k unique clients
+# that's 10k cached models in memory + 10k Lock objects. Now both are
+# OrderedDicts capped at MODEL_CACHE_MAX (default 256, env-tunable);
+# accessing a key moves it to the front and a write past the cap evicts
+# the LRU entry. Locks are evicted in tandem with services so a key
+# that gets re-loaded picks up a fresh lock — safe because cached=None
+# at that point so no concurrent reader is holding stale state.
 import threading as _threading
+from collections import OrderedDict
 
-_services: dict[str, ForecastingService] = {}
+_MODEL_CACHE_MAX = max(1, int(os.environ.get("MODEL_CACHE_MAX", "256")))
+
+_services: "OrderedDict[str, ForecastingService]" = OrderedDict()
 _services_lock = _threading.Lock()
-_per_client_locks: dict[str, _threading.Lock] = {}
+_per_client_locks: "OrderedDict[str, _threading.Lock]" = OrderedDict()
 
 
 def _client_lock(client_id: str) -> _threading.Lock:
@@ -133,20 +146,52 @@ def _client_lock(client_id: str) -> _threading.Lock:
         if lk is None:
             lk = _threading.Lock()
             _per_client_locks[client_id] = lk
+        else:
+            _per_client_locks.move_to_end(client_id)
+        # Evict LRU lock when over cap. Mirror the services-dict cap so
+        # the two structures stay roughly in sync. A lock being evicted
+        # mid-flight is fine: the holder still has its reference; only
+        # FUTURE acquirers will get a fresh one.
+        while len(_per_client_locks) > _MODEL_CACHE_MAX:
+            _per_client_locks.popitem(last=False)
         return lk
 
 
+def _cache_service(client_id: str, service: "ForecastingService") -> None:
+    """Insert + bump-to-front + evict-LRU. Caller holds the per-client lock."""
+    with _services_lock:
+        _services[client_id] = service
+        _services.move_to_end(client_id)
+        while len(_services) > _MODEL_CACHE_MAX:
+            evicted_id, _ = _services.popitem(last=False)
+            logger.info(
+                "model cache LRU eviction: client=%s (cap=%d)",
+                evicted_id, _MODEL_CACHE_MAX,
+            )
+
+
 def _get_service(client_id: str) -> ForecastingService:
-    # Fast path — already cached, no lock needed (dict get is atomic in CPython).
+    # Fast path — already cached, no lock needed (dict get is atomic in
+    # CPython). On cache hit, bump LRU recency under the services lock
+    # so the LRU eviction policy reflects actual usage.
     cached = _services.get(client_id)
     if cached is not None:
-        return cached
+        with _services_lock:
+            # Re-check under lock since another thread could have
+            # evicted between our get and the move_to_end call. If
+            # evicted, fall through to the slow path below.
+            if client_id in _services:
+                _services.move_to_end(client_id)
+                return _services[client_id]
 
     with _client_lock(client_id):
-        # Re-check under lock — another thread may have just populated.
+        # Re-check under per-client lock — another thread may have just populated.
         cached = _services.get(client_id)
         if cached is not None:
-            return cached
+            with _services_lock:
+                if client_id in _services:
+                    _services.move_to_end(client_id)
+                    return _services[client_id]
 
         config  = _get_cfg(CONFIG_PATH)
         storage = ClientStorage(client_id)
@@ -163,7 +208,7 @@ def _get_service(client_id: str) -> ForecastingService:
             if not storage.fallback_exists():
                 raise HTTPException(status_code=503, detail="Primary unavailable, no fallback")
             service.load_fallback_from_storage(storage)
-        _services[client_id] = service
+        _cache_service(client_id, service)
         return service
 
 

@@ -182,13 +182,16 @@ def fetch_payload(secret_id: str, iam_token: str) -> dict:
     )
 
 
-def _inject_entries(payload: dict) -> int:
+def _inject_entries(payload: dict) -> list[str]:
     """
     Walk Lockbox entries and push each into os.environ (uppercase name).
     Skips binary-only entries (they have no sensible env representation).
-    Returns the number of variables injected.
+    Returns the SORTED LIST of env-var names actually injected (keys
+    only — never values) so the caller can surface it in logs. Audit
+    R2-15 (2026-05-15): "injected N variables" hid Lockbox-side typos
+    where an expected key was misspelled and silently dropped.
     """
-    n = 0
+    injected: list[str] = []
     for entry in payload.get("entries", []):
         key = entry.get("key")
         val = entry.get("textValue")
@@ -199,8 +202,8 @@ def _inject_entries(payload: dict) -> int:
         if os.environ.get(env_name):
             continue
         os.environ[env_name] = str(val)
-        n += 1
-    return n
+        injected.append(env_name)
+    return sorted(injected)
 
 
 def load_from_lockbox() -> bool:
@@ -236,9 +239,13 @@ def load_from_lockbox() -> bool:
 
     iam_token = exchange_jwt_for_iam_token(sa_key)
     payload   = fetch_payload(secret_id, iam_token)
-    count     = _inject_entries(payload)
+    injected  = _inject_entries(payload)
+    # Names only — never values. Operators reading Loki need to spot
+    # missing/typoed keys at a glance ("hm, I expected EMAIL_PROVIDER
+    # but I only see EMAIL_PROVIDR"). Joining sorted names keeps the
+    # line stable across deploys.
     logger.info(
-        "Lockbox bootstrap: injected %d variables from secret %s",
-        count, secret_id,
+        "Lockbox bootstrap: injected %d variables from secret %s: %s",
+        len(injected), secret_id, ",".join(injected) or "<none>",
     )
     return True

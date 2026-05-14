@@ -54,7 +54,12 @@ def _load_offset() -> int:
 
 def _save_offset(offset: int) -> None:
     try:
-        _redis().set(_OFFSET_KEY, str(offset))
+        # 30-day TTL (audit R2-12, 2026-05-15): if this bot is ever
+        # retired or the token rotates, the offset key would otherwise
+        # sit in Redis forever. SET-with-EXPIRE on every save keeps
+        # the entry fresh while the bot is alive and lets it auto-purge
+        # once we stop writing.
+        _redis().setex(_OFFSET_KEY, 30 * 86400, str(offset))
     except Exception as e:    # noqa: BLE001
         logger.warning("tg offset save failed: %s", e)
 
