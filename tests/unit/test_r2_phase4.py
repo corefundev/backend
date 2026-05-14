@@ -22,6 +22,15 @@ from __future__ import annotations
 import json
 import pytest
 
+# Tests below import from `src.api.main`, which triggers the FastAPI
+# app construction + Lockbox bootstrap at module-import time. If any
+# of the heavy deps (fastapi, pydantic, prometheus_client) is missing
+# the import fails — skip in that case rather than reporting a test
+# failure for an environment issue.
+pytest.importorskip("fastapi")
+pytest.importorskip("pydantic")
+pytest.importorskip("prometheus_client")
+
 
 # ── R2-1: _email_hash helper is deterministic + 12-char hex ──────────────
 

@@ -12,6 +12,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# These tests import `src.api.main` directly to patch the LRU cap and
+# manipulate the global caches. If the import fails for any env reason
+# (missing prometheus_client, fastapi, etc.) skip rather than crash.
+pytest.importorskip("fastapi")
+pytest.importorskip("prometheus_client")
+
 
 @pytest.fixture
 def small_cap(monkeypatch):
