@@ -379,10 +379,39 @@ app.add_middleware(
     allow_origins=_parse_origins(),
     allow_credentials=False,                       # JWT in header, no cookies
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "x-api-key"],
-    expose_headers=["Retry-After"],                # used by 429 responses
+    allow_headers=["Authorization", "Content-Type", "x-api-key", "X-Request-ID"],
+    expose_headers=["Retry-After", "X-Request-ID"],
     max_age=600,
 )
+
+
+@app.middleware("http")
+async def trace_id_middleware(request: Request, call_next):
+    """
+    Stamp every request with a `trace_id` and propagate it through the
+    log ContextVar so every `logger.X(...)` inside this request gets
+    auto-tagged with the same id. Audit R2-13 (2026-05-15).
+
+    Client may pre-set the id via the X-Request-ID header (useful when
+    the FE wants to correlate its own client-side error reports). If
+    not present, generate a fresh 12-hex-char id.
+
+    Always echoed back as X-Request-ID on the response so callers can
+    log the value alongside any error they catch from us.
+    """
+    from src.monitoring.logging_setup import (
+        new_trace_id, set_trace_id, reset_trace_id,
+    )
+    incoming = request.headers.get("x-request-id", "").strip()
+    trace_id = incoming if incoming and len(incoming) <= 64 else new_trace_id()
+    token = set_trace_id(trace_id)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_trace_id(token)
+    response.headers["X-Request-ID"] = trace_id
+    return response
+
 
 from src.api.uploads import router as uploads_router
 app.include_router(uploads_router)
@@ -2308,6 +2337,22 @@ async def predict(
     record   = registry.get(client_id)
     if record is None:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    # Per-client rate-limit (audit R2-10, 2026-05-15). Plan-tied:
+    # FREE=100/h, START=5000/h, BUSINESS=unlimited. Check happens BEFORE
+    # we spend any model-cache work — Redis fails open so a Redis hiccup
+    # doesn't brick inference, only the limit silently doesn't apply.
+    try:
+        from src.auth.signup_rate_limit import (
+            check_predict_attempt, RateLimited,
+        )
+        plan_spec = get_plan_spec(record.plan)
+        check_predict_attempt(client_id, plan_spec.predict_requests_per_hour)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
 
     try:
         config   = _get_cfg(CONFIG_PATH)

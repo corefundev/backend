@@ -64,6 +64,13 @@ class PlanSpec:
     training_cooldown_hours:  int | None
     training_runs_per_month:  int | None
 
+    # ── Inference rate-limit (audit R2-10, 2026-05-15) ───────────────
+    # Per-hour budget for /predict + /predict/batch combined, keyed by
+    # client_id (NOT IP — these are authenticated endpoints, the natural
+    # subject is the tenant). Free-tier abuse can DoS the inference
+    # pipeline; this puts a hard ceiling. None = unlimited.
+    predict_requests_per_hour: int | None = None
+
     # ── Config override policy ───────────────────────────────────────
     # Dot-notation keys (match config_manager._ALLOWED_RANGES). `None`
     # means "all keys allowed" (config_manager's own range checks still
@@ -129,6 +136,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=7,
         training_cooldown_hours=12,    # was 48; lowered for v2 — let testers iterate
         training_runs_per_month=UNLIMITED,
+        predict_requests_per_hour=100,  # R2-10: free tier abuse ceiling
         config_allowed_keys=frozenset(),    # "black box" — zero overrides
         hpo_n_trials=0,                # HPO off — keep training fast and free
         default_objective="mse",       # plain MSE, straightforward baseline
@@ -142,6 +150,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=30,
         training_cooldown_hours=UNLIMITED,
         training_runs_per_month=15,
+        predict_requests_per_hour=5000,  # R2-10
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
         default_objective="ensemble",  # 3-model blend, per-SKU best-of-three
@@ -157,6 +166,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
         default_objective="ensemble",  # 3-model blend; HPO tunes each child
         training_runs_per_month=UNLIMITED,
+        predict_requests_per_hour=UNLIMITED,  # R2-10: enterprise has its own SRE
         config_allowed_keys=None,  # all keys
         price_label="",
     ),

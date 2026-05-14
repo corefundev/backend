@@ -188,6 +188,42 @@ def check_signup_attempt(ip: str) -> None:
         )
 
 
+def check_predict_attempt(client_id: str, limit_per_hour: int | None) -> None:
+    """
+    Per-client rate-limit for /predict + /predict/batch.
+
+    Authenticated endpoints — the natural subject is `client_id`, not
+    IP. Limit comes from the plan spec (`predict_requests_per_hour`);
+    None = unlimited (Business tier), early-return.
+
+    Sliding hour-bucket keyed by client_id. Failing open on Redis
+    outage matches the rest of the rate-limit family.
+
+    Audit R2-10 (2026-05-15) — free-tier abuse otherwise floods
+    inference pipeline and exhausts capacity for other tenants.
+    """
+    if limit_per_hour is None or limit_per_hour <= 0:
+        return                  # unlimited
+
+    r = _redis()
+    if r is None:
+        return                  # fail open
+
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    key = f"rl:predict:{client_id}:{hour}"
+
+    count = _incr_with_ttl(r, key, 3600)
+
+    if count > limit_per_hour:
+        ttl = int(r.ttl(key) or 3600)
+        raise RateLimited(
+            f"Predict request rate exceeded for this plan "
+            f"({limit_per_hour}/hour). Try again in {ttl // 60 + 1} minutes "
+            f"or upgrade for higher throughput.",
+            retry_after_sec=max(1, ttl),
+        )
+
+
 def check_token_attempt(ip: str) -> None:
     """
     Per-IP rate-limit for /auth/token (api-key → JWT exchange).
