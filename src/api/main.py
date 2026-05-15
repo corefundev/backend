@@ -315,6 +315,20 @@ async def lifespan(app: FastAPI):
         import asyncio as _asyncio
         from src.notifications.telegram import poll_loop as _tg_poll
         tg_task = _asyncio.create_task(_tg_poll())
+
+        def _tg_task_done(t: "_asyncio.Task") -> None:
+            # Audit R3-6 — without a done-callback an asyncio task that
+            # raises before its inner try/except (e.g. import-time hiccup,
+            # _load_offset Redis failure) dies silently and the bot stops
+            # responding without any log line. Surface the cause so the
+            # observability stack can alert.
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Telegram poll loop died: %r", exc, exc_info=exc)
+
+        tg_task.add_done_callback(_tg_task_done)
         logger.info("Telegram poll loop started")
     except Exception as e:
         logger.warning("Telegram poll loop not started: %s", e)

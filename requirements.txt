@@ -96,13 +96,17 @@ dvc==3.51.2
 dvc-s3==3.2.0
 
 # ── Observability ─────────────────────────────────────
-# Версии НЕ фиксируем: pip выберет совместимую с mlflow и evidently
-opentelemetry-api>=1.25.0
-opentelemetry-sdk>=1.25.0
-opentelemetry-instrumentation-fastapi>=0.45b0
+# Audit R3-10 — major-cap pins. Earlier we used bare `>=` because the
+# combinatorial resolver between mlflow + evidently + otel kept flapping.
+# `>=1.25.0,<2.0.0` keeps the auto-resolver happy (any 1.25.x..1.x.x is
+# fine) but blocks an unsupervised jump to a hypothetical otel 2.x that
+# would almost certainly break the instrumentation contract.
+opentelemetry-api>=1.25.0,<2.0.0
+opentelemetry-sdk>=1.25.0,<2.0.0
+opentelemetry-instrumentation-fastapi>=0.45b0,<1.0.0
 # OTLP/gRPC exporter — without this, src/monitoring/tracing.py falls
 # back to console traces even when OTEL_EXPORTER_OTLP_ENDPOINT is set.
-opentelemetry-exporter-otlp-proto-grpc>=1.25.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0,<2.0.0
 python-json-logger==2.0.7
 
 # ── Streaming / Distributed (опционально) ────────────

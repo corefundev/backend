@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -224,7 +225,30 @@ def _revocation_ttl_seconds() -> int:
     return JWT_EXPIRE_MIN * 60 + 60  # +60s slack for clock drift
 
 
-_inmem_revoked: set[str] = set()
+# Audit R3-5 — bounded in-memory revocation map. Each jti is paired with
+# its expiration epoch so a sustained Redis outage can't grow the set
+# without bound. Entries older than the revocation TTL are pruned on
+# every read/write. Hard ceiling (`_INMEM_REVOKED_MAX`, default 10k) is
+# a defensive cap against degenerate-load scenarios — at that point the
+# Redis fallback is the wrong tool, but we still refuse to grow forever.
+_INMEM_REVOKED_MAX = int(os.environ.get("JWT_INMEM_REVOKED_MAX", "10000"))
+_inmem_revoked: dict[str, float] = {}
+
+
+def _prune_inmem_revoked(now: float | None = None) -> None:
+    """Drop expired entries and trim to the size ceiling."""
+    if not _inmem_revoked:
+        return
+    cutoff = (now if now is not None else time.time())
+    expired = [j for j, exp in _inmem_revoked.items() if exp <= cutoff]
+    for j in expired:
+        _inmem_revoked.pop(j, None)
+    if len(_inmem_revoked) > _INMEM_REVOKED_MAX:
+        # Drop oldest by expiration. dict preserves insertion order but
+        # we want time-order — sort once and trim.
+        excess = len(_inmem_revoked) - _INMEM_REVOKED_MAX
+        for j, _ in sorted(_inmem_revoked.items(), key=lambda kv: kv[1])[:excess]:
+            _inmem_revoked.pop(j, None)
 
 
 def _redis_client():
@@ -257,21 +281,28 @@ def revoke_token(jti: str) -> None:
     """
     if not jti:
         return
+    now = time.time()
+    expires_at = now + _revocation_ttl_seconds()
     client = _redis_client()
     if client is None:
-        _inmem_revoked.add(jti)
+        _inmem_revoked[jti] = expires_at
+        _prune_inmem_revoked(now)
         return
     try:
         client.setex(f"jwt:revoked:{jti}", _revocation_ttl_seconds(), "1")
     except Exception as e:
         logger.warning("Redis revoke_token failed for jti=%s: %s — using in-memory fallback", jti, e)
-        _inmem_revoked.add(jti)
+        _inmem_revoked[jti] = expires_at
+        _prune_inmem_revoked(now)
 
 
 def is_token_revoked(jti: str) -> bool:
     """True iff `jti` is in the revocation set."""
     if not jti:
         return False
+    # Audit R3-5 — bounded in-mem store; check + lazy-prune.
+    now = time.time()
+    _prune_inmem_revoked(now)
     if jti in _inmem_revoked:
         return True
     client = _redis_client()
