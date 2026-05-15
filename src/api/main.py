@@ -788,18 +788,52 @@ async def auth_signup(req: SignupRequest, http_req: Request):
 
     registry = get_registry()
 
-    # 6. Uniqueness — by canonical (catches +alias / dot tricks).
-    # Logs use the module-level _email_hash helper instead of raw addresses.
-    if registry.get_by_email(email) is not None:
-        logger.info("signup: duplicate email_hash=%s", _email_hash(canonical))
-        raise HTTPException(status_code=409, detail="Email or client_id already in use")
+    from src.auth.otp_store import otp_ttl, PURPOSE_SIGNUP
+    ttl_min = int(otp_ttl().total_seconds() / 60)
+
+    # 6. Uniqueness check — audit R3-9.
+    #
+    # Email duplicates are NOT surfaced to the caller. Returning 409 vs
+    # 202 on the same flow lets an attacker enumerate registered emails
+    # by polling /auth/signup — a known anti-pattern (OWASP, CWE-203).
+    # Instead we return the same 202 shape, skip OTP creation and email
+    # send, and emit an audit event so operators can monitor abuse.
+    #
+    # Client_id duplicates DO still surface as 409 — client_id is a
+    # user-chosen workspace handle (like a public @username), not PII,
+    # and silently accepting would lock honest users out of obvious
+    # alternatives. Caller's frontend explains the collision.
+    existing = registry.get_by_email(email)
+    if existing is not None:
+        logger.info("signup: duplicate email_hash=%s (silent 202)", _email_hash(canonical))
+        try:
+            from src.audit import record_event, EVT_SIGNUP
+            from src.auth.signup_rate_limit import client_ip as _client_ip
+            record_event(
+                event_type=EVT_SIGNUP,
+                event_subtype="duplicate_email_ignored",
+                client_id=existing.client_id,
+                actor_email=canonical,
+                ip=_client_ip(http_req),
+                user_agent=http_req.headers.get("user-agent"),
+                success=False,
+                metadata={"reason": "email_already_registered"},
+            )
+        except Exception as e:    # noqa: BLE001
+            logger.warning("signup audit event failed: %s", e)
+        return SignupAcceptedResponse(email=email, expires_in_minutes=ttl_min)
+
     if registry.get(client_id) is not None:
+        # client_id collision with a *different* email — the caller picked
+        # a workspace handle someone else owns. Surface so they can choose
+        # another. NOT an enumeration concern: client_id is the public
+        # workspace identifier.
         logger.info("signup: duplicate client_id=%s", client_id)
-        raise HTTPException(status_code=409, detail="Email or client_id already in use")
+        raise HTTPException(status_code=409, detail="Workspace identifier already taken; choose another")
 
     # 7. OTP + email
     from src.auth.otp import generate_otp, hash_otp
-    from src.auth.otp_store import get_otp_store, otp_ttl, PURPOSE_SIGNUP
+    from src.auth.otp_store import get_otp_store
     from src.auth.email_sender import get_email_sender, render_otp_email, EmailDeliveryError
 
     store = get_otp_store()
@@ -810,7 +844,6 @@ async def auth_signup(req: SignupRequest, http_req: Request):
     store.create(email=canonical, purpose=f"{PURPOSE_SIGNUP}:cid", code_hash=client_id)
     store.create(email=canonical, purpose=f"{PURPOSE_SIGNUP}:display", code_hash=email)
 
-    ttl_min = int(otp_ttl().total_seconds() / 60)
     subject, body, html = render_otp_email(code=code, purpose=PURPOSE_SIGNUP, ttl_minutes=ttl_min)
     try:
         # Send to the user-typed address (not the canonical) — that's
