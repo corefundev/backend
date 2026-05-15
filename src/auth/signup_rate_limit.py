@@ -58,8 +58,24 @@ def _success_limit() -> int:
 
 
 def _trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-    """CIDRs we trust as our own reverse proxy (nginx in our compose)."""
-    raw = os.environ.get("TRUSTED_PROXIES", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+    """
+    CIDRs we trust as our own reverse proxy (nginx in our compose).
+
+    Audit R3-14 — default narrowed to loopback only. The previous
+    default (`127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`)
+    treated EVERY container on the Docker bridge network as a trusted
+    proxy, so a compromised worker could spoof `X-Forwarded-For` and
+    bypass the per-subnet rate limit.
+
+    Production deployments override via the `TRUSTED_PROXIES` env var
+    (Lockbox-injected) with the actual nginx bridge CIDR, e.g.:
+        TRUSTED_PROXIES=127.0.0.0/8,172.20.0.0/16
+
+    The fail-closed default means dev/single-container setups skip the
+    X-Forwarded-For walk entirely and use the peer address directly —
+    correct behaviour when there's no real proxy in front.
+    """
+    raw = os.environ.get("TRUSTED_PROXIES", "127.0.0.0/8")
     out: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     for c in raw.split(","):
         c = c.strip()

@@ -51,14 +51,25 @@ x-common-env: &common-env
   JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"
   MODEL_SIGNING_KEY: "${MODEL_SIGNING_KEY:-}"
   # PostgreSQL client registry — primary, accepts writes.
-  DATABASE_URL: postgresql://sku:sku@postgres:5432/sku_forecasting
+  # Audit R3-13 — password is no longer hardcoded; sourced from
+  # POSTGRES_PASSWORD (Lockbox in staging/prod, .env in dev). The
+  # postgres service below requires the same var via ${...:?} so a
+  # missing value fails fast at compose load, not at first DB query.
+  # vault_agent rewrites the host:port at runtime; user+password stay.
+  DATABASE_URL: postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
   # Optional read-replica DSN. When set, read-heavy queries (audit-log
   # listings, training-run history) use this instead of DATABASE_URL.
   # Falls back to primary when unset OR replica unreachable. Defaults
   # empty so dev environments without a replica keep working unchanged.
   DATABASE_URL_REPLICA: "${DATABASE_URL_REPLICA:-}"
-  # Redis
-  REDIS_URL: redis://redis:6379
+  # Redis — audit R3-15.
+  # The default URL omits credentials so dev (REDIS_PASSWORD unset)
+  # keeps working unchanged. When REDIS_PASSWORD is provided (Lockbox
+  # in staging/prod), override REDIS_URL in .env to
+  #   REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+  # That single override flips every consumer (jwt_auth, task_queue,
+  # redis_pool, signup_rate_limit, telegram) to the authenticated path.
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
   # ClamAV
   CLAMAV_HOST: clamav
   CLAMAV_PORT: 3310
@@ -296,6 +307,11 @@ services:
     restart: "no"
 
   # ── Redis ─────────────────────────────────────────────────────
+  # Audit R3-15 — when REDIS_PASSWORD is set, the server starts with
+  # --requirepass; redis-cli picks up REDISCLI_AUTH for the healthcheck.
+  # When empty, falls back to no-auth (legacy behaviour) but logs a
+  # loud warning so ops sees the gap. Production overrides REDIS_PASSWORD
+  # via Lockbox (key listed in LOCKBOX_ALLOWED_KEYS).
   redis:
     image: redis:7.2-alpine
     mem_limit: 256m
@@ -304,6 +320,19 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH:  ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --requirepass "$$REDIS_PASSWORD"
+        else
+          echo "[R3-15] WARN: REDIS_PASSWORD unset — Redis starting WITHOUT auth (dev only)" >&2
+          exec redis-server
+        fi
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -328,7 +357,10 @@ services:
       - "5432:5432"
     environment:
       POSTGRES_USER: sku
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sku}
+      # Audit R3-13 — no fallback. Production sources from Lockbox via
+      # lockbox_bootstrap.sh; dev provides via .env (see .env.example).
+      # `${VAR:?msg}` fails compose-up immediately if unset.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required — copy .env.example to .env (dev) or run lockbox_bootstrap.sh (staging/prod)}
       POSTGRES_DB: sku_forecasting
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -389,7 +421,8 @@ services:
       DB_HOST:           postgres
       DB_PORT:           "5432"
       DB_USER:           sku
-      DB_PASSWORD:       ${POSTGRES_PASSWORD:-sku}
+      # Audit R3-13 — references the required var from postgres service.
+      DB_PASSWORD:       ${POSTGRES_PASSWORD}
       DB_NAME:           sku_forecasting
       LISTEN_PORT:       "6432"
       AUTH_TYPE:         scram-sha-256
@@ -488,12 +521,15 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-minioadmin}
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    # Audit R3-13 — `command:` is interpolated at compose-load, so
+    # ${POSTGRES_PASSWORD} resolves to the same value as the postgres
+    # service environment (validated by the :? in that block).
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
       --workers 1
-      --backend-store-uri postgresql://sku:sku@postgres:5432/sku_forecasting
+      --backend-store-uri postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
       --default-artifact-root s3://sku-forecasting/mlflow/
     depends_on:
       postgres: { condition: service_healthy }
@@ -514,7 +550,7 @@ services:
       - "8080:8080"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
       AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
       AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY:-}"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -542,7 +578,7 @@ services:
     image: apache/airflow:2.9.1
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
       AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       PYTHONPATH: /app
@@ -572,7 +608,7 @@ services:
     image: apache/airflow:2.9.1
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:sku@postgres:5432/sku_forecasting
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
       AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
       _AIRFLOW_DB_MIGRATE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
@@ -806,7 +842,8 @@ services:
     # `setpgid: Operation not permitted` in logs.
     init: true
     environment:
-      DATABASE_URL:          postgresql://sku:sku@postgres:5432/sku_forecasting
+      # Audit R3-13 — env-driven, no hardcoded sku:sku.
+      DATABASE_URL:          postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
       # Backup S3 — отдельный аккаунт / keypair. Backup-скрипт смотрит
       # СНАЧАЛА на S3_BACKUP_* , потом fallback на общие AWS_* (dev/MinIO).
       S3_BACKUP_BUCKET:               ${S3_BACKUP_BUCKET:-sku-forecasting-backups}
