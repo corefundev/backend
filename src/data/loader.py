@@ -45,31 +45,60 @@ def load_data(path: str | Path, config: dict) -> pd.DataFrame:
     return df
 
 
+# Audit R3-28 — module-level cache for the processed-zone S3 client.
+# Building a fresh boto3.client on every _read_parquet_from_s3 call
+# spent a full TLS handshake + IAM credential resolution per parquet
+# read. The trainer's batch flow hits this many times per run; cache
+# eliminates the overhead. boto3.client is thread-safe by design.
+_processed_s3_client = None
+_processed_s3_signature: tuple | None = None
+
+
+def _get_processed_s3_client():
+    """Return a cached boto3 S3 client for the PROCESSED zone.
+
+    Cache key is (endpoint, access_key, region) so a credential
+    rotation via env update invalidates the cache transparently.
+    """
+    global _processed_s3_client, _processed_s3_signature
+    import os
+    import boto3
+
+    endpoint = (os.environ.get("S3_PROCESSED_ENDPOINT_URL")
+                or os.environ.get("S3_ENDPOINT_URL"))
+    access   = (os.environ.get("S3_PROCESSED_ACCESS_KEY_ID")
+                or os.environ.get("AWS_ACCESS_KEY_ID"))
+    secret   = (os.environ.get("S3_PROCESSED_SECRET_ACCESS_KEY")
+                or os.environ.get("AWS_SECRET_ACCESS_KEY"))
+    region   = (os.environ.get("S3_PROCESSED_REGION")
+                or os.environ.get("AWS_DEFAULT_REGION"))
+    sig = (endpoint, access, region)
+    if _processed_s3_client is not None and _processed_s3_signature == sig:
+        return _processed_s3_client
+    _processed_s3_client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name=region,
+    )
+    _processed_s3_signature = sig
+    return _processed_s3_client
+
+
 def _read_parquet_from_s3(s3_url: str) -> pd.DataFrame:
     """
     Download an S3 parquet to a tempfile and read it. Uses the PROCESSED
     zone credentials (where the trainer's input lives) — same boto3
     client the storage backend uses, no env mutation.
     """
-    import os
     import tempfile
-    import boto3
 
     # s3://bucket/key/parts...  →  bucket, "key/parts..."
     rest = s3_url[len("s3://"):]
     bucket, key = rest.split("/", 1)
 
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=os.environ.get("S3_PROCESSED_ENDPOINT_URL")
-                    or os.environ.get("S3_ENDPOINT_URL"),
-        aws_access_key_id=os.environ.get("S3_PROCESSED_ACCESS_KEY_ID")
-                    or os.environ.get("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.environ.get("S3_PROCESSED_SECRET_ACCESS_KEY")
-                    or os.environ.get("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.environ.get("S3_PROCESSED_REGION")
-                    or os.environ.get("AWS_DEFAULT_REGION"),
-    )
+    s3 = _get_processed_s3_client()
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
         s3.download_fileobj(bucket, key, tmp)
         tmp_path = tmp.name

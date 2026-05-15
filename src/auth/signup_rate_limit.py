@@ -276,6 +276,37 @@ def check_token_attempt(ip: str) -> None:
         )
 
 
+def check_rotate_attempt(client_id: str) -> None:
+    """
+    Per-client rate-limit for /clients/{id}/api-key/rotate.
+
+    Audit R3-24 — without this, a compromised client (or a benign
+    misbehaving script) can spam rotates: each call invalidates the
+    previous key, mints a new one, AND fires an audit-log entry. Run
+    in a tight loop it pollutes audit_log and burns the bcrypt cost-12
+    hashing budget. Cap defaults to 5/hour/client (env-tunable via
+    ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT). Failing open on Redis outage
+    matches the rest of the rate-limit family.
+    """
+    r = _redis()
+    if r is None:
+        return                  # fail open
+
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    key = f"rl:apikey:rotate:{client_id}:{hour}"
+
+    count = _incr_with_ttl(r, key, 3600)
+
+    limit = int(os.environ.get("ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT", "5"))
+    if count > limit:
+        ttl = int(r.ttl(key) or 3600)
+        raise RateLimited(
+            f"API key rotation rate exceeded ({limit}/hour). "
+            f"Try again in {ttl // 60 + 1} minutes.",
+            retry_after_sec=max(1, ttl),
+        )
+
+
 def record_signup_success(ip: str) -> None:
     """
     Bump the per-day success counter. Call AFTER /auth/signup/verify

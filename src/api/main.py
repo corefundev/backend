@@ -339,6 +339,21 @@ async def lifespan(app: FastAPI):
     if tg_task is not None:
         tg_task.cancel()
 
+    # Audit R3-27 — close the asyncpg pool on shutdown so worker
+    # processes leaving the cluster (rolling deploy, scale-down) don't
+    # leave dangling Postgres connections in the pool that pgbouncer
+    # then has to time-out on its own. Soft-fail: if the pool was
+    # never instantiated (e.g. local dev without DATABASE_URL),
+    # get_async_registry returns None and we skip.
+    try:
+        from src.clients.async_registry import get_async_registry
+        ar = await get_async_registry()
+        if ar is not None:
+            await ar.close()
+            logger.info("asyncpg pool closed cleanly")
+    except Exception as e:    # noqa: BLE001
+        logger.warning("asyncpg pool close failed at shutdown: %s", e)
+
 
 app = FastAPI(
     title="SKU Forecasting API",
@@ -1843,6 +1858,22 @@ async def rotate_api_key(
     """
     require_client_access(client_id, auth)
 
+    # Audit R3-24 — per-client rate-limit so a compromised key or a
+    # misbehaving script can't spam rotations (each call burns bcrypt
+    # cost-12 + an audit_log row). Admin can still rotate any client's
+    # key but is also subject to the cap (defence-in-depth against an
+    # admin-token leak loop).
+    from src.auth.signup_rate_limit import (
+        check_rotate_attempt, client_ip as _client_ip, RateLimited,
+    )
+    try:
+        check_rotate_attempt(client_id)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
+
     from src.auth.api_keys import generate_api_key, hash_api_key
 
     registry = get_registry()
@@ -1855,7 +1886,6 @@ async def rotate_api_key(
     registry.update(client_id, api_key_hash=new_hash)
 
     from src.audit import record_event, EVT_PASSWORD_CHANGE
-    from src.auth.signup_rate_limit import client_ip as _client_ip
     record_event(
         event_type=EVT_PASSWORD_CHANGE, event_subtype="api_key_rotate",
         client_id=client_id, actor_email=record.email_canonical or record.email,
@@ -2683,12 +2713,32 @@ async def patch_client_config(
 @app.delete("/clients/{client_id}/config", tags=["config"])
 async def reset_client_config(
     client_id: str,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """Reset client config to system defaults (removes all overrides)."""
     require_client_access(client_id, auth)
     registry = get_registry()
     mgr      = get_config_manager(CONFIG_PATH)
+
+    # Audit R3-25 — log the reset BEFORE mutating so the audit-log
+    # row exists even if reset() raises. The PUT/PATCH config routes
+    # already audit; DELETE was the gap that closed here.
+    record = registry.get(client_id)
+    try:
+        from src.audit import record_event, EVT_PLAN_CHANGE
+        from src.auth.signup_rate_limit import client_ip as _client_ip
+        record_event(
+            event_type=EVT_PLAN_CHANGE, event_subtype="config_reset",
+            client_id=client_id,
+            actor_email=(record.email_canonical or record.email) if record else None,
+            ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+            target_type="client_config", target_id=client_id,
+            metadata={"actor_role": ",".join(auth.roles or [])},
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("config-reset audit event failed: %s", e)
+
     mgr.reset(client_id, registry)
     _services.pop(client_id, None)
     return {"client_id": client_id, "status": "reset to system defaults"}
