@@ -71,8 +71,12 @@ def validate_webhook_url(url: str) -> None:
         candidates.append(host)
     except ValueError:
         try:
+            # getaddrinfo's sockaddr is (host, port) for AF_INET and
+            # (host, port, flowinfo, scopeid) for AF_INET6; in both
+            # variants index [0] is the address string. str() coerces
+            # mypy's union narrowing without changing runtime behaviour.
             for info in socket.getaddrinfo(host, None):
-                candidates.append(info[4][0])
+                candidates.append(str(info[4][0]))
         except OSError as e:
             raise WebhookUrlRejected(f"cannot resolve {host}: {e}") from e
 
