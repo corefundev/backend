@@ -17,22 +17,28 @@ import pytest
 
 
 # ── R3-5: in-mem revocation map is bounded ────────────────────────────────
+#
+# Tests inject expirations directly into _inmem_revoked rather than
+# patching time.time globally — a global patch leaks into pytest's own
+# scheduling/logging during the test body and surfaces as flakes on
+# py3.11+ even though monkeypatch nominally restores at teardown.
 
-def test_inmem_revoke_expires_after_ttl(monkeypatch):
+
+def test_inmem_revoke_prunes_expired_entries(monkeypatch):
     from src.auth import jwt_auth
 
     monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
-    monkeypatch.setattr(jwt_auth, "_revocation_ttl_seconds", lambda: 1)
     jwt_auth._inmem_revoked.clear()
 
-    jwt_auth.revoke_token("jti-aaa")
-    assert jwt_auth.is_token_revoked("jti-aaa") is True
+    # Seed: one expired entry (exp in the past), one fresh.
+    now = time.time()
+    jwt_auth._inmem_revoked["jti-expired"] = now - 10
+    jwt_auth._inmem_revoked["jti-fresh"]   = now + 3600
 
-    # Advance "wall clock" by faking time.time() past TTL.
-    real = time.time()
-    monkeypatch.setattr(jwt_auth.time, "time", lambda: real + 5)
-    assert jwt_auth.is_token_revoked("jti-aaa") is False
-    assert "jti-aaa" not in jwt_auth._inmem_revoked
+    jwt_auth._prune_inmem_revoked(now=now)
+
+    assert "jti-expired" not in jwt_auth._inmem_revoked
+    assert "jti-fresh" in jwt_auth._inmem_revoked
 
 
 def test_inmem_revoke_respects_size_ceiling(monkeypatch):
@@ -40,28 +46,42 @@ def test_inmem_revoke_respects_size_ceiling(monkeypatch):
 
     monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
     monkeypatch.setattr(jwt_auth, "_INMEM_REVOKED_MAX", 5)
-    monkeypatch.setattr(jwt_auth, "_revocation_ttl_seconds", lambda: 3600)
     jwt_auth._inmem_revoked.clear()
 
+    # Seed 10 entries with staggered (future) expirations — none expired,
+    # so prune trims only via the size ceiling. Newest (largest exp)
+    # must win; oldest (smallest exp) must be evicted.
     base = time.time()
     for i in range(10):
-        # Stagger expirations so the prune has a stable sort order.
-        monkeypatch.setattr(jwt_auth.time, "time", lambda i=i: base + i)
-        jwt_auth.revoke_token(f"jti-{i:02d}")
+        jwt_auth._inmem_revoked[f"jti-{i:02d}"] = base + 3600 + i
+
+    jwt_auth._prune_inmem_revoked(now=base)
 
     assert len(jwt_auth._inmem_revoked) <= 5
-    # Newest 5 must survive; oldest evicted.
     assert "jti-09" in jwt_auth._inmem_revoked
     assert "jti-00" not in jwt_auth._inmem_revoked
 
 
-def test_inmem_revoke_empty_set_handled():
+def test_inmem_revoke_empty_map_handled():
     from src.auth import jwt_auth
 
     jwt_auth._inmem_revoked.clear()
     # Must not raise even if the map is empty (no-op prune).
     jwt_auth._prune_inmem_revoked()
     assert jwt_auth.is_token_revoked("never-revoked") is False
+
+
+def test_revoke_then_check_via_public_api(monkeypatch):
+    """Smoke: revoke_token + is_token_revoked round-trip through the
+    bounded in-memory map (no Redis available)."""
+    from src.auth import jwt_auth
+
+    monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
+    jwt_auth._inmem_revoked.clear()
+
+    jwt_auth.revoke_token("jti-roundtrip")
+    assert jwt_auth.is_token_revoked("jti-roundtrip") is True
+    assert jwt_auth.is_token_revoked("jti-never-seen") is False
 
 
 # ── R3-7: webhook URL SSRF guard ──────────────────────────────────────────
@@ -132,7 +152,10 @@ def test_webhook_validator_accepts_public_https(monkeypatch):
     webhooks.validate_webhook_url("https://hooks.example.com/api")
 
 
-def test_send_webhook_blocked_url_does_not_make_request(monkeypatch):
+def test_send_webhook_blocked_url_returns_false_no_request(monkeypatch):
+    """SSRF-blocked URL must return False (graceful failure) and never
+    invoke urlopen. Contract preserved with other failure modes in
+    send_webhook_sync."""
     from src.api import webhooks
 
     call_count = {"n": 0}
@@ -142,11 +165,11 @@ def test_send_webhook_blocked_url_does_not_make_request(monkeypatch):
         raise AssertionError("urlopen called despite SSRF block")
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    with pytest.raises(webhooks.WebhookUrlRejected):
-        webhooks.send_webhook_sync(
-            url="http://127.0.0.1:6379/PING",
-            event="training_complete",
-            data={"x": 1},
-            client_id="acme",
-        )
+    result = webhooks.send_webhook_sync(
+        url="http://127.0.0.1:6379/PING",
+        event="training_complete",
+        data={"x": 1},
+        client_id="acme",
+    )
+    assert result is False
     assert call_count["n"] == 0

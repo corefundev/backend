@@ -102,12 +102,19 @@ def send_webhook_sync(
 ) -> bool:
     """
     Synchronous webhook delivery with retry.
-    Returns True on success. Raises WebhookUrlRejected if `url` fails
-    the SSRF guard (audit R3-7).
+    Returns True on success, False on any failure (network error, HTTP
+    error, or SSRF policy rejection — audit R3-7).
     """
     import urllib.request
 
-    validate_webhook_url(url)
+    try:
+        validate_webhook_url(url)
+    except WebhookUrlRejected as e:
+        logger.error(
+            "Webhook URL rejected (SSRF policy): client=%s event=%s reason=%s",
+            client_id, event, e,
+        )
+        return False
 
     payload = json.dumps({
         "event":      event,
