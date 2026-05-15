@@ -28,9 +28,12 @@ WORKDIR /opt
 
 # pandas + pyarrow (parquet) + openpyxl (xlsx). Pin for reproducibility.
 # numpy is transitive via pandas.
+# pyarrow MUST match requirements.txt (15.0.2) so parquet written by the
+# training pipeline reads cleanly here and vice versa. Audit R3-3: 16.1.0
+# in this Dockerfile was a drift that risked Arrow IPC format mismatch.
 RUN pip install --no-cache-dir \
         "pandas==2.2.2" \
-        "pyarrow==16.1.0" \
+        "pyarrow==15.0.2" \
         "openpyxl==3.1.2"
 
 COPY src/validation/secure_parser.py /opt/secure_parser.py

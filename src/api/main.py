@@ -2075,7 +2075,21 @@ async def trigger_training(
 
 @app.get("/jobs/{job_id}", tags=["training"])
 async def poll_job(job_id: str, auth: AuthContext = Depends(get_current_client)):
-    return get_job_status(job_id)
+    """
+    Audit R3-1: enforce job ownership. job.meta["client_id"] is stamped
+    at enqueue time (training, scan, process). Non-admin callers may
+    only poll jobs belonging to their own client; respond 404 (not 403)
+    on mismatch so attackers can't probe job_id existence.
+
+    Legacy jobs enqueued before this stamp existed have no client_id in
+    meta — those are admin-pollable only (defensive default).
+    """
+    status = get_job_status(job_id)
+    job_client = status.pop("_client_id", None)
+    if "admin" not in auth.roles:
+        if job_client is None or job_client != auth.client_id:
+            raise HTTPException(status_code=404, detail="job not found")
+    return status
 
 
 @app.get("/clients/{client_id}/training-runs", tags=["training"])

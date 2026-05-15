@@ -54,7 +54,9 @@ def _scan_job(upload_id: str) -> dict:
 
     record = run_scan(upload_id)
     if record.status == ur.SCANNED_CLEAN:
-        enqueue_process(upload_id)
+        # Audit R3-1: propagate client_id so the chained process job
+        # carries the same ownership stamp as the original scan job.
+        enqueue_process(upload_id, client_id=record.client_id)
     return {
         "upload_id": upload_id,
         "status": record.status,
@@ -82,6 +84,7 @@ def _process_job(upload_id: str) -> dict:
 
 def enqueue_scan(
     upload_id: str,
+    client_id: str,
     timeout: int = 300,            # 5 min per scan
 ) -> Optional[str]:
     try:
@@ -91,6 +94,10 @@ def enqueue_scan(
             kwargs=dict(upload_id=upload_id),
             job_timeout=timeout,
             result_ttl=86400,
+            # Audit R3-1: stamp client_id so /jobs/{job_id} can enforce
+            # ownership. Tied to the upload, not the auth principal —
+            # admin-driven enqueues will set this to the target client.
+            meta={"client_id": client_id},
         )
         logger.info("scan enqueued: job=%s upload=%s", job.id, upload_id)
         return job.id
@@ -108,6 +115,7 @@ def enqueue_scan(
 
 def enqueue_process(
     upload_id: str,
+    client_id: str,
     timeout: int = 600,            # 10 min per parse (conservative)
 ) -> Optional[str]:
     try:
@@ -117,6 +125,8 @@ def enqueue_process(
             kwargs=dict(upload_id=upload_id),
             job_timeout=timeout,
             result_ttl=86400,
+            # Audit R3-1: stamp client_id (chained from scan job).
+            meta={"client_id": client_id},
         )
         logger.info("process enqueued: job=%s upload=%s", job.id, upload_id)
         return job.id

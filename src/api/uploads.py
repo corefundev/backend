@@ -113,7 +113,8 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        scan_job_id = enqueue_scan(record.upload_id)
+        # Audit R3-1: stamp client_id into job.meta for /jobs ownership check.
+        scan_job_id = enqueue_scan(record.upload_id, client_id=record.client_id)
     except Exception as e:
         logger.error(
             "upload %s accepted but scan enqueue failed: %s",
