@@ -17,9 +17,9 @@
 # dl.min.io occasionally times out from this VPS's build network,
 # Docker Hub is more reliable. Pinned to the version we were already
 # running successfully via runtime curl.
-FROM minio/mc:RELEASE.2025-08-13T08-35-41Z AS mc-stage
+FROM minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 AS mc-stage
 
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 # Install everything backup.sh + lockbox_bootstrap.sh need. mc comes
 # from the multi-stage COPY below — no runtime/build-time CDN curl.

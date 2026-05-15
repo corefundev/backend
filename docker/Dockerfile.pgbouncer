@@ -14,7 +14,7 @@
 #   DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME — same as edoburu
 #   POOL_MODE, LISTEN_PORT, AUTH_TYPE, DEFAULT_POOL_SIZE,
 #   MAX_CLIENT_CONN, MAX_DB_CONNECTIONS, QUERY_WAIT_TIMEOUT
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 # pgbouncer + psql (for the bootstrap query) + tools that
 # scripts/lockbox_bootstrap.sh needs (jq, openssl, curl, coreutils for

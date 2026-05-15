@@ -107,9 +107,34 @@ jobs:
           format: spdx-json
           output-file: sbom-api.spdx.json
 
+      # Audit R3-23 — sign the SBOM blob the same way we sign images.
+      # Without this, anyone with push access to the GH Release assets
+      # could swap a tampered SBOM and the signature on the image
+      # wouldn't catch it. cosign sign-blob produces a .sig sidecar
+      # using the same keyless OIDC identity as the image signatures.
+      - name: Sign SBOM (cosign sign-blob keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature sbom-api.spdx.json.sig \
+            --output-certificate sbom-api.spdx.json.crt \
+            sbom-api.spdx.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           generate_release_notes: true
-          files: sbom-api.spdx.json
+          # Attach the signed SBOM + sidecars. Verifiers run:
+          #   cosign verify-blob --certificate-identity-regexp \
+          #     '.*corefundev/backend.*' --certificate-oidc-issuer \
+          #     https://token.actions.githubusercontent.com \
+          #     --signature sbom-api.spdx.json.sig \
+          #     --certificate sbom-api.spdx.json.crt \
+          #     sbom-api.spdx.json
+          files: |
+            sbom-api.spdx.json
+            sbom-api.spdx.json.sig
+            sbom-api.spdx.json.crt

@@ -26,15 +26,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /opt
 
-# pandas + pyarrow (parquet) + openpyxl (xlsx). Pin for reproducibility.
-# numpy is transitive via pandas.
-# pyarrow MUST match requirements.txt (15.0.2) so parquet written by the
-# training pipeline reads cleanly here and vice versa. Audit R3-3: 16.1.0
-# in this Dockerfile was a drift that risked Arrow IPC format mismatch.
-RUN pip install --no-cache-dir \
-        "pandas==2.2.2" \
-        "pyarrow==15.0.2" \
-        "openpyxl==3.1.2"
+# Audit R3-19 — sandbox dependencies are pinned in
+# docker/requirements-sandbox.txt (full transitive graph). The lockfile
+# is git-tracked so trivy + pip-audit scan it at CI time, and parquet
+# format compatibility with the training pipeline (R3-3) holds at the
+# graph level — not just at the pyarrow leaf.
+COPY docker/requirements-sandbox.txt /tmp/requirements-sandbox.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-sandbox.txt && \
+    rm /tmp/requirements-sandbox.txt
 
 COPY src/validation/secure_parser.py /opt/secure_parser.py
 
