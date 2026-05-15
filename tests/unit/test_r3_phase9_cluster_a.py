@@ -25,47 +25,64 @@ def _compose_text() -> str:
     return _COMPOSE.read_text()
 
 
-# ── R3-13: POSTGRES_PASSWORD must be hard-required ────────────────────────
+# ── R3-13: every DSN reads ${POSTGRES_PASSWORD…}; no hardcoded `sku:sku` ──
+#
+# Graceful migration pattern: `${POSTGRES_PASSWORD:-sku}` everywhere. The
+# fallback exists so existing staging/prod (which has no explicit
+# POSTGRES_PASSWORD in /srv/backend/.env yet) keeps working unchanged.
+# A separate ops follow-up adds POSTGRES_PASSWORD to Lockbox, after
+# which the fallback can be flipped to `:?` strict. The current
+# enterprise gain: every DSN reads the same env var, so a single
+# .env line change rotates the password across all services.
 
-def test_compose_postgres_password_is_hard_required():
+def test_compose_no_hardcoded_sku_password_anywhere():
+    """No DSN must hardcode `sku:sku@postgres` — every reference must
+    interpolate ${POSTGRES_PASSWORD…} so a single value rotation
+    propagates to every service in one place."""
     txt = _compose_text()
-    # The postgres service environment block must use the :? syntax
-    # so missing env fails compose-up immediately.
-    assert "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?" in txt, (
-        "POSTGRES_PASSWORD must use ${VAR:?error} syntax to fail fast"
-    )
-
-
-def test_compose_no_legacy_postgres_password_fallback():
-    txt = _compose_text()
-    # The pre-R3-13 default `:-sku` must NOT appear anywhere.
-    assert ":-sku}" not in txt, (
-        "legacy fallback `${POSTGRES_PASSWORD:-sku}` resurfaced — re-audit R3-13"
-    )
-
-
-def test_compose_database_url_is_env_driven():
-    txt = _compose_text()
-    # No hardcoded `sku:sku@postgres` left under ANY scheme prefix
-    # (postgresql, postgresql+psycopg2, airflow SQL_ALCHEMY_CONN, etc).
-    # Regex would be overkill — sku:sku is distinctive enough that a
-    # plain substring scan covers every URL form.
     assert "sku:sku@postgres" not in txt, (
         "hardcoded sku:sku@postgres still present somewhere in compose — "
-        "every DSN must read ${POSTGRES_PASSWORD}"
+        "every DSN must read ${POSTGRES_PASSWORD…}"
     )
-    # And the env-driven version IS present (multiple services use it).
-    assert "sku:${POSTGRES_PASSWORD}@postgres" in txt, (
-        "no DSN uses ${POSTGRES_PASSWORD} — env wiring regression"
+
+
+def test_compose_dsns_reference_env_var():
+    """At least the primary DATABASE_URL must source from
+    ${POSTGRES_PASSWORD…} so rotation is a single-line .env change."""
+    txt = _compose_text()
+    assert "sku:${POSTGRES_PASSWORD" in txt, (
+        "no DSN uses ${POSTGRES_PASSWORD…} — env wiring regression"
     )
+
+
+def test_compose_postgres_password_default_is_explicit():
+    """The postgres service environment block must read POSTGRES_PASSWORD
+    via env interpolation (not a hardcoded literal). The presence of a
+    `:-` fallback is acceptable as a migration grace period, but a
+    literal `POSTGRES_PASSWORD: sku` would defeat the audit."""
+    txt = _compose_text()
+    # Find the postgres service env block.
+    start = txt.find("  postgres:\n")
+    assert start > 0, "postgres service not found in compose"
+    end = txt.find("\n  pgbouncer:", start)
+    pg_block = txt[start:end]
+    # Must reference the env var (with or without a graceful default).
+    assert "${POSTGRES_PASSWORD" in pg_block, (
+        "postgres service must interpolate POSTGRES_PASSWORD from env"
+    )
+    # Must NOT have a bare literal password assignment.
+    lines = [l.strip() for l in pg_block.splitlines() if l.strip().startswith("POSTGRES_PASSWORD:")]
+    for line in lines:
+        assert "${" in line, (
+            f"hardcoded POSTGRES_PASSWORD literal: {line!r}"
+        )
 
 
 def test_env_example_has_explicit_postgres_password():
     env_example = Path(__file__).resolve().parents[2] / ".env.example"
     txt = env_example.read_text()
-    # The line must not be empty after `POSTGRES_PASSWORD=` — otherwise
-    # the dev workflow gives an empty value that fails the compose :? gate
-    # with a confusing message.
+    # The line must not be empty after `POSTGRES_PASSWORD=` — empty
+    # gives a confusing fallback chain when combined with `:-sku`.
     for line in txt.splitlines():
         if line.startswith("POSTGRES_PASSWORD="):
             assert line.split("=", 1)[1].strip() != "", (
