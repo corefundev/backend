@@ -254,19 +254,16 @@ def _prune_inmem_revoked(now: float | None = None) -> None:
 def _redis_client():
     """Return a redis client or None if Redis isn't reachable.
 
-    Cached on first call; failure returns None and we fall back to the
-    in-memory set (single-process correctness only — fine for dev).
+    Audit R3-4 — routes through the process-wide singleton pool
+    (src.redis_pool). The soft variant returns None on connectivity
+    failure so we fall back to the bounded in-memory revocation set
+    (R3-5). Single-process correctness only when Redis is down, which
+    is acceptable for the fallback path.
     """
     try:
-        import redis
+        from src.redis_pool import get_redis_or_none
+        return get_redis_or_none()
     except ImportError:
-        return None
-    url = os.environ.get("REDIS_URL") or "redis://redis:6379/0"
-    try:
-        client = redis.from_url(url, socket_connect_timeout=1, socket_timeout=1)
-        client.ping()
-        return client
-    except Exception:
         return None
 
 

@@ -39,12 +39,18 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 
 def get_redis_connection():
-    """Return a Redis connection. Raises ImportError if redis not installed."""
+    """
+    Return a Redis connection from the process-wide singleton pool.
+
+    Audit R3-4 — earlier this constructed `Redis.from_url(...)` per call
+    and pinged each time, burning a socket+RTT on every /predict and RQ
+    poll. Now routes through `src.redis_pool` so connections are reused
+    within the process. Behaviour unchanged: raises ConnectionError on
+    failure, ImportError if `redis` package missing.
+    """
     try:
-        from redis import Redis
-        conn = Redis.from_url(REDIS_URL, decode_responses=False, socket_connect_timeout=3)
-        conn.ping()  # test connection
-        return conn
+        from src.redis_pool import get_redis
+        return get_redis(ping=True)
     except ImportError:
         raise ImportError("redis package required. pip install redis")
     except Exception as e:

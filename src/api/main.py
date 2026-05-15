@@ -1551,6 +1551,22 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
         # Never reached, but appeases the type checker.
         raise HTTPException(500, detail="OAuth post-state inconsistency")
 
+    # Audit R3-8 — defence-in-depth re-check. All record-resolution
+    # branches above SHOULD have email_verified_at set:
+    #   • already-linked OAuth → set when the link was created
+    #   • email-link path      → gated by line 1479 check
+    #   • fresh client         → stamped with now() at insert
+    #   • race-resolution      → re-lookup of one of the above
+    # But if a future code path lands an OAuth-linked record with
+    # email_verified_at NULL (DB hand-edit, migration bug, etc), we
+    # refuse to mint a JWT rather than silently grant access.
+    if record.email_verified_at is None:
+        logger.warning(
+            "OAuth: refusing JWT for unverified record client=%s provider=%s",
+            record.client_id, identity.provider,
+        )
+        raise HTTPException(403, detail="Email verification missing")
+
     # ── Step 5: redirect to frontend with JWT ────────────────────────
     token = create_access_token(client_id=record.client_id, roles=["forecast"])
 
