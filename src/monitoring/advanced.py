@@ -317,6 +317,21 @@ def send_alert(
         }]
     }
 
+    # Audit R4-11 — same SSRF guard as send_webhook_sync (R3-7). Without
+    # this, an env-misconfigured ALERT_WEBHOOK_URL or a future per-client
+    # webhook override could point at 169.254.169.254 / localhost / RFC1918
+    # and exfil-probe internal services. Fail-soft (log + return False)
+    # matches the contract — alerts are best-effort, not gating.
+    try:
+        from src.api.webhooks import validate_webhook_url, WebhookUrlRejected
+        validate_webhook_url(webhook_url)
+    except WebhookUrlRejected as e:
+        logger.error(f"Alert webhook URL rejected (SSRF policy): {e}")
+        return False
+    except Exception as e:    # pragma: no cover — import-time safety
+        logger.error(f"Alert webhook validation failed: {e}")
+        return False
+
     try:
         import urllib.request
         body = json.dumps(payload).encode()

@@ -97,8 +97,21 @@ def assert_production_config_safe() -> None:
         )
     if not os.environ.get("EMAIL_FROM"):
         soft_warnings.append("EMAIL_FROM is empty")
-    if not os.environ.get("JWT_SECRET"):
-        soft_warnings.append("JWT_SECRET is empty (Lockbox bootstrap may have skipped)")
+    # Audit R4-12 — fix the variable-name bug (was `JWT_SECRET`, actual
+    # var is `JWT_SECRET_KEY`). Both empty AND short are now surfaced.
+    # The hard floor lives in jwt_auth._load_secret; this is the
+    # operator-visible early warning at startup.
+    _jwt_secret_val = os.environ.get("JWT_SECRET_KEY") or ""
+    if not _jwt_secret_val:
+        soft_warnings.append(
+            "JWT_SECRET_KEY is empty (Lockbox bootstrap may have skipped)"
+        )
+    elif len(_jwt_secret_val.encode("utf-8")) < 32:
+        soft_warnings.append(
+            f"JWT_SECRET_KEY is only {len(_jwt_secret_val)} chars "
+            "— jwt_auth._load_secret will refuse at first read. "
+            "Generate a stronger value: openssl rand -hex 32"
+        )
     # R2-5 soft warning: signed-pickle protection silently falls back
     # to JWT_SECRET_KEY when MODEL_SIGNING_KEY is empty. Once you have
     # a maintenance window for model re-signing, set MODEL_SIGNING_KEY

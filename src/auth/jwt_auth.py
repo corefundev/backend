@@ -34,15 +34,37 @@ APP_ENV = _env("APP_ENV", "production").lower()
 _IS_DEV = APP_ENV in ("development", "dev", "test")
 
 
+# Audit R4-12 — minimum byte length for HS256 signing keys. The HMAC-
+# SHA256 spec recommends a key at least as long as the digest (32 bytes
+# = 256 bits) to avoid weak-key attacks. PyJWT emits InsecureKeyLength
+# Warning below this floor; we promote it to a hard error in production
+# so a Lockbox typo or hand-edited .env can't ship a weak signing key.
+_HS256_MIN_BYTES = 32
+
+
 def _load_secret(key: str, dev_value: str | None = None) -> str:
     """
     Load a required secret from environment.
     In development (APP_ENV=development) falls back to dev_value if set.
     In production raises RuntimeError when the variable is missing.
     Never logs the actual value.
+
+    Audit R4-12 — HS256 keys (JWT_SECRET_KEY, MODEL_SIGNING_KEY) must be
+    at least _HS256_MIN_BYTES (32) in production. The docstring of this
+    module (line 13) documented the floor but it was never enforced; a
+    short Lockbox seed booted the API silently with a brute-forceable
+    signing key. Now refused at first read.
     """
     val = _env(key)
     if val:
+        # R4-12 — enforce HS256 minimum length on signing keys.
+        if (not _IS_DEV) and key in ("JWT_SECRET_KEY", "MODEL_SIGNING_KEY"):
+            if len(val.encode("utf-8")) < _HS256_MIN_BYTES:
+                raise RuntimeError(
+                    f"Refusing to start: {key} is {len(val)} chars "
+                    f"(< {_HS256_MIN_BYTES} byte HS256 floor). "
+                    f"Generate a stronger value: openssl rand -hex 32"
+                )
         return val
     if _IS_DEV and dev_value:
         logger.warning(
