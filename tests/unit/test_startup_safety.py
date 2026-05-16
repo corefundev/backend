@@ -31,7 +31,7 @@ def clean_env(monkeypatch):
     """Strip all relevant env vars; tests opt in to specific values."""
     for k in (
         "APP_ENV", "DISABLE_CAPTCHA", "EMAIL_PROVIDER",
-        "EMAIL_FROM", "JWT_SECRET", "MODEL_SIGNING_KEY",
+        "EMAIL_FROM", "JWT_SECRET", "JWT_SECRET_KEY", "MODEL_SIGNING_KEY",
     ):
         monkeypatch.delenv(k, raising=False)
     return monkeypatch
@@ -42,7 +42,7 @@ def _valid_prod(env):
     env.setenv("APP_ENV", "production")
     env.setenv("EMAIL_PROVIDER", "smtp")
     env.setenv("EMAIL_FROM", "noreply@example.com")
-    env.setenv("JWT_SECRET", "x" * 32)
+    env.setenv("JWT_SECRET_KEY", "x" * 32)   # R4-12: actual var name
     env.setenv("MODEL_SIGNING_KEY", "y" * 64)  # 32-byte hex; audit R2-5
 
 
@@ -136,11 +136,12 @@ def test_missing_email_from_only_warns(clean_env, caplog):
 
 
 def test_missing_jwt_secret_only_warns(clean_env, caplog):
+    # R4-12 fixed the typo — check the correct env var name.
     _valid_prod(clean_env)
-    clean_env.setenv("JWT_SECRET", "")
+    clean_env.setenv("JWT_SECRET_KEY", "")
     with caplog.at_level(logging.WARNING):
         _get_check()()
-    assert any("JWT_SECRET" in r.message for r in caplog.records)
+    assert any("JWT_SECRET_KEY" in r.message for r in caplog.records)
 
 
 def test_email_provider_unset_only_warns(clean_env, caplog):
@@ -148,7 +149,7 @@ def test_email_provider_unset_only_warns(clean_env, caplog):
     # not a hard fail. Lockbox may return blanks during a rollout.
     clean_env.setenv("APP_ENV", "production")
     clean_env.setenv("EMAIL_FROM", "noreply@example.com")
-    clean_env.setenv("JWT_SECRET", "x" * 32)
+    clean_env.setenv("JWT_SECRET_KEY", "x" * 32)   # R4-12: actual var name
     clean_env.setenv("MODEL_SIGNING_KEY", "y" * 64)  # required since R2-5
     with caplog.at_level(logging.WARNING):
         _get_check()()  # no raise

@@ -72,14 +72,18 @@ def test_load_secret_min_length_enforced_in_prod():
 
     # Force production mode for the test.
     original_is_dev = jwt_auth._IS_DEV
+    original_env_val = os.environ.get("JWT_SECRET_KEY")
     jwt_auth._IS_DEV = False
     try:
-        os.environ["JWT_SECRET_KEY_TEST_R4_12"] = "x" * 16  # < 32 bytes
+        os.environ["JWT_SECRET_KEY"] = "x" * 16  # short — below 32-byte floor
         with pytest.raises(RuntimeError, match="HS256 floor"):
-            jwt_auth._load_secret("JWT_SECRET_KEY",
-                                  None)  # noqa: F841 — should raise
+            jwt_auth._load_secret("JWT_SECRET_KEY", None)
     finally:
         jwt_auth._IS_DEV = original_is_dev
+        if original_env_val is None:
+            os.environ.pop("JWT_SECRET_KEY", None)
+        else:
+            os.environ["JWT_SECRET_KEY"] = original_env_val
 
 
 def test_load_secret_accepts_long_keys():
