@@ -167,10 +167,14 @@ async def get_upload_status(
 ):
     registry = ur.get_upload_registry()
     record = registry.get(upload_id)
+    # Audit R4-7 — collapse "not found" and "cross-tenant" to the same
+    # 404 response shape (mirrors R3-1's /jobs/{job_id} fix). Otherwise
+    # an authenticated caller can probe the upload-UUID space and learn
+    # which IDs exist somewhere via the 403 vs 404 status-code asymmetry.
     if record is None:
         raise HTTPException(404, detail="upload not found")
-    # Tenant isolation — callers can only see their own client's uploads.
-    require_client_access(record.client_id, auth)
+    if record.client_id != auth.client_id and "admin" not in auth.roles:
+        raise HTTPException(404, detail="upload not found")
     return _to_status(record)
 
 
@@ -189,10 +193,16 @@ async def cancel_upload(
 ):
     registry = ur.get_upload_registry()
     record = registry.get(upload_id)
+    # Audit R4-7 — collapse "doesn't exist" and "cross-tenant" to the
+    # same silent 204 no-op (mirrors R3-1's anti-enumeration pattern).
+    # The cross-tenant cancel is NEVER actually executed because the
+    # underlying _cancel() only runs after the ownership check passes;
+    # responding 204 instead of 403 just removes the timing/status-code
+    # oracle.
     if record is None:
-        # 204 — already gone, nothing to do.
         return
-    require_client_access(record.client_id, auth)
+    if record.client_id != auth.client_id and "admin" not in auth.roles:
+        return
     from src.storage.upload_pipeline import cancel_upload as _cancel
     _cancel(upload_id)
     return

@@ -173,3 +173,57 @@ def test_frontend_upgrade_page_handles_403():
     assert "support@testcore.ru" in text or "поддержки" in text, (
         "UpgradePage 403 branch must include a sales-contact hint"
     )
+
+
+# ── R4-7: uploads IDOR enumeration → collapse cross-tenant to 404 ──────────
+
+def test_uploads_get_collapses_cross_tenant_to_404():
+    """GET /uploads/{upload_id} must return 404 (not 403) when the
+    record exists but belongs to another client. R3-1 anti-enumeration
+    pattern applied: the cross-tenant case shares the same response
+    shape as 'doesn't exist'."""
+    text = (_BACKEND / "src" / "api" / "uploads.py").read_text()
+    start = text.find("async def get_upload_status")
+    assert start > 0
+    end = text.find("\n# ── DELETE", start)
+    block = text[start:end]
+    # Must NOT use require_client_access (which raises 403).
+    assert "require_client_access" not in block, (
+        "get_upload_status must not raise 403 on cross-tenant — use 404"
+    )
+    # Must check client_id explicitly and raise 404.
+    assert "record.client_id" in block, "client_id ownership check missing"
+    assert 'HTTPException(404' in block, "must respond 404 on cross-tenant"
+
+
+def test_uploads_delete_collapses_cross_tenant_to_204():
+    """DELETE /uploads/{upload_id} must return 204 (silent no-op) when
+    the record exists but belongs to another client. Same anti-
+    enumeration pattern — 204 matches the 'already gone' case shape."""
+    text = (_BACKEND / "src" / "api" / "uploads.py").read_text()
+    start = text.find("async def cancel_upload")
+    assert start > 0
+    end = text.find("\n\n", start + 1)
+    if end < start:
+        end = len(text)
+    block = text[start:end]
+    assert "require_client_access" not in block, (
+        "cancel_upload must not raise 403 on cross-tenant"
+    )
+    # Must check client_id and return silently (204).
+    assert "record.client_id" in block, "client_id check missing"
+    assert "_cancel(upload_id)" in block, "real cancel call still present"
+
+
+def test_main_py_upload_id_lookups_collapse_to_404():
+    """Three upload_id lookups in main.py — predict's upload_id arg,
+    /predict's extend_from_upload_id, /clients/{c}/uploads/{u}/skus —
+    all must collapse cross-tenant to 404."""
+    text = (_BACKEND / "src" / "api" / "main.py").read_text()
+    # The legacy 403 detail string must NOT appear anywhere.
+    assert "upload belongs to a different client" not in text, (
+        "legacy 403 detail still present — R4-7 collapse not applied"
+    )
+    assert "extend_from upload belongs to a different client" not in text, (
+        "extend_from 403 detail still present — R4-7 collapse not applied"
+    )

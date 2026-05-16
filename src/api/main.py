@@ -2052,10 +2052,11 @@ async def trigger_training(
             import json as _json
             ur_reg  = get_upload_registry()
             urec    = ur_reg.get(req.upload_id)
-            if urec is None:
+            # Audit R4-7 — collapse "not found" + "cross-tenant" to the
+            # same 404 (mirrors R3-1's anti-enumeration). The upload-UUID
+            # space is otherwise probable via 403 vs 404 asymmetry.
+            if urec is None or urec.client_id != client_id:
                 raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
-            if urec.client_id != client_id:
-                raise HTTPException(403, detail="upload belongs to a different client")
             if urec.status != "processed":
                 raise HTTPException(
                     409,
@@ -2105,9 +2106,13 @@ async def trigger_training(
                 404,
                 detail=f"extend_from_upload_id {req.extend_from_upload_id!r} not found",
             )
+        # Audit R4-7 — cross-tenant case responds with the same 404
+        # shape as "not found" so an authenticated caller can't probe
+        # the upload-UUID space.
         if prev.client_id != client_id:
             raise HTTPException(
-                403, detail="extend_from upload belongs to a different client"
+                404,
+                detail=f"extend_from_upload_id {req.extend_from_upload_id!r} not found",
             )
         if prev.status != "processed":
             raise HTTPException(
@@ -2251,11 +2256,10 @@ def _load_processed_for_sku(
     from src.storage import upload_registry as ur
     from src.storage.upload_pipeline import get_processed_path
     from src.data.loader import load_data
+    # Audit R4-7 — collapse "not found" + "cross-tenant" → 404 (mirrors R3-1).
     urec = ur.get_upload_registry().get(upload_id)
-    if urec is None:
+    if urec is None or urec.client_id != client_id:
         raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
-    if urec.client_id != client_id:
-        raise HTTPException(403, detail="upload belongs to a different client")
     if urec.status != ur.PROCESSED:
         raise HTTPException(
             409, detail=f"upload is not processed (status={urec.status})"
@@ -2406,11 +2410,10 @@ async def list_upload_skus(
     from src.storage.upload_pipeline import get_processed_path
     from src.data.loader import load_data
 
+    # Audit R4-7 — collapse "not found" + "cross-tenant" → 404 (mirrors R3-1).
     urec = ur.get_upload_registry().get(upload_id)
-    if urec is None:
+    if urec is None or urec.client_id != client_id:
         raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
-    if urec.client_id != client_id:
-        raise HTTPException(403, detail="upload belongs to a different client")
     if urec.status != ur.PROCESSED:
         raise HTTPException(
             409, detail=f"upload is not processed (status={urec.status})"
