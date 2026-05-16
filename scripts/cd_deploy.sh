@@ -112,6 +112,46 @@ rollback() {
     echo "  rollback complete — prod is back on tag $prev_tag"
 }
 
+# ── R3-13: Lockbox-backed Postgres password injection ──────────────
+# Audit R3-13 prep: refresh /srv/backend/.env with POSTGRES_PASSWORD
+# pulled from Lockbox so the compose `${POSTGRES_PASSWORD:-sku}`
+# reference resolves to the real value instead of the legacy `sku`
+# fallback. Idempotent — re-runs replace any prior line. Gated on
+# Lockbox auth env being present in .env (YC_SA_KEY_FILE +
+# YC_LOCKBOX_SECRET_ID — set at VPS bootstrap, not by CD).
+#
+# Graceful: if the key isn't in Lockbox yet (ops still has to add it),
+# the helper prints empty and we leave /srv/backend/.env unchanged.
+# Once ops populates the Lockbox secret + runs `ALTER USER sku WITH
+# PASSWORD …` on staging+prod postgres, the next deploy auto-injects
+# and a follow-up commit can flip the compose `:-sku` to `:?` strict.
+inject_lockbox_key() {
+    local key="$1"
+    [ -x "scripts/lockbox_fetch_key.sh" ] || {
+        echo "  R3-13: lockbox_fetch_key.sh missing — skip ${key}"
+        return 0
+    }
+    # Source .env in a SUBSHELL so Lockbox auth vars are available
+    # without polluting the deploy script's environment.
+    local value
+    value=$(
+        set -a
+        # shellcheck disable=SC1091
+        . /srv/backend/.env 2>/dev/null || true
+        set +a
+        scripts/lockbox_fetch_key.sh "$key" 2>/dev/null || true
+    )
+    if [ -z "$value" ]; then
+        echo "  R3-13: Lockbox returned empty ${key} — keeping existing .env"
+        return 0
+    fi
+    # Idempotent rewrite: drop any existing line, append fresh.
+    sed -i.bak "/^${key}=/d" /srv/backend/.env && rm -f /srv/backend/.env.bak
+    echo "${key}=${value}" >> /srv/backend/.env
+    echo "  R3-13: refreshed ${key} in /srv/backend/.env from Lockbox"
+}
+inject_lockbox_key POSTGRES_PASSWORD
+
 # ── Forward deploy ─────────────────────────────────────────────────
 echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
