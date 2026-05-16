@@ -1900,10 +1900,36 @@ async def rotate_api_key(
         "warning":   "Сохраните новый api_key. Старый теперь недействителен.",
     }
 
+# Audit R4-2 — fields safe to expose in /clients responses. Excludes:
+#   • api_key_hash — bcrypt-12 hash; leakage enables offline brute
+#   • email_canonical — internal canonical form, may differ from
+#     display (gmail dots / +alias stripped); operators can read it
+#     via /internal/audit/verify if needed, no API surface
+#   • oauth_subject — provider's stable user-id, identity-linkage PII
+_CLIENT_SAFE_FIELDS = frozenset({
+    "client_id", "config", "storage_path",
+    "created_at", "last_trained_at", "last_mlflow_run_id",
+    "last_wmape", "last_mase",
+    "status", "model_version", "horizon", "notes",
+    "plan", "training_runs_this_month", "training_runs_window_start",
+    "trained_sku_count",
+    "email", "email_verified_at", "oauth_provider",
+})
+
+
+def _client_to_safe_dict(rec) -> dict:
+    """Project a ClientRecord to a dict containing only fields safe to
+    expose in API responses (audit R4-2). Existing frontends only read
+    fields from this set; api_key_hash / oauth_subject / email_canonical
+    were never user-facing — they were just incidentally serialised by
+    `rec.__dict__`."""
+    return {k: v for k, v in rec.__dict__.items() if k in _CLIENT_SAFE_FIELDS}
+
+
 @app.get("/clients", tags=["clients"])
 async def list_clients(auth: AuthContext = Depends(get_current_client)):
     auth.require_role("admin")
-    return [c.__dict__ for c in get_registry().list_clients()]
+    return [_client_to_safe_dict(c) for c in get_registry().list_clients()]
 
 @app.get("/clients/{client_id}", tags=["clients"])
 async def get_client(client_id: str, auth: AuthContext = Depends(get_current_client)):
@@ -1911,7 +1937,7 @@ async def get_client(client_id: str, auth: AuthContext = Depends(get_current_cli
     rec = get_registry().get(client_id)
     if not rec:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
-    return rec.__dict__
+    return _client_to_safe_dict(rec)
 
 
 class UpdateClientRequest(BaseModel):
@@ -2901,6 +2927,23 @@ async def upgrade_client_plan(
     http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
+    """
+    Change a client's plan tier.
+
+    Audit R4-6 — restricted to admin until payment integration ships.
+    Without this gate, any authenticated user could `POST /clients/{me}
+    /upgrade {"plan":"business"}` and inherit BUSINESS quotas (5000/h
+    predict, no SKU cap) for free — the route was documented as a
+    TEMPORARY self-service path pending the acquiring webhook, but
+    "temporary" became long-lived. Frontend UpgradePage now catches the
+    403 and surfaces "contact sales" to the customer.
+
+    When acquiring lands: split into POST /clients/{id}/upgrade-intent
+    (customer-callable, creates payment session) and have the payment-
+    confirmed webhook handler do the actual plan flip via the registry
+    (admin-context, server-side only).
+    """
+    auth.require_role("admin")
     require_client_access(client_id, auth)
 
     # Validate target plan against the enum (keeps unknown strings out
