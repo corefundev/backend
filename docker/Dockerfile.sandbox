@@ -26,6 +26,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /opt
 
+# Audit Trivy 2026-05-16 — `apt-get upgrade -y` pulls debian security
+# patches at every build (the floating python:3.11-slim base can lag
+# behind freshly-disclosed CVEs). Same pattern as Dockerfile + .worker.
+# `apt list` is intentionally empty after — the sandbox doesn't need
+# any extra apt packages, but `upgrade` still applies pending patches.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Audit R3-19 — sandbox dependencies are pinned in
 # docker/requirements-sandbox.txt (full transitive graph). The lockfile
 # is git-tracked so trivy + pip-audit scan it at CI time, and parquet

@@ -10,7 +10,15 @@ RUN groupadd -r sku && useradd -r -g sku -d /app -s /sbin/nologin sku
 WORKDIR /app
 
 # Системные зависимости
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Audit Trivy 2026-05-16 — `apt-get upgrade -y` pulls debian security
+# patches at build time. Without it, the floating python:3.11-slim tag
+# inherits whatever was current at upstream rebuild — which may lag
+# behind freshly-disclosed CVEs in debian packages. Trivy flagged this
+# gap on fe8294d / 0120084; the upgrade fixes it without changing the
+# base tag.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         gcc g++ libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
