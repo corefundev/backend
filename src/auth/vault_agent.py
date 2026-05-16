@@ -88,6 +88,9 @@ class VaultAppRoleAuth:
         self._ttl:      int           = 0
         self._renew_at: float         = 0.0
         self._stop      = Event()
+        # R4-9 — held so external watchdog / health check can call
+        # `auth._renew_thread.is_alive()`. Set in start_auto_renew.
+        self._renew_thread: Optional[Thread] = None
 
     def authenticate(self) -> str:
         """AppRole login → кратковременный токен в RAM."""
@@ -116,22 +119,43 @@ class VaultAppRoleAuth:
             raise RuntimeError(f"Vault AppRole auth failed: {e}") from e
 
     def start_auto_renew(self) -> None:
-        """Фоновый поток обновляет токен до истечения."""
-        def _loop():
-            while not self._stop.is_set():
-                if time.time() >= self._renew_at and self._token:
-                    try:
-                        import hvac
-                        c    = hvac.Client(url=self.vault_addr, token=self._token)
-                        resp = c.auth.renew_self()
-                        self._ttl      = resp["auth"]["lease_duration"]
-                        self._renew_at = time.time() + self._ttl - _RENEW_BEFORE_EXPIRY
-                        logger.info(f"Vault token renewed, new TTL={self._ttl}s")
-                    except Exception as e:
-                        logger.warning(f"Vault token renew failed: {e}")
-                self._stop.wait(timeout=60)
+        """Фоновый поток обновляет токен до истечения.
 
-        Thread(target=_loop, daemon=True, name="vault-renew").start()
+        Audit R4-9 — outer try/except + retained thread reference. The
+        inner per-iteration try/except catches renew failures, but
+        anything raised BEFORE the while loop (an import failure,
+        attribute miss on self._stop / self._token after a stop+restart
+        race, OOM) used to kill the thread silently. Without a held
+        reference, the dead thread couldn't be observed; once dead, the
+        Vault token would expire and every secret read would fail with
+        no operator-visible signal. Now an outer except logs at ERROR
+        with stack — Loki picks it up; `self._renew_thread.is_alive()`
+        is queryable externally for a watchdog.
+        """
+        def _loop():
+            try:
+                while not self._stop.is_set():
+                    if time.time() >= self._renew_at and self._token:
+                        try:
+                            import hvac
+                            c    = hvac.Client(url=self.vault_addr, token=self._token)
+                            resp = c.auth.renew_self()
+                            self._ttl      = resp["auth"]["lease_duration"]
+                            self._renew_at = time.time() + self._ttl - _RENEW_BEFORE_EXPIRY
+                            logger.info(f"Vault token renewed, new TTL={self._ttl}s")
+                        except Exception as e:
+                            logger.warning(f"Vault token renew failed: {e}")
+                    self._stop.wait(timeout=60)
+            except Exception as e:
+                # R4-9 — surface unexpected thread death so the
+                # observability stack can alert (`vault-renew` thread
+                # absence implies secrets will start failing in ~TTL).
+                logger.error(
+                    "Vault renew thread died unexpectedly: %r", e, exc_info=True,
+                )
+
+        self._renew_thread = Thread(target=_loop, daemon=True, name="vault-renew")
+        self._renew_thread.start()
 
     def stop(self) -> None:
         self._stop.set()

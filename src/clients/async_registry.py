@@ -26,12 +26,38 @@ logger = logging.getLogger(__name__)
 
 # Pool singleton — shared across all requests
 _pool = None
-_lock_created = False
+_pool_lock = None  # asyncio.Lock — lazy-init in _get_pool_lock() so it
+                   # binds to whichever event loop is running at first call.
+
+
+def _get_pool_lock():
+    """Lazy-init the pool-creation lock.
+
+    Audit R4-10 — `asyncio.Lock()` binds to the currently-running event
+    loop. Creating it at module import time risks a "different loop"
+    error when the first acquire happens (uvicorn workers create their
+    own loop). Construct on first call so the lock pairs with the
+    correct loop.
+    """
+    global _pool_lock
+    if _pool_lock is None:
+        import asyncio
+        _pool_lock = asyncio.Lock()
+    return _pool_lock
 
 
 async def _get_pool():
-    """Create or return existing asyncpg connection pool."""
+    """Create or return the existing asyncpg connection pool.
+
+    Audit R4-10 — double-checked locking around the create_pool call.
+    Two coroutines hitting a cold cache used to both pass the `_pool
+    is not None` check (line 35 fast-path), both call create_pool, and
+    the loser's pool (5-20 idle PG connections + asyncpg background
+    tasks) would orphan with no closer. Now the slow path is serialised
+    by `_pool_lock`; only one create_pool runs per process.
+    """
     global _pool
+    # Fast path — no lock acquisition when the pool already exists.
     if _pool is not None:
         return _pool
 
@@ -39,31 +65,37 @@ async def _get_pool():
     if not db_url:
         return None
 
-    try:
-        import asyncpg
-        # Convert psycopg2-style URL to asyncpg format
-        dsn = db_url.replace("postgresql+asyncpg://", "postgresql://")
-        # statement_cache_size=0 disables asyncpg's server-side prepared
-        # statements. Required when the DSN points at PgBouncer in
-        # transaction-pool mode (#186): server-side prepared statements
-        # break because each PG conn may serve different clients between
-        # transactions. Safe to leave on regardless — asyncpg falls back
-        # to inline parameterised queries with no observable perf hit.
-        _pool = await asyncpg.create_pool(
-            dsn      = dsn,
-            min_size = 5,
-            max_size = 20,
-            command_timeout = 30,
-            statement_cache_size = 0,
-        )
-        logger.info(f"asyncpg pool created: min=5 max=20 statement_cache=0")
-        return _pool
-    except ImportError:
-        logger.debug("asyncpg not installed — using sync psycopg2 fallback")
-        return None
-    except Exception as e:
-        logger.warning(f"asyncpg pool creation failed: {e} — using file registry")
-        return None
+    async with _get_pool_lock():
+        # Re-check inside the lock — a concurrent caller may have already
+        # created the pool while we were waiting on the lock.
+        if _pool is not None:
+            return _pool
+
+        try:
+            import asyncpg
+            # Convert psycopg2-style URL to asyncpg format
+            dsn = db_url.replace("postgresql+asyncpg://", "postgresql://")
+            # statement_cache_size=0 disables asyncpg's server-side prepared
+            # statements. Required when the DSN points at PgBouncer in
+            # transaction-pool mode (#186): server-side prepared statements
+            # break because each PG conn may serve different clients between
+            # transactions. Safe to leave on regardless — asyncpg falls back
+            # to inline parameterised queries with no observable perf hit.
+            _pool = await asyncpg.create_pool(
+                dsn      = dsn,
+                min_size = 5,
+                max_size = 20,
+                command_timeout = 30,
+                statement_cache_size = 0,
+            )
+            logger.info(f"asyncpg pool created: min=5 max=20 statement_cache=0")
+            return _pool
+        except ImportError:
+            logger.debug("asyncpg not installed — using sync psycopg2 fallback")
+            return None
+        except Exception as e:
+            logger.warning(f"asyncpg pool creation failed: {e} — using file registry")
+            return None
 
 
 class AsyncClientRegistry:
