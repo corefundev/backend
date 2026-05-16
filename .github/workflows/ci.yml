@@ -272,21 +272,24 @@ jobs:
         with:
           sarif_file: trivy-api.sarif
 
-  # ── 6. Software Composition Analysis (audit R2-14, 2026-05-15) ─
-  # Advisory pip-audit pass over requirements.txt itself, in addition
-  # to the trivy image scan above. Trivy catches OS-level + base-image
-  # CVEs; pip-audit catches application-dep CVEs at the manifest level,
+  # ── 6. Software Composition Analysis ─────────────────────────────
+  # pip-audit pass over requirements.txt, in addition to the trivy
+  # image scan above. Trivy catches OS-level + base-image CVEs;
+  # pip-audit catches application-dep CVEs at the manifest level,
   # which is useful BEFORE we build the image (faster signal) and
   # surfaces findings for pinned versions even when trivy says
   # "unfixed".
   #
-  # continue-on-error so a freshly-disclosed CVE doesn't block the
-  # pipeline — goal is visibility, not gating. Once the repo has a
-  # clean baseline, flip this to a hard gate by removing the line.
+  # Audit R3-22 (2026-05-16) — promoted from advisory to hard gate.
+  # Baseline established over the R2-14 advisory window (2026-05-15→
+  # 2026-05-16); all subsequent runs were clean. New CVEs now fail
+  # CI loudly so they can't slip into a deploy unseen.
+  # To allowlist a known-acceptable CVE temporarily, add
+  #   --ignore-vuln <id>
+  # to the pip-audit invocation below with a comment linking to the
+  # tracking task.
   pip-audit:
-    name: pip-audit (advisory)
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    name: pip-audit
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
