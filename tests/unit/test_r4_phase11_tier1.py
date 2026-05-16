@@ -117,61 +117,48 @@ def test_get_client_handler_uses_safe_dict():
     )
 
 
-# ── R4-6: /upgrade admin gate ─────────────────────────────────────────────
+# ── R4-6 reverted: /upgrade self-service is INTENTIONAL during acquiring
+#   integration phase. See project_app_state.md "Self-service plan upgrade".
+#   The R4 audit-agent flagged this without awareness of the design intent;
+#   user clarified on 2026-05-17 that the stub stays until payment lands.
 
-def test_upgrade_route_requires_admin():
-    """The upgrade_client_plan handler must call
-    `auth.require_role("admin")` BEFORE proceeding to the registry
-    write — until payment integration ships, this prevents self-service
-    plan elevation."""
+def test_upgrade_route_remains_self_service_by_design():
+    """BY-DESIGN: /upgrade must NOT have admin gate while the payment
+    acquiring integration is pending. Owner-of-client can flip tiers
+    freely — see project_app_state.md. Guards against a future audit
+    re-applying the misplaced R4-6 admin gate without checking memory."""
     text = (_BACKEND / "src" / "api" / "main.py").read_text()
     start = text.find("async def upgrade_client_plan")
-    assert start > 0
     end = text.find('\n@app.', start + 1)
     block = text[start:end]
-    # Must require admin role.
-    assert 'require_role("admin")' in block, (
-        'upgrade_client_plan must call auth.require_role("admin") (R4-6)'
+    # The handler must NOT require admin role until payment integration.
+    assert 'require_role("admin")' not in block, (
+        "/upgrade is intentionally self-service during acquiring stub — "
+        "do NOT re-add require_role('admin') without first verifying "
+        "the payment-integration status in project_app_state.md"
     )
-    # Must come BEFORE the registry.update — protect the audit-log row
-    # from firing on a denied call.
-    role_idx = block.find('require_role("admin")')
-    update_idx = block.find("registry.update(")
-    assert update_idx == -1 or role_idx < update_idx, (
-        "require_role must precede registry.update — gate before mutate"
-    )
-
-
-def test_upgrade_route_docstring_mentions_r4_6():
-    """The handler docstring should reference R4-6 + the planned
-    payment-integration follow-up so a future maintainer knows the
-    gate is transitional, not permanent."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def upgrade_client_plan")
-    end = text.find('require_role("admin")', start)
-    docstring = text[start:end]
-    assert "R4-6" in docstring, "upgrade handler docstring must reference R4-6"
-    assert "payment" in docstring.lower(), (
-        "docstring should mention payment-integration as the follow-up"
+    # Docstring must call out the by-design intent so a future audit
+    # round doesn't re-flag.
+    assert "BY-DESIGN" in block or "by design" in block.lower(), (
+        "handler docstring must mark the self-service flow as intentional"
     )
 
 
 # ── R4-6 frontend: UpgradePage handles 403 with sales-contact toast ──────
 
-def test_frontend_upgrade_page_handles_403():
-    """UpgradePage onError must branch on HTTP 403 and surface a
-    sales-contact message instead of the generic 'Не удалось сменить
-    тариф' toast. Pairs with the backend admin-gate so the customer
-    knows where to go."""
+def test_frontend_upgrade_page_no_403_handler():
+    """Mirror of test_upgrade_route_remains_self_service_by_design —
+    frontend should NOT have a 403 sales-contact branch while the
+    self-service upgrade stub is in place. The R4-6 mis-fix added
+    one; reverted 2026-05-17 after user clarified the by-design
+    intent."""
     page = _BACKEND.parent / "frontend" / "src" / "pages" / "client" / "UpgradePage.tsx"
     if not page.exists():
         pytest.skip("frontend repo not co-located (CI runner only)")
     text = page.read_text()
-    assert "status === 403" in text, (
-        "UpgradePage must catch 403 to surface sales-contact UX"
-    )
-    assert "support@testcore.ru" in text or "поддержки" in text, (
-        "UpgradePage 403 branch must include a sales-contact hint"
+    assert "status === 403" not in text, (
+        "UpgradePage 403 branch must NOT exist while /upgrade is "
+        "self-service (acquiring integration not yet wired)"
     )
 
 

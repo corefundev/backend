@@ -2974,20 +2974,16 @@ async def upgrade_client_plan(
     """
     Change a client's plan tier.
 
-    Audit R4-6 — restricted to admin until payment integration ships.
-    Without this gate, any authenticated user could `POST /clients/{me}
-    /upgrade {"plan":"business"}` and inherit BUSINESS quotas (5000/h
-    predict, no SKU cap) for free — the route was documented as a
-    TEMPORARY self-service path pending the acquiring webhook, but
-    "temporary" became long-lived. Frontend UpgradePage now catches the
-    403 and surfaces "contact sales" to the customer.
-
-    When acquiring lands: split into POST /clients/{id}/upgrade-intent
-    (customer-callable, creates payment session) and have the payment-
-    confirmed webhook handler do the actual plan flip via the registry
-    (admin-context, server-side only).
+    BY-DESIGN: self-service tier change without payment gateway is an
+    intentional product stub during the acquiring-integration phase
+    (per project_app_state.md). Owner-of-client can flip freely; this
+    is the testing/onboarding placeholder, NOT a security finding.
+    R4-6 audit-agent flagged this as exploitable revenue loss without
+    awareness of the design intent — see also memory/project_app_state.md
+    "Self-service plan upgrade". When acquiring lands, the flow will
+    move to POST /clients/{id}/upgrade-intent (payment session) +
+    payment-confirmed webhook handler doing the actual flip.
     """
-    auth.require_role("admin")
     require_client_access(client_id, auth)
 
     # Validate target plan against the enum (keeps unknown strings out
