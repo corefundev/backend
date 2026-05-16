@@ -58,6 +58,10 @@ esac
 cd /srv/backend
 export API_IMAGE_TAG="$TAG"
 export WORKER_IMAGE_TAG="$TAG"
+# R4-1 — sandbox image is now built+pushed by CD (was: built locally via
+# the now-removed `sandbox-image` compose one-shot). Lockstep tag with
+# api/worker so a single CD run ships a consistent triplet to GHCR.
+export SANDBOX_IMAGE_TAG="$TAG"
 
 COMPOSE_ARGS="--env-file .env \
     -f docker/docker-compose.yml \
@@ -68,7 +72,8 @@ COMPOSE_ARGS="--env-file .env \
 
 EXPECTED_API="ghcr.io/corefundev/sku-forecasting-api:$TAG"
 EXPECTED_WORKER="ghcr.io/corefundev/sku-forecasting-worker:$TAG"
-echo "  expected: api=$EXPECTED_API  worker=$EXPECTED_WORKER"
+EXPECTED_SANDBOX="ghcr.io/corefundev/sku-forecasting-sandbox:$TAG"
+echo "  expected: api=$EXPECTED_API  worker=$EXPECTED_WORKER  sandbox=$EXPECTED_SANDBOX"
 
 # ── Capture pre-deploy state for rollback ──────────────────────────
 PREV_API_IMAGE=$(docker inspect docker-api-1 --format '{{.Config.Image}}' 2>/dev/null || echo "")
@@ -182,11 +187,34 @@ inject_lockbox_key() {
 # value (Lockbox or otherwise).
 inject_lockbox_key POSTGRES_PASSWORD sku
 
+# R4-1 — drop the legacy `SANDBOX_IMAGE=sku-forecasting-sandbox` line
+# from /srv/backend/.env if present. That value was a local-only tag
+# built by the now-removed `sandbox-image` compose one-shot. With the
+# override gone, compose resolves SANDBOX_IMAGE through the new default
+# in docker-compose.yml (GHCR ref + SANDBOX_IMAGE_TAG). Idempotent: if
+# the line isn't there, sed is a no-op. The old local image (if any)
+# remains in the docker image cache until pruned — harmless.
+if grep -q '^SANDBOX_IMAGE=sku-forecasting-sandbox' /srv/backend/.env 2>/dev/null; then
+    sed -i.bak '/^SANDBOX_IMAGE=sku-forecasting-sandbox$/d' /srv/backend/.env && rm -f /srv/backend/.env.bak
+    echo "  R4-1: dropped legacy SANDBOX_IMAGE override from /srv/backend/.env"
+fi
+
 # ── Forward deploy ─────────────────────────────────────────────────
 echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
 echo "  pulling images..."
 docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate
+
+# R4-1 — sandbox image is referenced only by `docker run` from
+# process-worker (src/storage/sandbox.py), not by any compose service,
+# so `compose pull` doesn't touch it. Pull explicitly here so the
+# CD-built artefact (with up-to-date apt-upgrade + Dockerfile.sandbox
+# layers) is available before the first upload job lands. Tolerant on
+# pull failure — process-worker logs a clear error if the image is
+# missing at parse time, and the deploy itself shouldn't rollback just
+# because the sandbox layer pull blipped (api+worker stay forward).
+echo "  pulling sandbox image: $EXPECTED_SANDBOX"
+docker pull "$EXPECTED_SANDBOX" || echo "::warning::sandbox image pull failed — process-worker will surface this at upload time"
 
 # Sandbox dir for process-worker. Lives outside the GHCR image (it's a
 # host bind-mount per docker-compose.minimal.yml / .prod.yml) so on a

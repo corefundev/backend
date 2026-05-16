@@ -79,8 +79,14 @@ x-common-env: &common-env
   CLAMAV_PORT: 3310
   # Upload limits
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
-  # Sandbox
-  SANDBOX_IMAGE: ${SANDBOX_IMAGE:-sku-forecasting-sandbox}
+  # Sandbox — R4-1 default is now the CD-built GHCR image (tag set via
+  # SANDBOX_IMAGE_TAG, populated by cd_deploy.sh in lockstep with
+  # API_IMAGE_TAG / WORKER_IMAGE_TAG). The local `sku-forecasting-sandbox`
+  # tag is gone — used to be built by the one-shot `sandbox-image`
+  # compose service (docker:26-cli + docker.sock bind-mount), which CD
+  # never reran AND exposed the host docker daemon. Override the whole
+  # ref via SANDBOX_IMAGE if needed (e.g., local dev with `docker build`).
+  SANDBOX_IMAGE: ${SANDBOX_IMAGE:-ghcr.io/corefundev/sku-forecasting-sandbox:${SANDBOX_IMAGE_TAG:-latest}}
   SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-30}
   SANDBOX_MEM_LIMIT: ${SANDBOX_MEM_LIMIT:-512m}
   SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}
@@ -295,20 +301,19 @@ services:
       retries: 5
       start_period: 120s          # signature DB download on first boot
 
-  # ── Sandbox image builder (one-shot) ─────────────────────────
-  # Builds the isolated parser image so `process-worker` can launch it.
-  sandbox-image:
-    image: docker:26-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ../:/workspace
-    working_dir: /workspace
-    entrypoint: >
-      /bin/sh -c "
-        docker build -f docker/Dockerfile.sandbox -t sku-forecasting-sandbox . &&
-        echo 'sandbox image built'
-      "
-    restart: "no"
+  # ── Sandbox image — R4-1 ──────────────────────────────────────
+  # Removed: the previous `sandbox-image` one-shot service built the image
+  # locally on the VPS via `docker:26-cli` with /var/run/docker.sock bind-
+  # mounted. Two problems closed by the removal:
+  #   1) CD never reran the one-shot, so Dockerfile.sandbox changes
+  #      (apt-upgrade Trivy patches, requirements-sandbox.txt bumps)
+  #      silently failed to land on prod.
+  #   2) docker.sock bind-mount + a CLI-only container exposed the host
+  #      docker daemon to a service whose only job was to call docker.
+  # Replacement: cd.yml `Build + push sandbox image` step produces
+  # ghcr.io/corefundev/sku-forecasting-sandbox:${SANDBOX_IMAGE_TAG} per
+  # commit; cd_deploy.sh pulls it explicitly; process-worker reads the
+  # SANDBOX_IMAGE env (default above) to invoke `docker run`.
 
   # ── Redis ─────────────────────────────────────────────────────
   # Audit R3-15 — when REDIS_PASSWORD is set, the server starts with

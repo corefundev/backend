@@ -50,9 +50,14 @@ on:
         default: false
 
 env:
-  REGISTRY:     ghcr.io
-  IMAGE_API:    ghcr.io/corefundev/sku-forecasting-api
-  IMAGE_WORKER: ghcr.io/corefundev/sku-forecasting-worker
+  REGISTRY:      ghcr.io
+  IMAGE_API:     ghcr.io/corefundev/sku-forecasting-api
+  IMAGE_WORKER:  ghcr.io/corefundev/sku-forecasting-worker
+  # R4-1 — sandbox image now built+pushed by CD (was: built locally on the
+  # VPS via a docker:26-cli + docker.sock one-shot compose service, which
+  # never reran after the initial deploy, so apt-upgrade and any change to
+  # Dockerfile.sandbox or requirements-sandbox.txt silently failed to land).
+  IMAGE_SANDBOX: ghcr.io/corefundev/sku-forecasting-sandbox
 
 concurrency:
   # Group name is intentionally NEW (-v2) — the prior `cd-${{ github.ref }}`
@@ -116,6 +121,27 @@ jobs:
             ${{ env.IMAGE_WORKER }}:latest
           cache-from: type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache
           cache-to:   type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache,mode=max
+
+      # R4-1 — sandbox image built+pushed on every CD run. process-worker
+      # runs `docker run ${SANDBOX_IMAGE}` to parse untrusted upload files;
+      # the previous flow built it locally on the VPS via a docker:26-cli
+      # one-shot compose service with /var/run/docker.sock bind-mounted —
+      # never reran after the initial deploy AND exposed the host docker
+      # daemon. This step keeps the image identity lockstep with api+worker
+      # so apt-upgrade (Trivy debian patches) + requirements-sandbox.txt
+      # changes actually land in prod.
+      - name: Build + push sandbox image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          file: docker/Dockerfile.sandbox
+          push: true
+          tags: |
+            ${{ env.IMAGE_SANDBOX }}:${{ steps.tag.outputs.sha }}
+            ${{ env.IMAGE_SANDBOX }}:main
+            ${{ env.IMAGE_SANDBOX }}:latest
+          cache-from: type=registry,ref=${{ env.IMAGE_SANDBOX }}:buildcache
+          cache-to:   type=registry,ref=${{ env.IMAGE_SANDBOX }}:buildcache,mode=max
 
   deploy-staging:
     name: Deploy → staging
