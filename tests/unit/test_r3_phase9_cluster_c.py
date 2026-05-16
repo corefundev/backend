@@ -137,7 +137,15 @@ def test_backend_pip_audit_is_hard_gate():
 
 def test_frontend_npm_audit_is_hard_gate():
     """The npm audit step in frontend CI must NOT have
-    continue-on-error, so a HIGH+ runtime-dep CVE fails the run."""
+    continue-on-error, so a HIGH+ runtime-dep CVE fails the run.
+
+    Frontend repo lives as a sibling checkout in dev (../frontend) but
+    NOT inside the backend CI runner — skip when the sibling is absent
+    so the backend unit-tests job stays self-contained. A parallel
+    test ships in the frontend repo's own suite."""
+    if not (_FRONTEND / ".github" / "workflows" / "ci.yml").exists():
+        pytest.skip("frontend repo not checked out alongside backend "
+                    "(expected outside dev workstation)")
     ci = (_FRONTEND / ".github" / "workflows" / "ci.yml").read_text()
     # Find the npm audit step.
     idx = ci.find("npm audit --audit-level=high")
