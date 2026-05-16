@@ -25,9 +25,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Pool singleton — shared across all requests
+# asyncio.Lock is lazy-initialised in _get_pool_lock() — it must bind
+# to whichever event loop is running at first call (each uvicorn worker
+# creates its own loop).
 _pool = None
-_pool_lock = None  # asyncio.Lock — lazy-init in _get_pool_lock() so it
-                   # binds to whichever event loop is running at first call.
+_pool_lock = None
 
 
 def _get_pool_lock():
