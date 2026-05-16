@@ -902,8 +902,21 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     from src.auth.email_normalize import canonical_email
     from src.auth.signup_rate_limit import (
         assert_signup_allowed, record_signup_success,
+        check_otp_verify_attempt,
         client_ip, RateLimited,
     )
+
+    # Audit R4-4 — per-IP cap on OTP verify. Lockout-via-audit_log keys
+    # on actor_email, so an attacker rotating across many emails never
+    # trips a per-email limit. The /24-subnet bucket here turns OTP-
+    # spray into a per-network cost.
+    try:
+        check_otp_verify_attempt(client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
 
     email = _validate_email_or_400(req.email)
     try:
@@ -1068,7 +1081,23 @@ async def auth_login_email(req: LoginEmailRequest, http_req: Request):
     if the email isn't registered. This prevents email enumeration via
     "user exists / doesn't exist" responses. Real users get an email,
     fake users don't — but the API doesn't tell you which.
+
+    Audit R4-3 — per-IP rate-limit. Captcha alone is insufficient against
+    solver farms ($1/1k commodity). Without this cap, an attacker could
+    flood Resend quota, spam real users' mailboxes, and probe registration
+    via response timing.
     """
+    from src.auth.signup_rate_limit import (
+        check_login_attempt, client_ip as _client_ip, RateLimited,
+    )
+    try:
+        check_login_attempt(_client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
+
     _verify_captcha_or_400(req.captcha_token)
     email = _validate_email_or_400(req.email)
 
@@ -1145,6 +1174,18 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     SINGLE OTP — a credential-stuffer can issue a fresh OTP, fail max-attempts,
     issue another, repeat. The audit_log window catches that pattern.
     """
+    # Audit R4-4 — per-IP cap on OTP verify (parallel to signup-verify).
+    from src.auth.signup_rate_limit import (
+        check_otp_verify_attempt, client_ip as _client_ip, RateLimited,
+    )
+    try:
+        check_otp_verify_attempt(_client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
+
     email = _validate_email_or_400(req.email)
     from src.auth.email_normalize import canonical_email
     try:

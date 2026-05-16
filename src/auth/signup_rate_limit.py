@@ -276,6 +276,77 @@ def check_token_attempt(ip: str) -> None:
         )
 
 
+def check_login_attempt(ip: str) -> None:
+    """
+    Per-IP rate-limit for /auth/login (OTP-send).
+
+    Audit R4-3 — signup got `check_signup_attempt` (R2-4) and token-
+    exchange got `check_token_attempt` (R2-4), but /auth/login was
+    missed. Without an IP cap, a captcha-solver farm (commodity
+    service ~$1/1k solves) floods /auth/login with valid captchas
+    and triggers OTP creates + email sends: burns Resend quota, spams
+    real users' mailboxes, and probes "is this email registered" via
+    timing on the constant-202 response.
+
+    Bucket: /24 subnet, same as signup/token. Default 20/hour (env
+    `LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET`). Fails open on Redis outage
+    matching the rest of the family.
+    """
+    r = _redis()
+    if r is None:
+        return                  # fail open
+
+    bucket = subnet(ip)
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    key = f"rl:login:attempt:{bucket}:{hour}"
+
+    count = _incr_with_ttl(r, key, 3600)
+
+    limit = int(os.environ.get("LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET", "20"))
+    if count > limit:
+        ttl = int(r.ttl(key) or 3600)
+        raise RateLimited(
+            f"Too many login attempts from your network. "
+            f"Try again in {ttl // 60 + 1} minutes.",
+            retry_after_sec=max(1, ttl),
+        )
+
+
+def check_otp_verify_attempt(ip: str) -> None:
+    """
+    Per-IP rate-limit for /auth/login/verify + /auth/signup/verify.
+
+    Audit R4-4 — the existing brute-force defence on these endpoints
+    keys on `actor_email` via `recent_failed_logins` (10 fails / 15
+    min / email). An attacker rotating across N harvested emails
+    never trips a single email's lockout — with N=10k known emails
+    + 6-digit OTP keyspace (10⁶), spray-checking 9 OTPs per email
+    per window lands ~1 valid OTP/day. The per-IP cap turns this
+    into a per-network cost instead of a global daily budget.
+
+    Bucket: /24 subnet. Default 30/hour (env
+    `OTP_VERIFY_PER_HOUR_PER_SUBNET`). Fails open on Redis outage.
+    """
+    r = _redis()
+    if r is None:
+        return                  # fail open
+
+    bucket = subnet(ip)
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    key = f"rl:otp:verify:{bucket}:{hour}"
+
+    count = _incr_with_ttl(r, key, 3600)
+
+    limit = int(os.environ.get("OTP_VERIFY_PER_HOUR_PER_SUBNET", "30"))
+    if count > limit:
+        ttl = int(r.ttl(key) or 3600)
+        raise RateLimited(
+            f"Too many verification attempts from your network. "
+            f"Try again in {ttl // 60 + 1} minutes.",
+            retry_after_sec=max(1, ttl),
+        )
+
+
 def check_rotate_attempt(client_id: str) -> None:
     """
     Per-client rate-limit for /clients/{id}/api-key/rotate.

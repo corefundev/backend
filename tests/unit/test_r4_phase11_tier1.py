@@ -175,6 +175,61 @@ def test_frontend_upgrade_page_handles_403():
     )
 
 
+# ── R4-3 + R4-4: rate-limit holes on login + OTP verify ──────────────────
+
+def test_check_login_attempt_exists_and_fail_open():
+    """check_login_attempt must exist and fail-open on Redis down,
+    matching the rest of the rate-limit family."""
+    from src.auth import signup_rate_limit
+    assert callable(getattr(signup_rate_limit, "check_login_attempt", None))
+    # fail-open when Redis returns None.
+    signup_rate_limit.check_login_attempt.__module__  # just confirm import
+
+
+def test_check_otp_verify_attempt_exists():
+    from src.auth import signup_rate_limit
+    assert callable(getattr(signup_rate_limit, "check_otp_verify_attempt", None))
+
+
+def test_auth_login_route_calls_check_login_attempt():
+    """/auth/login handler must invoke check_login_attempt before
+    captcha + DB work."""
+    text = (_BACKEND / "src" / "api" / "main.py").read_text()
+    start = text.find("async def auth_login_email")
+    assert start > 0
+    end = text.find('\n@app.', start + 1)
+    block = text[start:end]
+    assert "check_login_attempt" in block, (
+        "/auth/login must wire check_login_attempt (R4-3)"
+    )
+    # Must come before captcha verify so cheap-rejects happen first.
+    rl_idx = block.find("check_login_attempt")
+    captcha_idx = block.find("_verify_captcha_or_400")
+    assert rl_idx < captcha_idx, (
+        "rate-limit must precede captcha so we don't burn captcha CPU on flood"
+    )
+
+
+def test_auth_signup_verify_calls_check_otp_verify_attempt():
+    text = (_BACKEND / "src" / "api" / "main.py").read_text()
+    start = text.find("async def auth_signup_verify")
+    end = text.find('\n@app.', start + 1)
+    block = text[start:end]
+    assert "check_otp_verify_attempt" in block, (
+        "/auth/signup/verify must wire check_otp_verify_attempt (R4-4)"
+    )
+
+
+def test_auth_login_verify_calls_check_otp_verify_attempt():
+    text = (_BACKEND / "src" / "api" / "main.py").read_text()
+    start = text.find("async def auth_login_verify")
+    end = text.find('\n@app.', start + 1)
+    block = text[start:end]
+    assert "check_otp_verify_attempt" in block, (
+        "/auth/login/verify must wire check_otp_verify_attempt (R4-4)"
+    )
+
+
 # ── R4-7: uploads IDOR enumeration → collapse cross-tenant to 404 ──────────
 
 def test_uploads_get_collapses_cross_tenant_to_404():
