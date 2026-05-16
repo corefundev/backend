@@ -245,9 +245,18 @@ def _predict_baseline(
 def _get_split_points(
     dates: np.ndarray, horizon: int, n_splits: int
 ) -> list[pd.Timestamp]:
-    """Return n_splits split dates, spaced horizon days apart from the end."""
-    dates = pd.DatetimeIndex(sorted(dates))
-    end = dates[-1]
+    """Return n_splits split dates, spaced horizon days apart from the end.
+
+    Audit R3-36 — guard the empty-input edge case: a SKU group that
+    was filtered out by upstream feature engineering would arrive here
+    with `dates=[]` and the `dates[-1]` access used to raise IndexError
+    deep inside the validation loop. Empty input = empty splits, the
+    caller handles "no validation possible" explicitly.
+    """
+    idx = pd.DatetimeIndex(sorted(dates))
+    if len(idx) == 0:
+        return []
+    end = idx[-1]
     splits = []
     for i in range(n_splits, 0, -1):
         splits.append(end - pd.Timedelta(days=i * horizon))

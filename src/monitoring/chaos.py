@@ -26,6 +26,7 @@ Chaos engineering — fault injection для проверки устойчиво
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from contextlib import contextmanager
@@ -63,7 +64,18 @@ def inject_fault(
       "latency"      — добавить задержку latency_ms мс
       "random_error" — с вероятностью probability бросить исключение
       "network_loss" — симулировать потерю пакетов (random delay + retry)
+
+    Audit R3-33 — refuses to run when APP_ENV=production. The helper
+    is test-harness only; an accidental import + call from a prod
+    code-path (e.g. a developer leaving an @chaos decorator) must
+    fail loud rather than randomly throwing in production.
     """
+    if (os.environ.get("APP_ENV") or "").strip().lower() == "production":
+        raise RuntimeError(
+            "src.monitoring.chaos.inject_fault is test-harness only "
+            "and must not run with APP_ENV=production (audit R3-33)"
+        )
+
     if fault_type == "latency" and latency_ms > 0:
         logger.debug(f"[CHAOS] Injecting latency: {latency_ms}ms")
         time.sleep(latency_ms / 1000)

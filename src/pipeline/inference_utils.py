@@ -121,11 +121,28 @@ def recursive_forecast(
 
     # Lag/rolling configurations live in the column names — derive
     # them from feature_cols so we don't need the config here.
-    lags    = sorted({int(c.split("_")[1]) for c in feature_cols if c.startswith("lag_")})
+    #
+    # Audit R3-36 — defensive parse. Feature engineering owns the naming,
+    # but if a downstream rename/custom-feature pipeline produces e.g.
+    # `lag_` (no number) or `lag_v2`, the bare int() raised ValueError
+    # deep inside the inference recursion. Skip malformed entries; the
+    # well-formed ones still drive the recurrence.
+    def _safe_int_at(col: str, idx: int) -> int | None:
+        parts = col.split("_")
+        if len(parts) <= idx:
+            return None
+        try:
+            return int(parts[idx])
+        except ValueError:
+            return None
+
+    lags    = sorted({n for c in feature_cols if c.startswith("lag_")
+                      for n in [_safe_int_at(c, 1)] if n is not None})
     windows = sorted({
-        int(c.split("_")[2])
+        n
         for c in feature_cols
         if c.startswith(("rolling_mean_", "rolling_std_", "rolling_max_", "rolling_min_"))
+        for n in [_safe_int_at(c, 2)] if n is not None
     })
 
     # Carry-forward columns that the model uses but the user can't
