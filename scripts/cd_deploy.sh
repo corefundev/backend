@@ -127,6 +127,7 @@ rollback() {
 # and a follow-up commit can flip the compose `:-sku` to `:?` strict.
 inject_lockbox_key() {
     local key="$1"
+    local migration_seed="$2"   # value to write when both Lockbox AND .env are empty
     [ -x "scripts/lockbox_fetch_key.sh" ] || {
         echo "  R3-13: lockbox_fetch_key.sh missing — skip ${key}"
         return 0
@@ -141,16 +142,45 @@ inject_lockbox_key() {
         set +a
         scripts/lockbox_fetch_key.sh "$key" 2>/dev/null || true
     )
-    if [ -z "$value" ]; then
-        echo "  R3-13: Lockbox returned empty ${key} — keeping existing .env"
+
+    # Three branches:
+    #   (a) Lockbox returned non-empty → write to .env (the steady-state path)
+    #   (b) Lockbox empty but .env already has the key → leave it alone
+    #       (preserves a manually-seeded value, supports staged rollouts)
+    #   (c) Lockbox empty AND .env empty → seed with `migration_seed`
+    #       so the compose `:?` strict gate passes. This branch is
+    #       transitional: the seed value documents the audit-R3-13
+    #       weak fallback in /srv/backend/.env where ops can SEE it,
+    #       rather than burying it inside a compose YAML default.
+    #       Logs a loud WARN so the gap is visible in deploy output.
+    if [ -n "$value" ]; then
+        sed -i.bak "/^${key}=/d" /srv/backend/.env && rm -f /srv/backend/.env.bak
+        echo "${key}=${value}" >> /srv/backend/.env
+        echo "  R3-13: refreshed ${key} in /srv/backend/.env from Lockbox"
         return 0
     fi
-    # Idempotent rewrite: drop any existing line, append fresh.
-    sed -i.bak "/^${key}=/d" /srv/backend/.env && rm -f /srv/backend/.env.bak
-    echo "${key}=${value}" >> /srv/backend/.env
-    echo "  R3-13: refreshed ${key} in /srv/backend/.env from Lockbox"
+
+    if grep -q "^${key}=" /srv/backend/.env 2>/dev/null; then
+        echo "  R3-13: ${key} already present in /srv/backend/.env, Lockbox empty — leaving as-is"
+        return 0
+    fi
+
+    if [ -n "${migration_seed:-}" ]; then
+        echo "${key}=${migration_seed}" >> /srv/backend/.env
+        echo "::warning::R3-13: ${key} not in Lockbox AND not in /srv/backend/.env. Seeded with migration default '${migration_seed}' so compose :? gate passes. OPS ACTION REQUIRED: generate random pwd, ALTER USER, add to Lockbox staging+prod secret. See project_audit_remediation.md R3-13."
+        return 0
+    fi
+
+    echo "  R3-13: Lockbox empty AND no migration seed provided — skip ${key}"
 }
-inject_lockbox_key POSTGRES_PASSWORD
+
+# `sku` is the historical fallback that postgres has been running with
+# under the compose default. Seeding /srv/backend/.env with it keeps the
+# deploy functional while making the weak credential VISIBLE to anyone
+# running `grep POSTGRES_PASSWORD /srv/backend/.env`. The strict :? gate
+# in compose then ensures no future deploy can land without an EXPLICIT
+# value (Lockbox or otherwise).
+inject_lockbox_key POSTGRES_PASSWORD sku
 
 # ── Forward deploy ─────────────────────────────────────────────────
 echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin

@@ -102,19 +102,37 @@ def test_cd_deploy_inject_is_idempotent():
     )
 
 
-def test_cd_deploy_inject_graceful_on_empty_lockbox():
-    """When Lockbox returns empty (key not yet populated by ops),
-    the injector must leave .env unchanged and log a clear message."""
+def test_cd_deploy_inject_handles_three_branches():
+    """The R3-13-strict injector has three explicit branches:
+      (a) Lockbox returned non-empty → write value
+      (b) Lockbox empty but .env already has the key → leave alone
+      (c) Lockbox empty AND .env empty → seed with migration_seed + WARN
+    All three must be present so compose `:?` strict can never trip
+    in steady-state deploys."""
     text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
     inject_fn_start = text.find("inject_lockbox_key()")
     inject_fn_end   = text.find("inject_lockbox_key POSTGRES_PASSWORD")
     fn_body = text[inject_fn_start:inject_fn_end]
-    # Empty-check + skip with log line.
-    assert 'if [ -z "$value" ]' in fn_body, (
-        "must check for empty Lockbox response"
+    # (a) write when value non-empty
+    assert 'if [ -n "$value" ]' in fn_body, "branch (a) missing"
+    # (b) leave alone when .env already has the key
+    assert "already present in /srv/backend/.env" in fn_body, "branch (b) missing"
+    # (c) seed with migration_seed + WARN
+    assert "migration_seed" in fn_body, "branch (c) missing — migration_seed param"
+    assert "::warning::" in fn_body, "branch (c) must emit ::warning:: for GH UI"
+    assert "OPS ACTION REQUIRED" in fn_body, (
+        "WARN must point at the ops checklist so the gap is loud"
     )
-    assert "keeping existing .env" in fn_body, (
-        "must log 'keeping existing .env' so operators see the graceful skip"
+
+
+def test_cd_deploy_invokes_inject_with_sku_seed():
+    """The actual invocation must pass `sku` as the migration_seed so
+    a fresh-from-scratch deploy still works (matches what postgres has
+    been running with under the old `:-sku` fallback)."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    assert "inject_lockbox_key POSTGRES_PASSWORD sku" in text, (
+        "POSTGRES_PASSWORD invocation must seed with `sku` so compose "
+        ":? gate passes on a fresh /srv/backend/.env"
     )
 
 

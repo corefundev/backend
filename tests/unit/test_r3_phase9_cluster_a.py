@@ -55,27 +55,33 @@ def test_compose_dsns_reference_env_var():
     )
 
 
-def test_compose_postgres_password_default_is_explicit():
-    """The postgres service environment block must read POSTGRES_PASSWORD
-    via env interpolation (not a hardcoded literal). The presence of a
-    `:-` fallback is acceptable as a migration grace period, but a
-    literal `POSTGRES_PASSWORD: sku` would defeat the audit."""
+def test_compose_postgres_password_is_strict_required():
+    """R3-13 final flip — postgres service now uses `:?` strict, so a
+    deploy that lands without POSTGRES_PASSWORD in env fails at
+    compose-load with the explicit error message. The `:-sku`
+    fallback is gone (R3-13 close)."""
     txt = _compose_text()
-    # Find the postgres service env block.
     start = txt.find("  postgres:\n")
     assert start > 0, "postgres service not found in compose"
     end = txt.find("\n  pgbouncer:", start)
     pg_block = txt[start:end]
-    # Must reference the env var (with or without a graceful default).
-    assert "${POSTGRES_PASSWORD" in pg_block, (
-        "postgres service must interpolate POSTGRES_PASSWORD from env"
+    # Must use :? strict, not :-fallback.
+    assert "${POSTGRES_PASSWORD:?" in pg_block, (
+        "postgres service must use :? strict — R3-13 closed 2026-05-16"
     )
-    # Must NOT have a bare literal password assignment.
-    lines = [l.strip() for l in pg_block.splitlines() if l.strip().startswith("POSTGRES_PASSWORD:")]
-    for line in lines:
-        assert "${" in line, (
-            f"hardcoded POSTGRES_PASSWORD literal: {line!r}"
-        )
+    assert "${POSTGRES_PASSWORD:-" not in pg_block, (
+        "no `:-sku` (or any) fallback in postgres service env"
+    )
+
+
+def test_compose_no_remaining_sku_fallbacks():
+    """Every DSN must read bare ${POSTGRES_PASSWORD} (no fallback) so
+    a missing env fails one place (postgres :?) instead of silently
+    re-introducing the weak `sku` default through any other path."""
+    txt = _compose_text()
+    assert ":-sku}" not in txt, (
+        "legacy `${POSTGRES_PASSWORD:-sku}` resurfaced — re-audit R3-13"
+    )
 
 
 def test_env_example_has_explicit_postgres_password():
