@@ -41,5 +41,19 @@ fi
 #
 # `2>/dev/null` swallows bootstrap's own "injected N variables" log line
 # so the caller's command substitution gets a clean value.
+#
+# IMPORTANT — `lockbox_bootstrap.sh` has a "don't clobber explicit env
+# overrides" guard (see lines 121-126 of that script). If the parent
+# shell already has $KEY set (e.g. cd_deploy.sh's subshell sources
+# /srv/backend/.env first), bootstrap WILL NOT inject from Lockbox and
+# this script effectively echoes the existing value back. This is by
+# design — cd_deploy.sh::inject_lockbox_key uses idempotent
+# replace-line-or-leave-alone semantics, NOT live-overwrite-from-Lockbox.
+# Writing the real Lockbox value into /srv/backend/.env would expose
+# the production password on disk where any operator with deploy@
+# access can `cat .env`; the current pattern keeps the real value
+# resident only in the container env (injected at runtime by each
+# container's own bootstrap_secrets call). The `sku` migration seed
+# in .env is a placeholder for compose :? — runtime apps don't use it.
 LOCKBOX_ALLOWED_KEYS="$KEY" "$BOOTSTRAP" \
     sh -c "printf '%s' \"\${$KEY:-}\"" 2>/dev/null
