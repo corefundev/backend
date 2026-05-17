@@ -151,6 +151,19 @@ def _training_job(
                 runs.update(run_id, status=FAILED, ended_at=_now(), error=str(e))
             except Exception as upd_err:    # noqa: BLE001
                 logger.warning("training_runs FAILED update failed: %s", upd_err)
+        # R5-3 (2026-05-17) — also transition sku_clients.status back
+        # to "failed" so the API/UI can stop showing the client as
+        # "training". Previously only training_runs got updated;
+        # sku_clients.status stayed "training" forever after any
+        # RQ-mode (production default) failure.
+        try:
+            from src.clients.registry import get_registry as _get_registry
+            _get_registry().update(client_id, status="failed")
+        except Exception as st_err:    # noqa: BLE001
+            logger.warning(
+                "R5-3: sku_clients.status FAILED update failed for %s: %s",
+                client_id, st_err,
+            )
         # Notify on failure too — both channels, silently skip if
         # the user hasn't opted in or hasn't linked.
         try:
@@ -193,6 +206,23 @@ def _training_job(
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)
+
+    # R5-3 (2026-05-17) — transition sku_clients.status from "training"
+    # → "ready" on success. The API sets "training" at enqueue time
+    # (src/api/main.py trigger_training); only this RQ-job and
+    # auto_retrain.run_auto_retrain knew to flip it back, and only the
+    # latter actually did. Effect of the gap: every async (production
+    # default) training left the client row stuck in status="training"
+    # forever, blocking any UI/route that gates on a non-training state.
+    # Best-effort — registry failures must not retro-fail a completed run.
+    try:
+        from src.clients.registry import get_registry as _get_registry
+        _get_registry().update(client_id, status="ready")
+    except Exception as st_err:    # noqa: BLE001
+        logger.warning(
+            "R5-3: sku_clients.status READY update failed for %s: %s",
+            client_id, st_err,
+        )
 
     # ── Notify the user that training is done ──────────────────
     # Email + Telegram in parallel, both best-effort. Each channel

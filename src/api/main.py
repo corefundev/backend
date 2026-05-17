@@ -2603,37 +2603,38 @@ async def predict_batch(
     """
     Batch inference: many predict requests for one client in parallel.
 
-    Two correctness properties this implementation has that the
-    previous one (sequential awaits + no cache lock) didn't:
+    Concurrency: N predict calls run concurrently via `asyncio.gather`
+    (vs sequential awaits which made batch latency = N × single).
 
-    1. The N predict calls actually run concurrently via
-       `asyncio.gather`. Sequential awaits made batch latency = N ×
-       single-request latency.
+    Audit R5-2 (2026-05-17): the previous implementation acquired the
+    per-client model-cache lock via `await asyncio.to_thread(lk.acquire)`
+    around the gather call. That deadlocked on cold-cache batches:
+    the outer acquire ran on the executor thread, but each inner
+    `predict()` → `_get_service()` → `with _client_lock(client_id):`
+    ran on the event-loop thread and blocked forever waiting for the
+    same non-reentrant `threading.Lock`. RLock wouldn't help because
+    lock ownership is per-thread and the two threads are different.
 
-    2. We acquire and HOLD the per-client model-cache lock for the
-       whole batch. Without it, a concurrent `/reload` for the same
-       client could evict the model mid-batch, forcing some requests
-       to wait for an unrelated reload and silently doubling tail
-       latency on the survivors.
-
-       The lock is the same `threading.Lock` `_get_service` uses, so
-       reload waits but other clients' predict batches are not
-       blocked (per-client lock, not global). `asyncio.to_thread`
-       wraps the blocking lock acquire so we don't stall the event
-       loop.
+    Fix: drop the outer batch-wide lock. Each inner `_get_service()`
+    already takes the per-client lock with double-checked locking, so:
+      - concurrent batches for the same client coalesce on the first
+        cold load (subsequent calls hit the populated cache);
+      - a racing `/reload` may invalidate the cache mid-batch, in
+        which case the next predict in the batch re-fetches via
+        `_get_service()` — same model unless ops explicitly reloaded.
+    The "reload waits for batch" invariant the old code aimed for
+    isn't worth a production deadlock; `/reload` is an explicit
+    operator action, not a hot-path concern.
     """
     require_client_access(client_id, auth)
 
     import asyncio as _asyncio
-    lk = _client_lock(client_id)
-    await _asyncio.to_thread(lk.acquire)
-    try:
-        results = await _asyncio.gather(
-            *(predict(client_id, r, auth) for r in req.requests),
-            return_exceptions=False,
-        )
-    finally:
-        lk.release()
+    # No outer lock — R5-2 deadlock fix. Inner _get_service handles
+    # cache coherency.
+    results = await _asyncio.gather(
+        *(predict(client_id, r, auth) for r in req.requests),
+        return_exceptions=False,
+    )
 
     return {"client_id": client_id, "results": list(results), "count": len(results)}
 
