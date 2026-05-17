@@ -41,13 +41,20 @@ def test_cd_workflow_builds_sandbox_image():
     assert sandbox_step_idx > 0, (
         "cd.yml must have a 'Build + push sandbox image' step (R4-1)"
     )
-    # Tag block: IMAGE_SANDBOX:<sha> + main + latest
+    # Tag block: IMAGE_SANDBOX:<sha> + :main.
+    # R4-21 (Tier 6a) — :latest tag removed from CD push; the dev/fresh-VPS
+    # fallback is :main (always tracks main-tip), not :latest (unbounded
+    # drift surface). The original R4-1 test required :latest as
+    # defense-in-depth; that requirement is superseded by R4-21.
     step_block = text[sandbox_step_idx:sandbox_step_idx + 2000]
     assert "${{ env.IMAGE_SANDBOX }}:${{ steps.tag.outputs.sha }}" in step_block, (
         "sandbox build step must produce the per-SHA tag"
     )
-    assert "${{ env.IMAGE_SANDBOX }}:latest" in step_block, (
-        "sandbox build step must also tag :latest as defense-in-depth"
+    assert "${{ env.IMAGE_SANDBOX }}:main" in step_block, (
+        "sandbox build step must also tag :main as fresh-VPS fallback (R4-21)"
+    )
+    assert "${{ env.IMAGE_SANDBOX }}:latest" not in step_block, (
+        ":latest tag must NOT be pushed by CD (R4-21 — unbounded drift)"
     )
 
 
