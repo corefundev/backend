@@ -281,7 +281,11 @@ services:
 
   # ── ClamAV antivirus ──────────────────────────────────────────
   clamav:
-    image: clamav/clamav:1.4
+    # R4-20 digest-pinned 2026-05-17 — floating :1.4 could silently
+    # ship a different layer set after a Docker Hub re-push. Pin to the
+    # observed prod digest; bump intentionally with a fresh `docker
+    # manifest inspect clamav/clamav:1.4`.
+    image: clamav/clamav:1.4@sha256:2859f99b97a70f84fb524faf54fdd7e3a5d8ac084e79f03a704b334526106923
     # Opt into autoheal — clamd socket transiently drops during freshclam
     # signature reloads (~hourly); without autoheal the container ends up
     # in "unhealthy" forever and blocks scan-worker recreate via depends_on.
@@ -324,7 +328,8 @@ services:
   # loud warning so ops sees the gap. Production overrides REDIS_PASSWORD
   # via Lockbox (key listed in LOCKBOX_ALLOWED_KEYS).
   redis:
-    image: redis:7.2-alpine
+    # R4-20 digest-pinned 2026-05-17
+    image: redis:7.2-alpine@sha256:dfa18828cbc07b3ae6a95ec7343f6c214fdee2d836197b4be8e9904420762cd8
     mem_limit: 256m
     cpus: 0.5
     ports:
@@ -473,9 +478,17 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── MinIO (local S3-compatible storage) ───────────────────────
+  # ── MinIO (local S3-compatible storage — DEV ONLY) ────────────
+  # R4-13 marked MinIO as dead-in-prod (Beget S3 is the actual
+  # backend); R4-20/R4-21 close the residual exposure by
+  # profile-gating + digest-pinning. With `profiles: ["dev"]` the
+  # service is excluded from the default compose stack and only
+  # starts when explicitly requested via `--profile dev`. Prod CD
+  # never enables that profile, so prod can no longer accidentally
+  # boot MinIO via a stray `compose up`.
   minio:
-    image: minio/minio:latest
+    profiles: ["dev"]
+    image: minio/minio:RELEASE.2024-08-29T01-40-52Z@sha256:0bd79595dbcf155782860716abf4cf79d5ee32a9508b60fa1a88793bbe55b245
     ports:
       - "9000:9000"
       - "9001:9001"       # MinIO Console UI
@@ -496,8 +509,10 @@ services:
   # NOTE: bucket policies in MinIO are set via `mc anonymous` / `mc policy`;
   # in real S3 (Beget/AWS), use IAM per-role policies as documented in
   # .env.example. The MinIO policies below just block anonymous access.
+  # R4-20/R4-21 — profile-gated + digest-pinned alongside minio above.
   minio-init:
-    image: minio/mc:latest
+    profiles: ["dev"]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       minio: { condition: service_healthy }
     entrypoint: >
@@ -530,7 +545,8 @@ services:
     # ExitCode=0 (Docker masks the OOM after the kill if reaped fast).
     # 2g + --workers 1 keeps the math comfortably under: ~600MB peak
     # observed.
-    image: ghcr.io/mlflow/mlflow:v3.11.1
+    # R4-20 digest-pinned 2026-05-17
+    image: ghcr.io/mlflow/mlflow:v3.11.1@sha256:6cb0a22c0d4d722a793c2e93d89ba28b10b6b27d4c1e60ab2533a8e081ffca2d
     logging: *log-rotation
     mem_limit: 2g
     cpus: 1.0
@@ -565,7 +581,9 @@ services:
 
   # ── Airflow ───────────────────────────────────────────────────
   airflow-webserver:
-    image: apache/airflow:2.9.1
+    # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
+    # prod cd_deploy.sh, but pinning keeps the definition consistent).
+    image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
     ports:
       - "8080:8080"
     environment:
@@ -595,7 +613,9 @@ services:
       retries: 5
 
   airflow-scheduler:
-    image: apache/airflow:2.9.1
+    # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
+    # prod cd_deploy.sh, but pinning keeps the definition consistent).
+    image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
@@ -625,7 +645,9 @@ services:
 
   # One-time DB init for Airflow
   airflow-init:
-    image: apache/airflow:2.9.1
+    # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
+    # prod cd_deploy.sh, but pinning keeps the definition consistent).
+    image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
@@ -670,7 +692,8 @@ services:
   # StartTLS support (blackbox's YAML-byte-encoding broke the 8-byte
   # SSLRequest handshake — see commit history).
   ssl-exporter:
-    image: ribbybibby/ssl-exporter:2.4.3
+    # R4-20 digest-pinned 2026-05-17
+    image: ribbybibby/ssl-exporter:2.4.3@sha256:f6812639a073f8eedc922e0423a57becd6302ccd04a4182108523e4ff83a2bc1
     restart: unless-stopped
     volumes:
       - ./ssl-exporter.yml:/config/ssl_exporter.yml:ro
@@ -692,7 +715,8 @@ services:
   # Polls Redis for RQ queue stats (jobs_total, queue_size, worker_count).
   # No secrets needed — just a Redis URL.
   rq-exporter:
-    image: mdawar/rq-exporter:v3.1.0
+    # R4-20 digest-pinned 2026-05-17
+    image: mdawar/rq-exporter:v3.1.0@sha256:d82dd3c4f8f385ad167688d87ff37aa9e0eeeb7dcaf331998310b2c85c2969d6
     environment:
       RQ_REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     depends_on:
@@ -715,7 +739,8 @@ services:
   # picks it up on its next scrape. The BackupStale alert fires if
   # that timestamp is more than 25h old.
   pushgateway:
-    image: prom/pushgateway:v1.9.0
+    # R4-20 digest-pinned 2026-05-17
+    image: prom/pushgateway:v1.9.0@sha256:98a458415f8f5afcfd45622d289a0aa67063563bec0f90d598ebc76783571936
     restart: unless-stopped
     # Internal-only — backup pushes from inside docker network,
     # prometheus scrapes from inside docker network.
@@ -727,7 +752,13 @@ services:
       start_period: 5s
 
   prometheus:
-    image: prom/prometheus:v2.59.1  # audit R2-29: bumped from v2.51.2
+    # R4-20 — R2-29 declared v2.59.1 but that tag never existed on
+    # Docker Hub, so `compose pull` silently failed and prod stayed
+    # on v2.51.2 since 2024-Q1 (CD never recreated the container).
+    # Bump to v2.55.1 (latest 2.x stable on Docker Hub, includes all
+    # security patches accrued since v2.51) AND digest-pin so the
+    # observed identity matches what's documented in the file.
+    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
     ports:
       - "9090:9090"
     volumes:
@@ -766,7 +797,8 @@ services:
   # narrowly to avoid surprise restarts of services that consider
   # unhealthy a soft state).
   autoheal:
-    image: willfarrell/autoheal:1.2.0
+    # R4-20 digest-pinned 2026-05-17
+    image: willfarrell/autoheal:1.2.0@sha256:31f580ef0279eaced5b38d631b08c474d70d8403c1c2fdd6ddcf2e879d5f3f7c
     mem_limit: 32m
     cpus: 0.1
     environment:
@@ -785,7 +817,8 @@ services:
   # days before the 1g→2g fix). Read-only mounts only — cAdvisor never
   # writes to the host.
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    # R4-20 digest-pinned 2026-05-17
+    image: gcr.io/cadvisor/cadvisor:v0.49.1@sha256:3cde6faf0791ebf7b41d6f8ae7145466fed712ea6f252c935294d2608b1af388
     mem_limit: 256m
     cpus: 0.3
     privileged: true        # cAdvisor needs CAP_SYS_PTRACE for /proc/N/ns
@@ -821,7 +854,8 @@ services:
   # filesystems and processes. Not exposing :9100 on the host so it
   # stays internal to the docker network.
   node-exporter:
-    image: prom/node-exporter:v1.8.1
+    # R4-20 digest-pinned 2026-05-17
+    image: prom/node-exporter:v1.8.1@sha256:fa7fa12a57eff607176d5c363d8bb08dfbf636b36ac3cb5613a202f3c61a6631
     pid: host
     mem_limit: 64m
     cpus: 0.2
@@ -928,7 +962,8 @@ services:
   # 7-day retention. Internal-only — query via Grafana → Explore →
   # Tempo. Loki's derivedField for trace_id auto-links to traces.
   tempo:
-    image: grafana/tempo:2.5.0
+    # R4-20 digest-pinned 2026-05-17
+    image: grafana/tempo:2.5.0@sha256:f0200a9bff6d14eb3a4332194f7b77c37ee1a3535e7e41db024d95aab6f1b4e8
     restart: unless-stopped
     volumes:
       - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
@@ -947,7 +982,8 @@ services:
   # internal-only — query via Grafana → Explore → Loki datasource.
   # Retention 30 days (loki-config.yaml).
   loki:
-    image: grafana/loki:3.0.0
+    # R4-20 digest-pinned 2026-05-17
+    image: grafana/loki:3.0.0@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
     restart: unless-stopped
     volumes:
       - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
@@ -961,7 +997,8 @@ services:
       start_period: 30s
 
   promtail:
-    image: grafana/promtail:3.0.0
+    # R4-20 digest-pinned 2026-05-17
+    image: grafana/promtail:3.0.0@sha256:d3de3da9431cfbe74a6a94555050df5257f357e827be8e63f8998d509c37af8b
     restart: unless-stopped
     volumes:
       - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
@@ -986,7 +1023,8 @@ services:
     # used for ssl-exporter for the same reason.
 
   grafana:
-    image: grafana/grafana:10.4.2
+    # R4-20 digest-pinned 2026-05-17
+    image: grafana/grafana:10.4.2@sha256:7d5faae481a4c6f436c99e98af11534f7fd5e8d3e35213552dd1dd02bc393d2e
     ports:
       - "3000:3000"
     environment:

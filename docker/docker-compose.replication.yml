@@ -62,7 +62,9 @@ services:
       - /srv/backend/secrets/pg-ssl:/etc/ssl/pg:ro
 
   pg-firewall:
-    image: alpine:3.20
+    # R4-20 digest-pinned 2026-05-17 (same digest as Dockerfile.pgbouncer/
+    # backup/alertmanager/postgres-exporter pin per R3-20).
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
     container_name: pg-firewall
     # privileged + network_mode: host gives the container CAP_NET_ADMIN
     # against the HOST's iptables (not its own netns). That's the

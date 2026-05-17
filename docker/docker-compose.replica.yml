@@ -24,7 +24,8 @@
 
 services:
   postgres-replica:
-    image: postgres:16-alpine
+    # R4-20 digest-pinned 2026-05-17 (replica VPS stack).
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
     container_name: postgres-replica
     restart: unless-stopped
     # Standby mode is signaled by the presence of standby.signal in the
@@ -87,7 +88,8 @@ services:
   # env on the host (set when running `docker compose up`). Same secret
   # bootstrap_replica.sh / configure_replica_ssl.sh use.
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
+    # R4-20 digest-pinned 2026-05-17 (replica VPS metrics exporter).
+    image: prometheuscommunity/postgres-exporter:v0.15.0@sha256:386b12d19eab2a37d7cd8ca8b4c7491cc7a830d9581f49af6c98a393da9605e6
     container_name: postgres-exporter
     restart: unless-stopped
     environment:
@@ -113,7 +115,8 @@ services:
   # to PRIMARY_CIDR + localhost; everything else gets DROPed in
   # DOCKER-USER chain. Self-heals every hour.
   replica-firewall:
-    image: alpine:3.20
+    # R4-20 digest-pinned 2026-05-17 (same digest as R3-20 alpine pin).
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
     container_name: replica-firewall
     privileged: true
     network_mode: host
