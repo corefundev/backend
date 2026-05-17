@@ -126,11 +126,34 @@ def test_upgrade_route_remains_self_service_by_design():
     """BY-DESIGN: /upgrade must NOT have admin gate while the payment
     acquiring integration is pending. Owner-of-client can flip tiers
     freely — see project_app_state.md. Guards against a future audit
-    re-applying the misplaced R4-6 admin gate without checking memory."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def upgrade_client_plan")
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    re-applying the misplaced R4-6 admin gate without checking memory.
+
+    R5-M1 (2026-05-18) — the handler moved from main.py to
+    routers/plans.py as part of the god-module split. Try both
+    locations; the invariant is about the handler body, not the file.
+    """
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "plans.py",
+    )
+    block = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        start = text.find("async def upgrade_client_plan")
+        if start < 0:
+            continue
+        end_app    = text.find('\n@app.',    start + 1)
+        end_router = text.find('\n@router.', start + 1)
+        ends = [e for e in (end_app, end_router) if e > 0]
+        end = min(ends) if ends else -1
+        block = text[start:end] if end > 0 else text[start:]
+        break
+    assert block is not None, (
+        "upgrade_client_plan handler not found in main.py or "
+        "routers/plans.py — has it been deleted?"
+    )
     # The handler must NOT require admin role until payment integration.
     assert 'require_role("admin")' not in block, (
         "/upgrade is intentionally self-service during acquiring stub — "

@@ -119,6 +119,33 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_plans_domain_lives_in_router():
+    """The `plans` domain (R5-M1 slice 4) — 3 routes — lives in
+    `src/api/routers/plans.py`."""
+    plans_router = _ROUTERS_DIR / "plans.py"
+    assert plans_router.is_file(), (
+        "src/api/routers/plans.py must exist after R5-M1 slice 4"
+    )
+    text = plans_router.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('get',  '/plans'),
+        ('get',  '/clients/{client_id}/usage'),
+        ('post', '/clients/{client_id}/upgrade'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"plans.py must own {method.upper()} {path}"
+        )
+
+    main_text = _MAIN.read_text()
+    for path in ("/plans", "/clients/{client_id}/usage", "/clients/{client_id}/upgrade"):
+        assert f'@app.get("{path}"' not in main_text and \
+               f'@app.post("{path}"' not in main_text, (
+            f"main.py still has a @app handler for {path} — must be in plans.py"
+        )
+    assert "plans_router" in main_text
+
+
 def test_notifications_domain_lives_in_router():
     """The `notifications` domain (R5-M1 slice 3) — 4 routes — must
     live in `src/api/routers/notifications.py`, not main.py."""
