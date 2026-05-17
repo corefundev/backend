@@ -18,7 +18,12 @@
 #
 # Prerequisite on host:
 #   • Place the downloaded `authorized_key.json` at ./secrets/yc-sa-key.json
-#   • chmod 644 ./secrets/yc-sa-key.json   (dir is 700, container reads as non-root)
+#   • chmod 600 ./secrets/yc-sa-key.json   (R5-21 — owner-only read;
+#     containers enter as root for lockbox_bootstrap and root bypasses
+#     host bind-mount perms, so 600 doesn't break the read path. The
+#     parent ./secrets/ dir is 700 separately. Defense-in-depth: 600
+#     prevents any non-deploy local user on the VPS from cat'ing the
+#     private_key block.)
 #
 # The file NEVER gets rebuilt into images and NEVER gets checked into git
 # (add ./secrets/ to .gitignore).

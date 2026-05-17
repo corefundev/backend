@@ -115,12 +115,17 @@ echo "       new key id = $NEW_KEY_ID"
 # gets interrupted, the live file is untouched.
 echo "[2/5] scp → ${VPS_PATH}.new"
 scp -q "$NEW_KEY_FILE" "${VPS_USER}@${VPS_HOST}:${VPS_PATH}.new"
-# chmod 644 (not 600): the file is owned by host uid 1000 (deploy) but
-# read by container uid 999 (sku). 600 makes it unreadable from inside
-# the container → silent Lockbox bootstrap failure. The directory at
-# /srv/backend/secrets/ stays 700 so non-deploy host users can't see in.
+# R5-21 (2026-05-17) — chmod 600. The legacy comment here claimed
+# 644 was required because the container reads as uid 999 (sku);
+# that was WRONG. Every Lockbox-consuming container (backup,
+# postgres, alertmanager, postgres-exporter) enters as root (uid 0)
+# at lockbox_bootstrap.sh time — root bypasses host file perms on
+# bind-mounts. Verified on prod: chmod 600 + container restart →
+# `lockbox_bootstrap: injected 84 variables`. 644 was leaving the
+# private_key world-readable to any local user on the VPS — minor
+# but real privilege escalation surface.
 ssh -q "${VPS_USER}@${VPS_HOST}" \
-    "chmod 644 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
+    "chmod 600 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
 
 # ── Step 3: restart containers — they'll pick up new key at startup ─────
 # Order matters: api first (shortest downtime users feel), then workers.
