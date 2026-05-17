@@ -76,9 +76,16 @@ services:
       - /srv/backend/secrets/pg-ssl:/etc/ssl/pg:ro
 
   pg-firewall:
-    # R4-20 digest-pinned 2026-05-17 (same digest as Dockerfile.pgbouncer/
-    # backup/alertmanager/postgres-exporter pin per R3-20).
-    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    # R5-M12 (2026-05-17) — switched from alpine:3.20 + `apk add iptables`
+    # at startup to a custom image that bakes iptables in at build time.
+    # Closes the silent-fail mode where an Alpine CDN blip → apk-add fails
+    # → script exits → pg-firewall restart loop → postgres:5432 wide open
+    # to anything that can reach the host (no healthcheck on this sidecar,
+    # no metric tracks "rules applied"). See docker/Dockerfile.pg-firewall.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pg-firewall
+    image: docker-pg-firewall:custom
     container_name: pg-firewall
     # privileged + network_mode: host gives the container CAP_NET_ADMIN
     # against the HOST's iptables (not its own netns). That's the
@@ -93,7 +100,16 @@ services:
       - -c
       - |
         set -e
-        apk add --no-cache iptables >/dev/null
+        # R5-M12 — iptables is now baked into docker-pg-firewall:custom
+        # at image build time (see docker/Dockerfile.pg-firewall). The
+        # legacy `apk add --no-cache iptables` was removed: a single
+        # Alpine CDN blip at container start used to silently leave
+        # postgres:5432 wide open to the public internet for the duration
+        # of the restart loop.
+        command -v iptables >/dev/null 2>&1 || {
+            echo "ERROR: iptables binary missing from image" >&2
+            exit 1
+        }
         ensure_rule() {
             while iptables -C DOCKER-USER "$$@" 2>/dev/null; do
                 iptables -D DOCKER-USER "$$@"

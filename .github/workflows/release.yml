@@ -18,6 +18,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8
     permissions:
       contents: write       # create release
       packages: write       # push images to ghcr

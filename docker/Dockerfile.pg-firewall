@@ -1,0 +1,34 @@
+# R5-M12 (2026-05-17) — custom image for the pg-firewall sidecar so
+# iptables is baked in at build time, NOT installed via `apk add` on
+# every container start.
+#
+# Previous shape (now obsolete): pg-firewall used alpine:3.20 directly
+# and ran `apk add --no-cache iptables` in its command block. Two
+# failure modes that the bake-in closes:
+#
+#   1. On any Alpine CDN blip / package-mirror outage at container
+#      start, the apk-add fails → script exits → pg-firewall enters
+#      restart loop → during the loop, postgres:5432 is wide open to
+#      anything that can reach the host. There's no healthcheck on
+#      this sidecar, and no metric tracks "rules applied" state — the
+#      gap could last hours before anyone noticed.
+#   2. apk-add at runtime pulls whatever the current Alpine mirror
+#      serves, defeating the R4-20 digest-pin discipline (the whole
+#      point of pinning the alpine:3.20 base was to lock the
+#      vulnerability surface to a known SHA).
+#
+# Bake-in fixes both: iptables-nft binary is in the image layer at
+# build time (visible to Trivy scans), no runtime network dependency
+# at start, image fully digest-addressable via R4-20.
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+RUN apk add --no-cache iptables
+
+# iptables-nft is what alpine ships by default; the user-namespaced
+# container runs `iptables ...` from the host's netns via privileged
+# + network_mode: host (see docker-compose.replication.yml::pg-firewall).
+# The binary doesn't need to do anything at image-build time — the
+# command block in compose handles rule application + 1-hour reapply.
+
+# No ENTRYPOINT — compose's `command:` block drives the firewall loop.

@@ -19,6 +19,7 @@ jobs:
   lint:
     name: Lint (flake8)
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -58,6 +59,7 @@ jobs:
   typecheck:
     name: Type check (mypy)
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -70,6 +72,7 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -94,6 +97,7 @@ jobs:
   integration-tests:
     name: Integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     services:
       postgres:
         image: postgres:16-alpine
@@ -141,6 +145,7 @@ jobs:
   chaos-tests:
     name: Chaos engineering
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     needs: [unit-tests]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -171,6 +176,7 @@ jobs:
   build-docker:
     name: Build Docker images
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     needs: [lint, unit-tests, integration-tests]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -218,6 +224,7 @@ jobs:
   image-scan:
     name: Trivy ${{ matrix.image.name }} scan
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     needs: [build-docker]
     strategy:
       fail-fast: false
@@ -312,6 +319,7 @@ jobs:
   pip-audit:
     name: pip-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — bound per-job to 30min
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0

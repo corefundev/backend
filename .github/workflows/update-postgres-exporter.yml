@@ -21,6 +21,7 @@ jobs:
   update:
     name: Build + restart postgres-exporter
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # R5-M8 — bound stuck SSH / psql to 15min, not GH default 6h
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 

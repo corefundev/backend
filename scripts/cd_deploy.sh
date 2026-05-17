@@ -206,7 +206,14 @@ if grep -q '^SANDBOX_IMAGE=sku-forecasting-sandbox' /srv/backend/.env 2>/dev/nul
 fi
 
 # ── Forward deploy ─────────────────────────────────────────────────
+# R5-M11 (2026-05-17) — drop xtrace just for the docker-login line so
+# `set -x` doesn't echo `echo $GHCR_PW | docker login …` into the CD
+# job log. GHCR_PW is the runner-issued GITHUB_TOKEN (short-lived to
+# job-end), but archived logs can be exported, and the principle of
+# "secrets never appear in plaintext logs" trumps the bounded TTL.
+set +x
 echo "$GHCR_PW" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+set -x
 
 echo "  pulling images..."
 docker compose $COMPOSE_ARGS pull api worker scan-worker process-worker migrate

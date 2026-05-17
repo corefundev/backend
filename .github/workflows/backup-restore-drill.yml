@@ -26,6 +26,7 @@ jobs:
   drill:
     name: Restore latest dump + smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # R5-M8 — pg_basebackup / restore drills take longer
     services:
       postgres:
         image: postgres:16-alpine
