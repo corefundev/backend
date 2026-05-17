@@ -87,12 +87,35 @@ def test_rotate_route_wires_rate_limit():
 
 def test_reset_config_route_audits_event():
     """reset_client_config must call record_event with subtype
-    'config_reset' BEFORE applying the reset."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def reset_client_config")
-    assert start > 0, "reset_client_config handler missing"
-    end = text.find('@app.get("/system/config"', start)
-    block = text[start:end]
+    'config_reset' BEFORE applying the reset.
+
+    R5-M1 slice 5 (2026-05-18) — the handler moved from main.py to
+    routers/config.py. Try both locations; the R3-25 invariant is
+    about audit-before-mutate, not which file owns the handler.
+    """
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "config.py",
+    )
+    block = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        start = text.find("async def reset_client_config")
+        if start < 0:
+            continue
+        # Stop at the next route decorator (@app. or @router.).
+        end_app    = text.find('@app.get("/system/config"', start)
+        end_router = text.find('@router.', start + len("async def reset_client_config"))
+        ends = [e for e in (end_app, end_router) if e > 0]
+        end = min(ends) if ends else -1
+        block = text[start:end] if end > 0 else text[start:]
+        break
+    assert block is not None, (
+        "reset_client_config handler not found in main.py or "
+        "routers/config.py — has it been deleted?"
+    )
     assert "record_event" in block, "DELETE config must emit audit event"
     assert "config_reset" in block, "audit event_subtype 'config_reset' missing"
     # Audit must come before the actual mgr.reset() so failures still log.

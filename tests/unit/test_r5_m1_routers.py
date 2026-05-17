@@ -119,6 +119,46 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_config_domain_lives_in_router():
+    """The `config` domain (R5-M1 slice 5) — 5 routes — lives in
+    `src/api/routers/config.py`. Slice-5 also requires the
+    service-cache prep (src/api/service_cache.py) to be present so
+    that the router can invalidate via the public API."""
+    cfg_router = _ROUTERS_DIR / "config.py"
+    assert cfg_router.is_file(), (
+        "src/api/routers/config.py must exist after R5-M1 slice 5"
+    )
+    text = cfg_router.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('get',    '/clients/{client_id}/config'),
+        ('put',    '/clients/{client_id}/config'),
+        ('patch',  '/clients/{client_id}/config'),
+        ('delete', '/clients/{client_id}/config'),
+        ('get',    '/system/config'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"config.py must own {method.upper()} {path}"
+        )
+    # Cache-invalidation goes through the public API (slice-5 prep).
+    assert "from src.api.service_cache import invalidate" in text, (
+        "config.py must use service_cache.invalidate, not reach into "
+        "main.py for `_services.pop`"
+    )
+
+    main_text = _MAIN.read_text()
+    for path in ("/clients/{client_id}/config", "/system/config"):
+        for method in ('get', 'put', 'patch', 'delete'):
+            assert f'@app.{method}("{path}"' not in main_text, (
+                f"main.py still has @app.{method.upper()} for {path} — "
+                "must be in config.py"
+            )
+    assert "config_router" in main_text
+    assert (_BACKEND / "src" / "api" / "service_cache.py").is_file(), (
+        "src/api/service_cache.py must exist (slice-5 prep)"
+    )
+
+
 def test_plans_domain_lives_in_router():
     """The `plans` domain (R5-M1 slice 4) — 3 routes — lives in
     `src/api/routers/plans.py`."""
