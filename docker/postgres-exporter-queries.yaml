@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Custom queries for prometheuscommunity/postgres_exporter v0.15.0.
+#
+# R5-13 (2026-05-17) — `alerts.yml::PgReplicaLagHigh` referenced
+# `pg_replication_lag_seconds` which the default postgres_exporter
+# collector set does NOT emit. The alert was silently broken (same
+# phantom-metric pattern as the just-fixed RqWorkerSilent).
+#
+# This file adds the missing series via a custom SQL query — mounted
+# into the postgres-exporter container and registered via the
+# --extend.query-path flag (see docker-compose.replica.yml).
+#
+# Naming: custom-query metrics get the format
+# `pg_<query_name>_<column_name>`. So query name `replication_lag` +
+# column `seconds` produces `pg_replication_lag_seconds`, matching the
+# alert.
+#
+# Behaviour:
+#   On the replica, `pg_last_xact_replay_timestamp()` returns the
+#   wall-clock at which the last applied WAL record was generated on
+#   primary. `now() - that` is the apply lag in seconds. Zero / NULL
+#   on primary (recovery mode is off there).
+# ─────────────────────────────────────────────────────────────────────────
+
+pg_replication_lag:
+  query: |
+    SELECT
+        CASE
+            WHEN pg_is_in_recovery()
+            THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::int
+            ELSE 0
+        END AS seconds
+  master: false
+  metrics:
+    - seconds:
+        usage: "GAUGE"
+        description: "Replication apply lag in seconds (replica-side; 0 on primary)"

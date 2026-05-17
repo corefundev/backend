@@ -856,6 +856,14 @@ services:
       # Disable noisy collectors that produce no actionable signal —
       # we only want container-level lifecycle + resource metrics.
       - "--disable_metrics=disk,diskIO,tcp,udp,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl"
+      # R5-12 (2026-05-17) — opt-in to the `oom_event` collector so
+      # cAdvisor emits `container_oom_events_total`. Without this flag
+      # cAdvisor v0.47+ doesn't publish the OOM series and the
+      # `ContainerOOMKilled` alert in docker/alerts.yml is silently
+      # broken (same class as the just-fixed RqWorkerSilent —
+      # phantom-metric alert). Cost: negligible, the collector parses
+      # kernel /dev/kmsg events that are already streamed in.
+      - "--enable_metrics=oom_event"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null"]

@@ -45,14 +45,30 @@ class WebhookUrlRejected(ValueError):
     """Raised when a webhook destination fails SSRF validation."""
 
 
-def validate_webhook_url(url: str) -> None:
+def validate_webhook_url(url: str) -> str:
     """
-    Audit R3-7 — refuse SSRF-prone destinations before issuing the
-    request. Rejects:
+    Audit R3-7 + R5-10 — refuse SSRF-prone destinations BEFORE issuing
+    the request, AND return the validated public IP so the caller can
+    pin the actual TCP connection to it (closing the DNS-rebinding
+    TOCTOU window).
+
+    Rejects:
       • non-http(s) schemes (file://, gopher://, etc.)
       • localhost / loopback / link-local / private RFC1918
       • cloud-metadata IP 169.254.169.254 (covered by link-local)
       • hostnames that resolve to any of the above
+
+    Returns the FIRST IP that passed all checks — caller uses it as
+    the literal connection target (see `send_webhook_sync` → DNS-
+    pinned opener). Returning the IP also lets internal-only callers
+    log which destination the SSRF gate cleared.
+
+    R5-10 — the prior implementation returned None, so callers
+    re-resolved DNS at `urlopen()` time; an attacker-controlled
+    domain could return a public IP for validation, then flip to
+    127.0.0.1 / 169.254.169.254 between the gate and the actual
+    request. With the returned IP pinned at connect time, the second
+    resolution cannot happen.
 
     Caller-supplied URLs (client_id's configured endpoint) must pass
     this gate; internal-only callers (admin alert_webhook_url from
@@ -80,6 +96,9 @@ def validate_webhook_url(url: str) -> None:
         except OSError as e:
             raise WebhookUrlRejected(f"cannot resolve {host}: {e}") from e
 
+    # Validate every resolved IP; reject if ANY is private. Return the
+    # FIRST verified-public IP for pinning.
+    safe_ip: str | None = None
     for ip_str in candidates:
         try:
             ip = ipaddress.ip_address(ip_str)
@@ -90,6 +109,67 @@ def validate_webhook_url(url: str) -> None:
             raise WebhookUrlRejected(
                 f"destination {host} → {ip_str} blocked (loopback/private/metadata)"
             )
+        if safe_ip is None:
+            safe_ip = ip_str
+
+    if safe_ip is None:
+        raise WebhookUrlRejected(f"no valid IP resolved for {host}")
+    return safe_ip
+
+
+def _build_pinned_opener(pinned_ip: str):
+    """
+    R5-10 — DNS-pinned HTTP(S) opener.
+
+    Returns a `urllib.request.OpenerDirector` that connects to
+    `pinned_ip` instead of re-resolving the request URL's hostname.
+    For HTTPS the original hostname is still presented for SNI +
+    certificate validation, so a public-cert MITM via IP-only target
+    is not possible.
+
+    The host header from the original URL is preserved by urllib —
+    we only override the TCP target. This closes the DNS-rebinding
+    TOCTOU window between `validate_webhook_url` and `urlopen`.
+    """
+    import http.client
+    import ssl
+    import socket as _socket
+    import urllib.request
+
+    class PinnedHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            self.sock = _socket.create_connection(
+                (pinned_ip, self.port), self.timeout, self.source_address,
+            )
+            if self._tunnel_host:
+                self._tunnel()
+            # `self.host` is the original hostname — used for SNI +
+            # cert validation. `pinned_ip` is what we actually connect
+            # to. This is exactly the shape that defeats DNS-rebinding.
+            self.sock = self._context.wrap_socket(
+                self.sock, server_hostname=self.host,
+            )
+
+    class PinnedHTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            self.sock = _socket.create_connection(
+                (pinned_ip, self.port), self.timeout, self.source_address,
+            )
+
+    class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(
+                PinnedHTTPSConnection, req,
+                context=ssl.create_default_context(),
+            )
+
+    class PinnedHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(PinnedHTTPConnection, req)
+
+    return urllib.request.build_opener(
+        PinnedHTTPSHandler(), PinnedHTTPHandler(),
+    )
 
 
 def send_webhook_sync(
@@ -103,12 +183,19 @@ def send_webhook_sync(
     """
     Synchronous webhook delivery with retry.
     Returns True on success, False on any failure (network error, HTTP
-    error, or SSRF policy rejection — audit R3-7).
+    error, or SSRF policy rejection — audits R3-7 + R5-10).
+
+    R5-10 — opens the connection through a DNS-pinned opener so the
+    IP `validate_webhook_url` cleared is the same IP we actually
+    connect to. Plain `urllib.request.urlopen(url)` re-resolves DNS
+    at send time → an attacker-controlled domain can flip from a
+    public IP (passes validation) to 127.0.0.1 / 169.254.169.254
+    (real request) between the gate and the connect.
     """
     import urllib.request
 
     try:
-        validate_webhook_url(url)
+        pinned_ip = validate_webhook_url(url)
     except WebhookUrlRejected as e:
         logger.error(
             "Webhook URL rejected (SSRF policy): client=%s event=%s reason=%s",
@@ -131,12 +218,19 @@ def send_webhook_sync(
         "User-Agent":          "SKU-Forecasting/2.0",
     }
 
+    # R5-10 — opener pinned to the validated IP. SNI / cert validation
+    # still use the original hostname (see _build_pinned_opener).
+    opener = _build_pinned_opener(pinned_ip)
+
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with opener.open(req, timeout=10) as resp:
                 if resp.status < 300:
-                    logger.info(f"Webhook delivered: event={event} client={client_id} url={url}")
+                    logger.info(
+                        "Webhook delivered: event=%s client=%s url=%s pinned_ip=%s",
+                        event, client_id, url, pinned_ip,
+                    )
                     return True
         except Exception as e:
             wait = 2 ** attempt
