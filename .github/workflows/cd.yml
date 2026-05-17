@@ -111,7 +111,7 @@ jobs:
       # `:main` is the dev / fresh-VPS fallback.
       - name: Build + push api image
         id: api
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: docker/Dockerfile
@@ -124,7 +124,7 @@ jobs:
 
       - name: Build + push worker image
         id: worker
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: docker/Dockerfile.worker
@@ -145,7 +145,7 @@ jobs:
       # changes actually land in prod.
       - name: Build + push sandbox image
         id: sandbox
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: docker/Dockerfile.sandbox
