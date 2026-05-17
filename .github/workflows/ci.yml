@@ -208,10 +208,27 @@ jobs:
   # ── 7. Vulnerability scan (Trivy) ─────────────────────────
   # HIGH and CRITICAL findings fail the build. Medium findings are
   # reported to the SARIF tab but don't block merges.
+  #
+  # R4-19 — scan all THREE shipped images (api + worker + sandbox)
+  # via matrix strategy, not just api. The worker (RQ + ML training
+  # deps) and sandbox (untrusted CSV/XLSX parser) carry different
+  # base layers and dependency graphs; api-only scanning silently
+  # missed CVEs in the other two. fail-fast: false so a HIGH in one
+  # image doesn't hide findings in the others.
   image-scan:
-    name: Trivy image scan
+    name: Trivy ${{ matrix.image.name }} scan
     runs-on: ubuntu-latest
     needs: [build-docker]
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            dockerfile: docker/Dockerfile
+          - name: worker
+            dockerfile: docker/Dockerfile.worker
+          - name: sandbox
+            dockerfile: docker/Dockerfile.sandbox
     permissions:
       # Setting any explicit permissions disables the default bundle —
       # actions/checkout then can't fetch the repo. Re-grant `contents:
@@ -222,14 +239,14 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Build API image for scanning
+      - name: Build ${{ matrix.image.name }} image for scanning
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
-          file: docker/Dockerfile
+          file: ${{ matrix.image.dockerfile }}
           push: false
           load: true
-          tags: sku-forecasting-api:scan
+          tags: sku-forecasting-${{ matrix.image.name }}:scan
           cache-from: type=gha
       - name: Install Trivy
         # Wrapper actions (aquasecurity/trivy-action) keep retracting
@@ -251,26 +268,30 @@ jobs:
             --format table \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            sku-forecasting-api:scan
+            sku-forecasting-${{ matrix.image.name }}:scan
       - name: Trivy scan (SARIF for code-scanning)
         run: |
           trivy image \
-            --format sarif --output trivy-api.sarif \
+            --format sarif --output trivy-${{ matrix.image.name }}.sarif \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --exit-code 1 \
-            sku-forecasting-api:scan
+            sku-forecasting-${{ matrix.image.name }}:scan
       # SARIF upload writes to GitHub's code-scanning tab. That feature
       # is gated by GitHub Advanced Security on private repos — and
       # we're a private repo without GHAS, so the upload returns
       # "Resource not accessible by integration". Make it best-effort:
       # the trivy *scan* itself is the gate; the SARIF upload is just
       # nicer formatting in a tab we don't actually use today.
+      #
+      # `category` distinguishes per-image SARIF in the security tab so
+      # findings don't collapse across api/worker/sandbox.
       - uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84 # v3
-        if: always() && hashFiles('trivy-api.sarif') != ''
+        if: always() && hashFiles(format('trivy-{0}.sarif', matrix.image.name)) != ''
         continue-on-error: true
         with:
-          sarif_file: trivy-api.sarif
+          sarif_file: trivy-${{ matrix.image.name }}.sarif
+          category: trivy-${{ matrix.image.name }}
 
   # ── 6. Software Composition Analysis ─────────────────────────────
   # pip-audit pass over requirements.txt, in addition to the trivy

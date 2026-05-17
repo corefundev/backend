@@ -100,41 +100,78 @@ jobs:
             cosign sign --yes "${IMAGE_BASE}/sku-${svc}@${img}"
           done
 
-      - name: Generate SBOM (syft)
+      # R4-18 — SBOM coverage for ALL THREE shipped images, not just
+      # api. The worker (RQ + ML training graph) and sandbox (untrusted
+      # CSV/XLSX parser, distinct minimal deps) have entirely separate
+      # dependency graphs from api; a release with only an api SBOM
+      # gave a false sense of supply-chain auditability for the other
+      # two artefacts. syft inspects the published GHCR image (not a
+      # local build) so the SBOM matches what consumers actually pull.
+      - name: Generate SBOM — api (syft)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ${{ env.IMAGE_BASE }}/sku-api:${{ steps.vars.outputs.tag }}
           format: spdx-json
           output-file: sbom-api.spdx.json
 
+      - name: Generate SBOM — worker (syft)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.IMAGE_BASE }}/sku-worker:${{ steps.vars.outputs.tag }}
+          format: spdx-json
+          output-file: sbom-worker.spdx.json
+
+      - name: Generate SBOM — sandbox (syft)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.IMAGE_BASE }}/sku-sandbox:${{ steps.vars.outputs.tag }}
+          format: spdx-json
+          output-file: sbom-sandbox.spdx.json
+
       # Audit R3-23 — sign the SBOM blob the same way we sign images.
       # Without this, anyone with push access to the GH Release assets
       # could swap a tampered SBOM and the signature on the image
       # wouldn't catch it. cosign sign-blob produces a .sig sidecar
       # using the same keyless OIDC identity as the image signatures.
-      - name: Sign SBOM (cosign sign-blob keyless)
+      #
+      # R4-18 — one sign-blob per SBOM (api/worker/sandbox); each gets
+      # its own .sig + .crt sidecar pair so verifiers can audit any of
+      # the three independently without touching the others.
+      - name: Sign SBOMs (cosign sign-blob keyless)
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          cosign sign-blob \
-            --yes \
-            --output-signature sbom-api.spdx.json.sig \
-            --output-certificate sbom-api.spdx.json.crt \
-            sbom-api.spdx.json
+          set -euo pipefail
+          for svc in api worker sandbox; do
+              echo "  signing sbom-${svc}.spdx.json"
+              cosign sign-blob \
+                  --yes \
+                  --output-signature "sbom-${svc}.spdx.json.sig" \
+                  --output-certificate "sbom-${svc}.spdx.json.crt" \
+                  "sbom-${svc}.spdx.json"
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           generate_release_notes: true
-          # Attach the signed SBOM + sidecars. Verifiers run:
-          #   cosign verify-blob --certificate-identity-regexp \
-          #     '.*corefundev/backend.*' --certificate-oidc-issuer \
-          #     https://token.actions.githubusercontent.com \
-          #     --signature sbom-api.spdx.json.sig \
-          #     --certificate sbom-api.spdx.json.crt \
-          #     sbom-api.spdx.json
+          # Attach the signed SBOM + sidecars for all three images.
+          # Per-image verify recipe:
+          #   cosign verify-blob \
+          #     --certificate-identity-regexp '.*corefundev/backend.*' \
+          #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          #     --signature sbom-<svc>.spdx.json.sig \
+          #     --certificate sbom-<svc>.spdx.json.crt \
+          #     sbom-<svc>.spdx.json
+          # where <svc> is one of: api, worker, sandbox.
           files: |
             sbom-api.spdx.json
             sbom-api.spdx.json.sig
             sbom-api.spdx.json.crt
+            sbom-worker.spdx.json
+            sbom-worker.spdx.json.sig
+            sbom-worker.spdx.json.crt
+            sbom-sandbox.spdx.json
+            sbom-sandbox.spdx.json.sig
+            sbom-sandbox.spdx.json.crt
