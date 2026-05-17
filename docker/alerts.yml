@@ -319,6 +319,44 @@ groups:
           summary:     "Postgres weekly base backup is overdue (>8d)"
           description: "Backup hasn't been pushed in 8 days — one day short of the 9d critical threshold. Inspect backup container logs while there's still a healthy PITR window. Suppressed by BaseBackupStale once it fires (see alertmanager inhibit rules)."
 
+      # R5-17 (2026-05-17) — WAL archive_command failure surfacing.
+      # `wal_archive.sh` pushes each WAL segment to S3; postgres retries
+      # on failure (data is safe in pg_wal/), but the retry loop grows
+      # pg_wal/ until the host disk fills. Without this alert, the
+      # operator only finds out via a HostDiskFillingUp ~hours later.
+      # Mirrors the silent-alert fix pattern (RqWorkerSilent → real
+      # metrics, R5-12 cAdvisor OOM, R5-13 pg replica lag).
+      # Both branches gate on `absent(...)` so a broken pg_stat_archiver
+      # scrape surfaces too.
+      - alert: WalArchiveFailing
+        expr: |
+          increase(pg_stat_archiver_failed_count{job="postgres"}[5m]) > 0
+            or absent(pg_stat_archiver_failed_count{job="postgres"})
+        for:   5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Postgres WAL archive_command failing or exporter silent"
+          description: "wal_archive.sh is failing to push to S3 (or postgres-exporter is down). WAL accumulates in pg_wal/ on the postgres data volume until the host disk fills. Inspect: `docker logs docker-postgres-1 --tail 50 | grep archive`; `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. Likely causes: S3 outage, Beget key rotation, Lockbox SA expiry, or backup bucket policy change."
+
+      # R5-17 — sibling alert. archive_timeout=60s forces a WAL switch
+      # every 60s even on a quiet DB, so `last_archive_age` should
+      # never exceed ~90s in steady state. >600s = wal_archive.sh has
+      # been silently broken for 10 minutes — operator gets paged
+      # before pg_wal/ disk fill becomes the symptom.
+      - alert: WalArchiveStale
+        expr: |
+          pg_stat_archiver_last_archive_age{job="postgres"} > 600
+            or absent(pg_stat_archiver_last_archive_age{job="postgres"})
+        for:   10m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Postgres WAL archive idle >10 min (archive_timeout is 60s)"
+          description: "No new WAL segment archived in 10 min, but archive_timeout=60s should force one every minute. Either archive_command is stuck retrying a transient failure, or postgres-exporter lost connection. Tightens the WalArchiveFailing window from the failed-count side."
+
   - name: container-lifecycle
     rules:
       # Crash loop — `container_start_time_seconds` changes on every

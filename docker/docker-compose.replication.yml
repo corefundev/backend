@@ -58,6 +58,20 @@ services:
       - archive_command=/usr/local/bin/wal_archive.sh %p %f
       - -c
       - archive_timeout=60
+      # R5-19 (2026-05-17) — keep at least 1 GiB of recent WAL on the
+      # primary's data volume so a streaming replica that lags briefly
+      # (long network blip, replica restart, brief overload) can resume
+      # without re-bootstrapping from base + S3 WAL archive replay.
+      # 1 GiB ≈ 64 segments at the 16 MiB default — covers ~64 minutes
+      # of WAL at archive_timeout=60s pace, much wider than any
+      # plausible streaming lag window.
+      # Without this floor, the WAL recycle on the primary races the
+      # replica's stream rate and the slot-based self-heal collapses
+      # (replication breaks; recovery requires manual base+WAL replay).
+      # Cost: 1 GiB extra pg_wal/ headroom; archive_command still
+      # ships WAL to S3 in lockstep, so PITR coverage is unchanged.
+      - -c
+      - wal_keep_size=1GB
     volumes:
       - /srv/backend/secrets/pg-ssl:/etc/ssl/pg:ro
 
