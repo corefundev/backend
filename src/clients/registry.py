@@ -104,6 +104,27 @@ class ClientRegistry:
     def list_clients(self) -> list[ClientRecord]: ...
     def delete(self, client_id: str) -> None: ...
 
+    # Audit R4-16 — atomic conditional UPDATE for the training quota.
+    # Closes the TOCTOU window between check_training_quota (read) and
+    # record_training_started (write): two parallel requests used to
+    # both pass the check with stale snapshots and both write used+1.
+    # Implementations must do the cap/cooldown gate inside a single
+    # statement (PG: UPDATE … WHERE … RETURNING; file: hold the
+    # registry lock across read-eval-write).
+    #
+    # Returns the updated row's relevant fields on success, or None if
+    # the conditional WHERE matched zero rows (cap hit or cooldown
+    # active). The caller (quota.record_training_started) maps None to
+    # QuotaExceeded with a re-fetched precise reason.
+    def try_record_training_run(
+        self,
+        client_id: str,
+        cap: Optional[int],
+        cooldown_hours: Optional[int],
+        now: datetime,
+        month_start: datetime,
+    ) -> Optional[dict]: ...
+
 
 class PostgresClientRegistry(ClientRegistry):
     """
@@ -278,6 +299,86 @@ class PostgresClientRegistry(ClientRegistry):
                 cur.execute("DELETE FROM sku_clients WHERE client_id = %s", (client_id,))
             conn.commit()
 
+    def try_record_training_run(
+        self,
+        client_id: str,
+        cap: Optional[int],
+        cooldown_hours: Optional[int],
+        now: datetime,
+        month_start: datetime,
+    ) -> Optional[dict]:
+        """
+        Audit R4-16 — atomic conditional UPDATE.
+
+        A single SQL statement under the PK row lock checks both the
+        monthly cap and the cooldown, then either bumps the counter +
+        timestamps or returns no rows. Behaviour:
+
+          * Cap == NULL → unlimited plan, gate always passes.
+          * window_start NULL or older than month_start → counter resets
+            to 1 and window_start moves to month_start (matches the
+            Python-side _month_start logic in quota.py).
+          * Otherwise → gate passes only if training_runs_this_month < cap.
+          * Cooldown gate analogous: last_trained_at NULL OR older than
+            (now - interval cooldown_hours).
+
+        `make_interval(hours => ...)` matches the R1 C1 / R3-pattern
+        for parameterised interval arithmetic — same shape as
+        otp_store.purge_old.
+        """
+        sql = """
+            UPDATE sku_clients
+            SET training_runs_this_month = CASE
+                    WHEN training_runs_window_start IS NULL
+                      OR training_runs_window_start < %s::timestamptz
+                    THEN 1
+                    ELSE training_runs_this_month + 1
+                END,
+                training_runs_window_start = CASE
+                    WHEN training_runs_window_start IS NULL
+                      OR training_runs_window_start < %s::timestamptz
+                    THEN %s::timestamptz
+                    ELSE training_runs_window_start
+                END,
+                last_trained_at = %s::timestamptz
+            WHERE client_id = %s
+              AND (
+                  %s::int IS NULL
+                  OR training_runs_window_start IS NULL
+                  OR training_runs_window_start < %s::timestamptz
+                  OR training_runs_this_month < %s::int
+              )
+              AND (
+                  %s::int IS NULL
+                  OR last_trained_at IS NULL
+                  OR last_trained_at < (%s::timestamptz - make_interval(hours => %s::int))
+              )
+            RETURNING training_runs_this_month,
+                      training_runs_window_start,
+                      last_trained_at
+        """
+        now_iso = now.isoformat()
+        month_start_iso = month_start.isoformat()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (
+                    month_start_iso,                       # SET-CASE counter check
+                    month_start_iso, month_start_iso,      # SET-CASE window_start
+                    now_iso,                                # SET last_trained_at
+                    client_id,                              # WHERE pk
+                    cap, month_start_iso, cap,              # WHERE quota
+                    cooldown_hours, now_iso, cooldown_hours,  # WHERE cooldown
+                ))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return {
+            "training_runs_this_month":   int(row[0]),
+            "training_runs_window_start": str(row[1]) if row[1] is not None else None,
+            "last_trained_at":            str(row[2]) if row[2] is not None else None,
+        }
+
     @staticmethod
     def _row_to_record(row: dict) -> ClientRecord:
         cfg = row["config"]
@@ -432,6 +533,79 @@ class LocalFileRegistry(ClientRegistry):
             data = self._load()
             data.pop(client_id, None)
             self._save(data)
+
+    def try_record_training_run(
+        self,
+        client_id: str,
+        cap: Optional[int],
+        cooldown_hours: Optional[int],
+        now: datetime,
+        month_start: datetime,
+    ) -> Optional[dict]:
+        """
+        Audit R4-16 — atomic under self._lock.
+
+        Mirrors PostgresClientRegistry.try_record_training_run semantics
+        for the dev/test backend. Multi-process is out of scope (the
+        file backend is not used in prod); multi-threaded uvicorn
+        workers are serialised through the lock.
+        """
+        with self._lock:
+            data = self._load()
+            row = data.get(client_id)
+            if row is None:
+                return None
+
+            # Window reset check — mirror the SQL CASE expression.
+            cur_window_iso = row.get("training_runs_window_start")
+            cur_used = int(row.get("training_runs_this_month") or 0)
+            cur_window: Optional[datetime] = None
+            if cur_window_iso:
+                try:
+                    cur_window = datetime.fromisoformat(
+                        str(cur_window_iso).replace("Z", "+00:00")
+                    )
+                    if cur_window.tzinfo is None:
+                        cur_window = cur_window.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    cur_window = None
+            window_stale = (cur_window is None) or (cur_window < month_start)
+
+            # Quota gate.
+            if cap is not None:
+                if not (window_stale or cur_used < cap):
+                    return None
+
+            # Cooldown gate.
+            if cooldown_hours is not None:
+                last_iso = row.get("last_trained_at")
+                if last_iso:
+                    try:
+                        last_dt = datetime.fromisoformat(
+                            str(last_iso).replace("Z", "+00:00")
+                        )
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        from datetime import timedelta as _td
+                        if last_dt >= (now - _td(hours=cooldown_hours)):
+                            return None
+                    except ValueError:
+                        pass
+
+            # Mutate.
+            new_used = 1 if window_stale else (cur_used + 1)
+            new_window_iso = month_start.isoformat() if window_stale else str(cur_window_iso)
+            now_iso = now.isoformat()
+            row["training_runs_this_month"]   = new_used
+            row["training_runs_window_start"] = new_window_iso
+            row["last_trained_at"]            = now_iso
+            data[client_id] = row
+            self._save(data)
+            return {
+                "training_runs_this_month":   new_used,
+                "training_runs_window_start": new_window_iso,
+                "last_trained_at":            now_iso,
+            }
 
 
 def get_registry() -> ClientRegistry:

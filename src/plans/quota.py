@@ -169,35 +169,61 @@ def record_training_started(
     record: ClientRecord,
 ) -> ClientRecord:
     """
-    Atomically (at the registry-row level) bump the monthly counter and
-    update last_trained_at. Resets the counter if we've rolled into a new
+    Atomically check + bump the monthly counter and update
+    last_trained_at. Resets the counter if we've rolled into a new
     calendar month since the stored window_start.
 
-    Called AFTER check_training_quota succeeds, from the train endpoint.
+    Audit R4-16 — previously this function was a non-atomic
+    read-mutate-write off the snapshot in `record`. Two parallel
+    requests could both pass check_training_quota with the same
+    stale used count and both write used+1, allowing one extra
+    training past the cap. The fix delegates the entire check-and-
+    bump to `registry.try_record_training_run`, which runs as a
+    single conditional UPDATE under the PK row lock (Postgres) or
+    the in-process registry lock (LocalFileRegistry). If the
+    conditional matches zero rows, the race was lost and we raise
+    QuotaExceeded with a re-fetched precise reason.
+
+    Called AFTER check_training_quota succeeds in the happy path; the
+    early check is still useful for fail-fast UX before doing SKU /
+    upload manifest work, but the atomic gate here is what enforces
+    the limit under concurrency.
     """
-    now       = _now()
-    win_start = _parse_ts(record.training_runs_window_start)
-    used      = record.training_runs_this_month or 0
+    spec        = get_plan_spec(record.plan)
+    now         = _now()
+    month_start = _month_start(now)
 
-    # Reset window if it's stale.
-    if win_start is None or _month_start(win_start) < _month_start(now):
-        used = 0
-        win_start = _month_start(now)
-
-    used += 1
-
-    registry.update(
+    result = registry.try_record_training_run(
         record.client_id,
-        last_trained_at=now.isoformat(),
-        training_runs_this_month=used,
-        training_runs_window_start=win_start.isoformat(),
+        spec.training_runs_per_month,
+        spec.training_cooldown_hours,
+        now,
+        month_start,
     )
+
+    if result is None:
+        # Race window lost. Re-fetch + reuse the existing
+        # message-rendering path so the caller still gets a precise
+        # cooldown-vs-cap reason and the right Retry-After estimate.
+        fresh = registry.get(record.client_id)
+        if fresh is not None:
+            # This either raises QuotaExceeded with a clean message
+            # OR returns the status (in which case the row really IS
+            # at the limit despite the check passing — that's the
+            # race we lost).
+            check_training_quota(fresh)
+        raise QuotaExceeded(
+            f"Training quota gate denied client '{record.client_id}' "
+            "under concurrent load (race lost between fast-check and "
+            "atomic commit). Retry in a moment.",
+            retry_after_sec=1,
+        )
 
     return ClientRecord(
         **{
             **record.__dict__,
-            "last_trained_at": now.isoformat(),
-            "training_runs_this_month": used,
-            "training_runs_window_start": win_start.isoformat(),
+            "last_trained_at":            result["last_trained_at"],
+            "training_runs_this_month":   result["training_runs_this_month"],
+            "training_runs_window_start": result["training_runs_window_start"],
         }
     )

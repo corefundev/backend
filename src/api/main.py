@@ -2170,9 +2170,16 @@ async def trigger_training(
             )
         extend_from_path = get_processed_path(prev)
 
-    # ── Bump quota counters BEFORE enqueueing to avoid TOCTOU windows
-    #    where a second request slips in between check and increment.
-    record = record_training_started(registry, record)
+    # ── Bump quota counters BEFORE enqueueing. The atomic conditional
+    #    UPDATE inside record_training_started (R4-16) is the gate that
+    #    actually enforces the cap under concurrent load — the earlier
+    #    check_training_quota() is fast-fail UX, not the gate. If the
+    #    race is lost here we surface 429 just like the entry-point check.
+    try:
+        record = record_training_started(registry, record)
+    except QuotaExceeded as e:
+        headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
+        raise HTTPException(status_code=429, detail=str(e), headers=headers)
     registry.update(client_id, status="training")
 
     # ── Pre-create training_runs row so the worker has something to
