@@ -100,7 +100,7 @@ rollback() {
     export API_IMAGE_TAG="$prev_tag"
     export WORKER_IMAGE_TAG="$prev_tag"
 
-    docker compose $COMPOSE_ARGS up -d --force-recreate api worker scan-worker process-worker
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans api worker scan-worker process-worker
 
     for i in $(seq 1 60); do
         local s
@@ -256,12 +256,12 @@ docker exec docker-backup-1 sh /scripts/init_s3_lifecycle.sh 2>&1 \
 
 if [ "$ENVIRONMENT" = "production" ]; then
     echo "  rolling: workers first (no traffic), then api"
-    docker compose $COMPOSE_ARGS up -d --force-recreate worker scan-worker process-worker
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans worker scan-worker process-worker
     sleep 5
-    docker compose $COMPOSE_ARGS up -d --force-recreate api
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans api
 else
     echo "  recreating app services in parallel (staging)"
-    docker compose $COMPOSE_ARGS up -d --force-recreate \
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans \
         api worker scan-worker process-worker
 fi
 
