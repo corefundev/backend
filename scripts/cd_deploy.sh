@@ -312,4 +312,23 @@ if [ "$ACTUAL_WORKER" != "$EXPECTED_WORKER" ]; then
 fi
 
 docker logout ghcr.io
+
+# R4-20 followup (2026-05-17) — periodic image prune.
+# CD churn (Trivy scan builds, multiple R4-* deploys/day) had
+# accumulated 89 GB of reclaimable layers and fired HostDiskFillingUp
+# at 83% on api.testcore.ru. Prune dangling + unused images older
+# than 72h after each successful deploy.
+#
+# CRITICAL: must run AFTER the image-identity assertions above and
+# AFTER any rollback() exits — pruning before rollback would destroy
+# the PREV_API_IMAGE that rollback() relies on. The 72h window
+# leaves multiple recent deploys available for emergency rollback.
+# `|| true` so a transient docker daemon issue doesn't fail-mark the
+# whole deploy after the actual app is already live.
+echo "  pruning docker images older than 72h (not in use)"
+docker image prune -af --filter "until=72h" 2>&1 \
+    | grep -E "^(deleted:|Total reclaimed)" \
+    | tail -5 \
+    || true
+
 echo "  $ENVIRONMENT deploy complete @ $TAG"
