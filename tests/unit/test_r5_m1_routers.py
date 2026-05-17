@@ -1,0 +1,130 @@
+"""
+Regression tests for R5-M1 — god-module `src/api/main.py` split into
+per-domain routers (2026-05-18).
+
+Incremental: each commit extracts one domain (legal → audit →
+notifications → plans → config → clients → training → inference →
+auth → ops) into `src/api/routers/<domain>.py`. main.py keeps only
+lifespan, middleware, Prometheus counters, and `app.include_router`
+calls.
+
+These tests pin two invariants that protect the split:
+  1. **Inventory invariant** — the total route-path inventory
+     (every `(method, path)` decorated by `@app.<method>` or
+     `@router.<method>` anywhere) must equal 44 — the number FastAPI
+     exposed before the split started. If a route is dropped or
+     duplicated mid-split, this catches it before merge.
+  2. **No re-introduction** — once a domain is extracted, main.py
+     must NOT contain `@app.<method>(...)` for any path in that
+     domain. The router-file owns it.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+_BACKEND = Path(__file__).resolve().parents[2]
+_MAIN = _BACKEND / "src" / "api" / "main.py"
+_ROUTERS_DIR = _BACKEND / "src" / "api" / "routers"
+
+_ROUTE_DECORATOR = re.compile(
+    r'^@(app|router)\.(get|post|put|delete|patch|websocket)\("([^"]+)"',
+    re.MULTILINE,
+)
+
+# Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
+# on commit c00b0d8). Every extraction commit must preserve this
+# count exactly — no drops, no phantom additions.
+_EXPECTED_ROUTE_COUNT = 44
+
+
+def _collect_routes() -> list[tuple[str, str, str]]:
+    """Return [(file_relative, method, path)] across main.py + all
+    routers/*.py."""
+    found: list[tuple[str, str, str]] = []
+    for f in (_MAIN, *_ROUTERS_DIR.glob("*.py")):
+        if f.name == "__init__.py":
+            continue
+        for m in _ROUTE_DECORATOR.finditer(f.read_text()):
+            method, path = m.group(2), m.group(3)
+            found.append((str(f.relative_to(_BACKEND)), method.upper(), path))
+    return found
+
+
+def test_route_inventory_unchanged():
+    """Total (method, path) count across main.py + routers/ must
+    equal the pre-split count. Drops or duplicates fail here before
+    merge — much louder than discovering at runtime in prod that
+    /clients/{id}/predict returns 404."""
+    routes = _collect_routes()
+    paths = [(m, p) for _, m, p in routes]
+    assert len(paths) == _EXPECTED_ROUTE_COUNT, (
+        f"route count drifted from {_EXPECTED_ROUTE_COUNT} to "
+        f"{len(paths)} during R5-M1 split"
+    )
+    # No duplicates — a route either lives in main.py OR in one
+    # router file, never both.
+    assert len(set(paths)) == len(paths), (
+        f"duplicate routes detected (router-file double-registration?): "
+        f"{[p for p in paths if paths.count(p) > 1]}"
+    )
+
+
+def test_routers_package_exists():
+    """Domain-router package must exist as the home for extracted
+    handlers."""
+    assert _ROUTERS_DIR.is_dir(), "src/api/routers/ must exist (R5-M1)"
+    assert (_ROUTERS_DIR / "__init__.py").is_file(), (
+        "src/api/routers/__init__.py must exist"
+    )
+
+
+def test_legal_domain_lives_in_router():
+    """The `legal` domain (R5-M1 slice 1) must live entirely in
+    `src/api/routers/legal.py`, not main.py."""
+    legal_router = _ROUTERS_DIR / "legal.py"
+    assert legal_router.is_file(), (
+        "src/api/routers/legal.py must exist after R5-M1 slice 1"
+    )
+    text = legal_router.read_text()
+    assert "router = APIRouter" in text, (
+        "legal.py must declare `router = APIRouter(...)`"
+    )
+    for path_pattern in (r'/legal/\{doc_id\}', r'/admin/legal/\{doc_id\}'):
+        assert re.search(
+            r'@router\.(get|put)\("' + path_pattern.replace("\\", "\\"),
+            text,
+        ), f"{path_pattern} must be registered in legal.py"
+
+    # And main.py must NOT re-register them.
+    main_text = _MAIN.read_text()
+    for path in ("/legal/{doc_id}", "/admin/legal/{doc_id}"):
+        assert f'@app.get("{path}"' not in main_text, (
+            f"main.py still has @app.get for {path} — must be in legal.py"
+        )
+        assert f'@app.put("{path}"' not in main_text, (
+            f"main.py still has @app.put for {path} — must be in legal.py"
+        )
+
+
+def test_legal_router_registered_in_main():
+    """main.py must `include_router` the legal router."""
+    text = _MAIN.read_text()
+    assert "from src.api.routers.legal import router as legal_router" in text, (
+        "main.py must import legal_router"
+    )
+    assert "app.include_router(legal_router)" in text, (
+        "main.py must register legal_router via include_router"
+    )
+
+
+def test_main_py_compiles():
+    """main.py must still compile after the extraction — incomplete
+    decorator removal or dangling import leaves a SyntaxError that
+    only the next deploy would catch."""
+    import py_compile
+    try:
+        py_compile.compile(str(_MAIN), doraise=True)
+    except py_compile.PyCompileError as e:
+        raise AssertionError(f"src/api/main.py fails to compile: {e}")
