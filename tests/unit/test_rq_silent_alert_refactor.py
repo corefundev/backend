@@ -52,27 +52,50 @@ def test_rq_exporter_healthcheck_asserts_metrics_body():
     )
 
 
-def test_rq_worker_silent_alert_gated_on_queue_depth():
-    """The alert's silent branch must AND with `rq_queue_jobs_count > 0`
-    so an idle, zero-traffic state doesn't fire."""
+def test_rq_worker_silent_alert_uses_real_metric_names():
+    """The alert must reference metrics that actually exist in the
+    mdawar/rq-exporter:v3.1.0 emission (rq_workers,
+    rq_workers_success_total, rq_jobs{status='queued'}) — NOT the
+    aggregate names from R2-8 that never existed."""
     text = (_BACKEND / "docker" / "alerts.yml").read_text()
     alert_idx = text.find("- alert: RqWorkerSilent")
-    assert alert_idx > 0
     next_alert = text.find("- alert:", alert_idx + 1)
     end = next_alert if next_alert > 0 else len(text)
     block = text[alert_idx:end]
 
-    # The OR-first branch (absent) is kept — catches exporter outages.
-    assert "absent(rq_jobs_finished_total)" in block, (
-        "absent() branch must remain — catches rq-exporter outages"
+    # New (real) metric names — must be present in the rule expr or
+    # the documentation comment immediately above (which describes
+    # the existing exporter emission set, not the rule body).
+    expr_section = block.split("annotations:")[0]
+    # Find the actual `expr:` block (multi-line YAML literal).
+    expr_idx = expr_section.find("expr:")
+    expr_block = expr_section[expr_idx:]
+    assert "rq_workers_success_total" in expr_block, (
+        "expr must use the real per-worker success counter "
+        "(rq_workers_success_total) — not the phantom rq_jobs_finished_total"
     )
-    # The silent branch must AND with queue depth > 0.
-    assert "rq_queue_jobs_count" in block, (
-        "silent branch must reference rq_queue_jobs_count to gate idle traffic"
+    assert 'rq_jobs{status="queued"}' in expr_block, (
+        "expr must use the real queue-depth gauge (rq_jobs{status='queued'}) "
+        "— not the phantom rq_queue_jobs_count"
     )
-    assert "and sum(rq_queue_jobs_count) > 0" in block, (
-        "silent branch must AND `sum(rq_queue_jobs_count) > 0` so "
-        "zero-traffic idle states do NOT fire (R-incident 2026-05-17)"
+    assert "absent(rq_workers)" in expr_block, (
+        "absent() branch must probe rq_workers (a real metric) so "
+        "exporter-down is detected correctly"
+    )
+
+    # The expression's silent branch must still gate on queued > 0
+    # so zero-traffic idle doesn't fire.
+    assert "and sum(rq_jobs" in expr_block, (
+        "silent branch must AND with `sum(rq_jobs{status='queued'}) > 0` "
+        "to suppress idle/zero-traffic false positives"
+    )
+
+    # And the phantom names from R2-8 must be GONE.
+    assert "rq_jobs_finished_total" not in expr_block, (
+        "expr must not reference the phantom rq_jobs_finished_total"
+    )
+    assert "rq_queue_jobs_count" not in expr_block, (
+        "expr must not reference the phantom rq_queue_jobs_count"
     )
 
 

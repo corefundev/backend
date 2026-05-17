@@ -498,26 +498,34 @@ groups:
 
       # RQ worker silence — workers running but NOT consuming queued
       # jobs (stuck/deadlocked). Refactored 2026-05-17 after a real
-      # incident where this alert fired on a Saturday with zero
-      # traffic: the original expression was
+      # incident exposed TWO compounding bugs in the original alert:
       #
-      #     absent(rq_jobs_finished_total)
-      #       or sum(increase(rq_jobs_finished_total[30m])) < 1
+      #   1. The original referenced `rq_jobs_finished_total` and
+      #      `rq_queue_jobs_count` — neither metric exists in the
+      #      mdawar/rq-exporter:v3.1.0 image the project actually
+      #      runs. The exporter emits per-worker counters
+      #      (`rq_workers_success_total{name,queues}`) and a gauge
+      #      with queue+status labels (`rq_jobs{queue,status}`),
+      #      not those aggregate names. Both `absent()` branches
+      #      always returned true → alert fired permanently for
+      #      ~the full life of R2-8.
+      #   2. Even after correcting the names, the silent branch
+      #      (`<1`) fires unconditionally during idle / zero-traffic
+      #      periods (`0 < 1` is true regardless of whether jobs
+      #      are stuck or merely absent).
       #
-      # The OR-first branch correctly catches exporter outages, but
-      # the second branch always fires when traffic is low — `0 < 1`
-      # is true regardless of whether jobs are stuck or simply absent.
-      #
-      # New gate: only fire on (a) exporter-down OR (b) queue has
-      # jobs AND nothing finished in 30 min. Plain idle = no alert.
-      # The exporter-down branch separately catches the rq-exporter
-      # DNS-cache-stale failure mode that fired in this incident.
+      # Real expression — `absent(rq_workers)` catches a fully-down
+      # rq-exporter (workers metric is present whenever the scrape
+      # succeeded). The silent branch ANDs `< 1` with
+      # `rq_jobs{status="queued"} > 0` so the alert ONLY fires when
+      # there are jobs waiting AND none were finished in the last
+      # 30 minutes. Plain idle = no alert.
       - alert: RqWorkerSilent
         expr: |
-          absent(rq_jobs_finished_total)
+          absent(rq_workers)
             or (
-              sum(increase(rq_jobs_finished_total[30m])) < 1
-              and sum(rq_queue_jobs_count) > 0
+              sum(increase(rq_workers_success_total[30m])) < 1
+              and sum(rq_jobs{status="queued"}) > 0
             )
         for:   30m
         labels:
