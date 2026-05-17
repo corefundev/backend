@@ -47,14 +47,27 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-# ── Limits (env-tunable) ────────────────────────────────────────────────
+# ── Limits (R5-M4 — sourced from central Settings) ─────────────────────
+#
+# All limit / TRUSTED_PROXIES values now come from `src.settings.settings`.
+# This is what the audit flagged: rate-limit tunables read from
+# os.environ.get on EVERY request was wasteful + risked drift between
+# env-var name and the documented default. Settings is constructed
+# once at startup; subsequent reads are cached attribute access.
+#
+# To re-read at runtime (e.g. for tests overriding env after import),
+# construct a fresh `Settings()` inside the test. The module-level
+# `settings` import binds at module load time.
+
+from src.settings import settings
+
 
 def _attempt_limit() -> int:
-    return int(os.environ.get("SIGNUP_ATTEMPT_PER_HOUR_PER_SUBNET", "10"))
+    return settings.signup_attempt_per_hour_per_subnet
 
 
 def _success_limit() -> int:
-    return int(os.environ.get("SIGNUP_SUCCESS_PER_DAY_PER_SUBNET", "3"))
+    return settings.signup_success_per_day_per_subnet
 
 
 def _trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -68,16 +81,10 @@ def _trusted_proxies() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     bypass the per-subnet rate limit.
 
     Production deployments override via the `TRUSTED_PROXIES` env var
-    (Lockbox-injected) with the actual nginx bridge CIDR, e.g.:
-        TRUSTED_PROXIES=127.0.0.0/8,172.20.0.0/16
-
-    The fail-closed default means dev/single-container setups skip the
-    X-Forwarded-For walk entirely and use the peer address directly —
-    correct behaviour when there's no real proxy in front.
+    (Lockbox-injected) with the actual nginx bridge CIDR.
     """
-    raw = os.environ.get("TRUSTED_PROXIES", "127.0.0.0/8")
     out: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    for c in raw.split(","):
+    for c in settings.trusted_proxies.split(","):
         c = c.strip()
         if c:
             try:
@@ -270,13 +277,12 @@ def check_token_attempt(ip: str) -> None:
     """Per-/24 rate-limit for /auth/token (R2-4).
 
     bcrypt cost=12 throttles single-host to ~4 req/sec, but distributed
-    attacks aren't bounded by that. Default 20/hour (env
-    TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET).
+    attacks aren't bounded by that. Limit from settings.
     """
     _hour_bucket_check(
         prefix="token:attempt",
         subject=subnet(ip),
-        limit=int(os.environ.get("TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET", "20")),
+        limit=settings.token_attempt_per_hour_per_subnet,
         user_message="Too many token-exchange attempts from your network. "
                      "Try again in {ttl_min} minutes.",
     )
@@ -285,14 +291,13 @@ def check_token_attempt(ip: str) -> None:
 def check_login_attempt(ip: str) -> None:
     """Per-/24 rate-limit for /auth/login (R4-3).
 
-    Captcha-solver farms (~$1/1k solves) flood /auth/login with valid
-    captchas, triggering OTP creates + email sends. Default 20/hour
-    (env LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET).
+    Captcha-solver farms flood /auth/login with valid captchas,
+    triggering OTP creates + email sends. Limit from settings.
     """
     _hour_bucket_check(
         prefix="login:attempt",
         subject=subnet(ip),
-        limit=int(os.environ.get("LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET", "20")),
+        limit=settings.login_attempt_per_hour_per_subnet,
         user_message="Too many login attempts from your network. "
                      "Try again in {ttl_min} minutes.",
     )
@@ -301,14 +306,12 @@ def check_login_attempt(ip: str) -> None:
 def check_otp_verify_attempt(ip: str) -> None:
     """Per-/24 rate-limit for /auth/login/verify + /auth/signup/verify (R4-4).
 
-    Closes the cross-email OTP-spray gap (rotating across N harvested
-    emails never trips the per-email lockout). Default 30/hour (env
-    OTP_VERIFY_PER_HOUR_PER_SUBNET).
+    Closes the cross-email OTP-spray gap. Limit from settings.
     """
     _hour_bucket_check(
         prefix="otp:verify",
         subject=subnet(ip),
-        limit=int(os.environ.get("OTP_VERIFY_PER_HOUR_PER_SUBNET", "30")),
+        limit=settings.otp_verify_per_hour_per_subnet,
         user_message="Too many verification attempts from your network. "
                      "Try again in {ttl_min} minutes.",
     )
@@ -317,10 +320,10 @@ def check_otp_verify_attempt(ip: str) -> None:
 def check_rotate_attempt(client_id: str) -> None:
     """Per-client rate-limit for /clients/{id}/api-key/rotate (R3-24).
 
-    Each rotate burns bcrypt cost=12 + writes audit_log. Default
-    5/hour/client (env ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT).
+    Each rotate burns bcrypt cost=12 + writes audit_log. Limit from
+    settings.
     """
-    rotate_limit = int(os.environ.get("ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT", "5"))
+    rotate_limit = settings.rotate_attempt_per_hour_per_client
     _hour_bucket_check(
         prefix="apikey:rotate",
         subject=client_id,
