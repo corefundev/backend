@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Optional
 
