@@ -35,6 +35,25 @@ RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
+# Audit R4-19 (2026-05-17) — python:3.11-slim ships an older pip /
+# setuptools / wheel triple that has bundled vulnerabilities in
+# `setuptools/_vendor/`. Trivy on the rebuilt sandbox image surfaced:
+#   - CVE-2026-23949 — jaraco.context 5.3.0 path-traversal via tar (HIGH)
+#     (fixed in jaraco.context 6.1.0, bundled in setuptools >= 80)
+#   - CVE-2026-24049 — wheel 0.45.1 RCE via malicious wheel file (HIGH)
+#     (fixed in wheel 0.46.2)
+# These ship with pip/setuptools, not our requirements, so they survive
+# `apt-get upgrade` and `pip install -r requirements`. Identical fix
+# already applied in Dockerfile + Dockerfile.worker — mirror here for
+# enterprise cover-all-images consistency. Explicit jaraco.context pin
+# guarantees the vendored copy is replaced even if setuptools 80+ ever
+# regresses on the bundle.
+RUN pip install --no-cache-dir --upgrade \
+        pip \
+        "setuptools>=80" \
+        wheel==0.46.2 \
+        jaraco.context==6.1.0
+
 # Audit R3-19 — sandbox dependencies are pinned in
 # docker/requirements-sandbox.txt (full transitive graph). The lockfile
 # is git-tracked so trivy + pip-audit scan it at CI time, and parquet
