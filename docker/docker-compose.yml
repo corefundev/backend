@@ -119,6 +119,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     restart: "no"
+    logging: *log-rotation   # R5-M10
 
   # ── Inference API ─────────────────────────────────────────────
   # Image is published to GHCR by .github/workflows/cd.yml. Local dev
@@ -300,6 +301,8 @@ services:
     volumes:
       - clamav_db:/var/lib/clamav
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD-SHELL", "clamdcheck.sh || exit 1"]
       interval: 60s
@@ -350,6 +353,8 @@ services:
           exec redis-server
         fi
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -390,6 +395,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    logging: *log-rotation   # R5-M10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sku -d sku_forecasting"]
       interval: 10s
@@ -465,6 +471,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
+    logging: *log-rotation   # R5-M10
     # Auth-aware healthcheck: actually authenticate as DB_USER and SELECT 1
     # via pgbouncer:6432. Catches userlist.txt corruption / SCRAM mismatch
     # which the prior pg_isready test would silently miss. Reads password
@@ -674,10 +681,14 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.postgres-exporter
+    mem_limit: 128m    # R5-M9
+    cpus: 0.1        # R5-M9
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD", "/bin/postgres_exporter", "--version"]
       interval: 30s
@@ -694,6 +705,8 @@ services:
   ssl-exporter:
     # R4-20 digest-pinned 2026-05-17
     image: ribbybibby/ssl-exporter:2.4.3@sha256:f6812639a073f8eedc922e0423a57becd6302ccd04a4182108523e4ff83a2bc1
+    mem_limit: 64m    # R5-M9
+    cpus: 0.1        # R5-M9
     restart: unless-stopped
     volumes:
       - ./ssl-exporter.yml:/config/ssl_exporter.yml:ro
@@ -717,12 +730,16 @@ services:
   rq-exporter:
     # R4-20 digest-pinned 2026-05-17
     image: mdawar/rq-exporter:v3.1.0@sha256:d82dd3c4f8f385ad167688d87ff37aa9e0eeeb7dcaf331998310b2c85c2969d6
+    mem_limit: 64m    # R5-M9
+    cpus: 0.1        # R5-M9
     environment:
       RQ_REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     # Functional healthcheck (incident 2026-05-17): the previous probe
     # was an HTTP 200 check on /metrics, but Flask returns 200 even
     # when rq-exporter has lost its Redis connection — it just emits
@@ -759,7 +776,11 @@ services:
   pushgateway:
     # R4-20 digest-pinned 2026-05-17
     image: prom/pushgateway:v1.9.0@sha256:98a458415f8f5afcfd45622d289a0aa67063563bec0f90d598ebc76783571936
+    mem_limit: 128m    # R5-M9
+    cpus: 0.1        # R5-M9
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     # R5-16 (2026-05-17) — persistence flag + named volume. The
     # pushgateway state is in-memory by default; every container
     # recreate wipes all pushed series and the metrics stay absent
@@ -794,6 +815,8 @@ services:
     # security patches accrued since v2.51) AND digest-pin so the
     # observed identity matches what's documented in the file.
     image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+    mem_limit: 512m    # R5-M9
+    cpus: 1.0        # R5-M9
     ports:
       - "9090:9090"
     volumes:
@@ -812,6 +835,8 @@ services:
     extra_hosts:
       - "postgres-replica.internal:${REPLICA_EXPORTER_HOST:-212.8.226.233}"
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
       interval: 30s
@@ -843,6 +868,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
 
   # ── cAdvisor (per-container metrics — restart loops, CPU/mem/IO) ─
   # Source for ContainerRestartLoop alert — exposes
@@ -882,6 +909,8 @@ services:
       # kernel /dev/kmsg events that are already streamed in.
       - "--enable_metrics=oom_event"
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null"]
       interval: 30s
@@ -913,6 +942,8 @@ services:
       - /sys:/host/sys:ro
       - /:/host/root:ro,rslave
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9100/metrics 2>/dev/null | grep -q node_filesystem_avail_bytes"]
       interval: 30s
@@ -932,6 +963,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backup
+    mem_limit: 256m    # R5-M9
+    cpus: 0.3        # R5-M9
     # tini as PID 1, crond as its child. Without init:true crond runs
     # as PID 1 and its setpgid() calls fail with "Operation not
     # permitted" because PID 1 is its own session leader and can't
@@ -964,6 +997,8 @@ services:
       postgres: { condition: service_healthy }
       minio:    { condition: service_healthy }
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD-SHELL", "pgrep crond || exit 1"]
       interval: 60s
@@ -985,12 +1020,16 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.alertmanager
+    mem_limit: 128m    # R5-M9
+    cpus: 0.1        # R5-M9
     volumes:
       # Template — contains ${TELEGRAM_ALERT_BOT_TOKEN} and
       # ${TELEGRAM_ALERT_CHAT_ID} placeholders, rendered at startup.
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tpl:ro
       - alertmanager_data:/alertmanager
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]
       interval: 30s
@@ -1007,7 +1046,11 @@ services:
   tempo:
     # R4-20 digest-pinned 2026-05-17
     image: grafana/tempo:2.5.0@sha256:f0200a9bff6d14eb3a4332194f7b77c37ee1a3535e7e41db024d95aab6f1b4e8
+    mem_limit: 384m    # R5-M9
+    cpus: 0.5        # R5-M9
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     volumes:
       - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
       - tempo_data:/var/tempo
@@ -1027,7 +1070,11 @@ services:
   loki:
     # R4-20 digest-pinned 2026-05-17
     image: grafana/loki:3.0.0@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
+    mem_limit: 384m    # R5-M9
+    cpus: 0.5        # R5-M9
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     volumes:
       - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
       # Loki ruler — rules under /loki/rules/<tenant>/. tenant=fake
@@ -1047,7 +1094,11 @@ services:
   promtail:
     # R4-20 digest-pinned 2026-05-17
     image: grafana/promtail:3.0.0@sha256:d3de3da9431cfbe74a6a94555050df5257f357e827be8e63f8998d509c37af8b
+    mem_limit: 128m    # R5-M9
+    cpus: 0.2        # R5-M9
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     volumes:
       - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
       # Container logs (json-file driver writes here).
@@ -1073,6 +1124,8 @@ services:
   grafana:
     # R4-20 digest-pinned 2026-05-17
     image: grafana/grafana:10.4.2@sha256:7d5faae481a4c6f436c99e98af11534f7fd5e8d3e35213552dd1dd02bc393d2e
+    mem_limit: 256m    # R5-M9
+    cpus: 0.3        # R5-M9
     ports:
       - "3000:3000"
     environment:
@@ -1087,6 +1140,8 @@ services:
       - loki
       - tempo
     restart: unless-stopped
+    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    logging: *log-rotation
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q ok"]
       interval: 30s

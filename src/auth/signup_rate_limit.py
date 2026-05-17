@@ -142,10 +142,20 @@ def subnet(ip_str: str) -> str:
 # ── Redis interaction ──────────────────────────────────────────────────
 
 def _redis():
-    """Return a Redis connection or None if unreachable. Caller fails open."""
+    """Return a Redis connection or None if unreachable. Caller fails open.
+
+    R5-M3 (2026-05-17) — routes through `src.redis_pool` (the canonical
+    process-wide Redis abstraction added by R3-4) instead of reaching
+    into `src.pipeline.task_queue` for `get_redis_connection`. The
+    pipeline module is a worker-side concern; auth is HTTP-side; the
+    cross-layer import made auth tests transitively load the rq
+    package + bootstrap_secrets, slowing them and creating a fragile
+    coupling whose only justification was that the connection-pool
+    helper happened to live there.
+    """
     try:
-        from src.pipeline.task_queue import get_redis_connection
-        return get_redis_connection()
+        from src.redis_pool import get_redis_or_none
+        return get_redis_or_none()
     except Exception as e:
         logger.warning("signup rate-limit: Redis unavailable (%s) — failing open", e)
         return None
@@ -176,206 +186,148 @@ def _incr_with_ttl(r, key: str, ttl_sec: int) -> int:
     return int(r.eval(_INCR_TOUCH_LUA, 1, key, ttl_sec))
 
 
-def check_signup_attempt(ip: str) -> None:
-    """
-    Increment the per-hour attempt counter for `ip`'s subnet.
-    Raises RateLimited if the new count exceeds SIGNUP_ATTEMPT_PER_HOUR_PER_SUBNET.
+# R5-M2 (2026-05-17) — six `check_*_attempt` functions previously each
+# repeated the same six-step shape (redis-or-fail-open, build bucket
+# key, _incr_with_ttl, fetch limit, raise RateLimited with ttl). The
+# audit flagged this as duplication; collapsed here into one private
+# helper. Each public `check_*_attempt` wrapper now owns only its
+# rate-limit policy (prefix, subject, limit source, user message).
+#
+# Behaviour preserved: same keys, same TTL, same fail-open semantics,
+# same `RateLimited(retry_after_sec=...)` exception shape so any
+# 429-mapping HTTP handler keeps working untouched.
 
-    Called BEFORE expensive work (captcha verify, email send) on
-    /auth/signup. Counts every attempt, success or fail — bot scripts
-    that fail captcha should still get throttled.
+def _hour_bucket_check(
+    prefix: str,
+    subject: str,
+    limit: int,
+    user_message: str,
+) -> None:
     """
+    Common rate-limit primitive — atomic INCR on an hour-bucketed
+    Redis key, raise RateLimited if count exceeds `limit`.
+
+    Args:
+      prefix:        Redis key namespace (e.g. "signup:attempt").
+      subject:       per-caller bucket suffix (subnet or client_id).
+      limit:         max calls per hour. <=0 → unlimited (early-return).
+      user_message:  template for the 429 body. Must contain the
+                     literal `{ttl_min}` placeholder for "Try again
+                     in N minutes" formatting.
+    """
+    if limit <= 0:
+        return                  # unlimited
     r = _redis()
     if r is None:
-        return                  # fail open
+        return                  # fail open — auth path must not fail-closed on Redis outage
 
-    bucket = subnet(ip)
     hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:signup:attempt:{bucket}:{hour}"
+    key = f"rl:{prefix}:{subject}:{hour}"
 
     count = _incr_with_ttl(r, key, 3600)
-
-    limit = _attempt_limit()
     if count > limit:
         ttl = int(r.ttl(key) or 3600)
         raise RateLimited(
-            f"Too many signup attempts from your network. Try again in {ttl // 60 + 1} minutes.",
+            user_message.format(ttl_min=ttl // 60 + 1),
             retry_after_sec=max(1, ttl),
         )
+
+
+def check_signup_attempt(ip: str) -> None:
+    """Per-/24 rate-limit for /auth/signup (R2-4).
+
+    Counts every attempt regardless of captcha outcome — bot scripts
+    that fail captcha should still get throttled. Default limit from
+    `_attempt_limit()` (env SIGNUP_ATTEMPT_PER_HOUR_PER_SUBNET).
+    """
+    _hour_bucket_check(
+        prefix="signup:attempt",
+        subject=subnet(ip),
+        limit=_attempt_limit(),
+        user_message="Too many signup attempts from your network. "
+                     "Try again in {ttl_min} minutes.",
+    )
 
 
 def check_predict_attempt(client_id: str, limit_per_hour: int | None) -> None:
+    """Per-client rate-limit for /predict + /predict/batch (R2-10).
+
+    Authenticated endpoint — subject is `client_id`, not IP. Limit
+    comes from the plan spec (`predict_requests_per_hour`); None or 0
+    = unlimited (Business tier).
     """
-    Per-client rate-limit for /predict + /predict/batch.
-
-    Authenticated endpoints — the natural subject is `client_id`, not
-    IP. Limit comes from the plan spec (`predict_requests_per_hour`);
-    None = unlimited (Business tier), early-return.
-
-    Sliding hour-bucket keyed by client_id. Failing open on Redis
-    outage matches the rest of the rate-limit family.
-
-    Audit R2-10 (2026-05-15) — free-tier abuse otherwise floods
-    inference pipeline and exhausts capacity for other tenants.
-    """
-    if limit_per_hour is None or limit_per_hour <= 0:
-        return                  # unlimited
-
-    r = _redis()
-    if r is None:
-        return                  # fail open
-
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:predict:{client_id}:{hour}"
-
-    count = _incr_with_ttl(r, key, 3600)
-
-    if count > limit_per_hour:
-        ttl = int(r.ttl(key) or 3600)
-        raise RateLimited(
-            f"Predict request rate exceeded for this plan "
-            f"({limit_per_hour}/hour). Try again in {ttl // 60 + 1} minutes "
-            f"or upgrade for higher throughput.",
-            retry_after_sec=max(1, ttl),
-        )
+    _hour_bucket_check(
+        prefix="predict",
+        subject=client_id,
+        limit=int(limit_per_hour or 0),
+        user_message=f"Predict request rate exceeded for this plan "
+                     f"({limit_per_hour}/hour). Try again in "
+                     f"{{ttl_min}} minutes or upgrade for higher throughput.",
+    )
 
 
 def check_token_attempt(ip: str) -> None:
+    """Per-/24 rate-limit for /auth/token (R2-4).
+
+    bcrypt cost=12 throttles single-host to ~4 req/sec, but distributed
+    attacks aren't bounded by that. Default 20/hour (env
+    TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET).
     """
-    Per-IP rate-limit for /auth/token (api-key → JWT exchange).
-
-    bcrypt cost=12 already throttles single-host brute-force to ~4 req/sec,
-    but distributed attacks aren't bounded by that. Without an IP-level
-    cap, an attacker with botnet-scale fanout can iterate the api_key
-    keyspace across many origins.
-
-    Bucket: same /24 subnet logic as `check_signup_attempt`. Limit
-    defaults to 20/hour (override via env `TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET`).
-    Failing open on Redis outage matches signup behaviour — auth must
-    not fail-closed on a Redis hiccup.
-
-    Audit R2-4 (2026-05-15).
-    """
-    r = _redis()
-    if r is None:
-        return                  # fail open
-
-    bucket = subnet(ip)
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:token:attempt:{bucket}:{hour}"
-
-    count = _incr_with_ttl(r, key, 3600)
-
-    limit = int(os.environ.get("TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET", "20"))
-    if count > limit:
-        ttl = int(r.ttl(key) or 3600)
-        raise RateLimited(
-            f"Too many token-exchange attempts from your network. "
-            f"Try again in {ttl // 60 + 1} minutes.",
-            retry_after_sec=max(1, ttl),
-        )
+    _hour_bucket_check(
+        prefix="token:attempt",
+        subject=subnet(ip),
+        limit=int(os.environ.get("TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET", "20")),
+        user_message="Too many token-exchange attempts from your network. "
+                     "Try again in {ttl_min} minutes.",
+    )
 
 
 def check_login_attempt(ip: str) -> None:
+    """Per-/24 rate-limit for /auth/login (R4-3).
+
+    Captcha-solver farms (~$1/1k solves) flood /auth/login with valid
+    captchas, triggering OTP creates + email sends. Default 20/hour
+    (env LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET).
     """
-    Per-IP rate-limit for /auth/login (OTP-send).
-
-    Audit R4-3 — signup got `check_signup_attempt` (R2-4) and token-
-    exchange got `check_token_attempt` (R2-4), but /auth/login was
-    missed. Without an IP cap, a captcha-solver farm (commodity
-    service ~$1/1k solves) floods /auth/login with valid captchas
-    and triggers OTP creates + email sends: burns Resend quota, spams
-    real users' mailboxes, and probes "is this email registered" via
-    timing on the constant-202 response.
-
-    Bucket: /24 subnet, same as signup/token. Default 20/hour (env
-    `LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET`). Fails open on Redis outage
-    matching the rest of the family.
-    """
-    r = _redis()
-    if r is None:
-        return                  # fail open
-
-    bucket = subnet(ip)
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:login:attempt:{bucket}:{hour}"
-
-    count = _incr_with_ttl(r, key, 3600)
-
-    limit = int(os.environ.get("LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET", "20"))
-    if count > limit:
-        ttl = int(r.ttl(key) or 3600)
-        raise RateLimited(
-            f"Too many login attempts from your network. "
-            f"Try again in {ttl // 60 + 1} minutes.",
-            retry_after_sec=max(1, ttl),
-        )
+    _hour_bucket_check(
+        prefix="login:attempt",
+        subject=subnet(ip),
+        limit=int(os.environ.get("LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET", "20")),
+        user_message="Too many login attempts from your network. "
+                     "Try again in {ttl_min} minutes.",
+    )
 
 
 def check_otp_verify_attempt(ip: str) -> None:
+    """Per-/24 rate-limit for /auth/login/verify + /auth/signup/verify (R4-4).
+
+    Closes the cross-email OTP-spray gap (rotating across N harvested
+    emails never trips the per-email lockout). Default 30/hour (env
+    OTP_VERIFY_PER_HOUR_PER_SUBNET).
     """
-    Per-IP rate-limit for /auth/login/verify + /auth/signup/verify.
-
-    Audit R4-4 — the existing brute-force defence on these endpoints
-    keys on `actor_email` via `recent_failed_logins` (10 fails / 15
-    min / email). An attacker rotating across N harvested emails
-    never trips a single email's lockout — with N=10k known emails
-    + 6-digit OTP keyspace (10⁶), spray-checking 9 OTPs per email
-    per window lands ~1 valid OTP/day. The per-IP cap turns this
-    into a per-network cost instead of a global daily budget.
-
-    Bucket: /24 subnet. Default 30/hour (env
-    `OTP_VERIFY_PER_HOUR_PER_SUBNET`). Fails open on Redis outage.
-    """
-    r = _redis()
-    if r is None:
-        return                  # fail open
-
-    bucket = subnet(ip)
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:otp:verify:{bucket}:{hour}"
-
-    count = _incr_with_ttl(r, key, 3600)
-
-    limit = int(os.environ.get("OTP_VERIFY_PER_HOUR_PER_SUBNET", "30"))
-    if count > limit:
-        ttl = int(r.ttl(key) or 3600)
-        raise RateLimited(
-            f"Too many verification attempts from your network. "
-            f"Try again in {ttl // 60 + 1} minutes.",
-            retry_after_sec=max(1, ttl),
-        )
+    _hour_bucket_check(
+        prefix="otp:verify",
+        subject=subnet(ip),
+        limit=int(os.environ.get("OTP_VERIFY_PER_HOUR_PER_SUBNET", "30")),
+        user_message="Too many verification attempts from your network. "
+                     "Try again in {ttl_min} minutes.",
+    )
 
 
 def check_rotate_attempt(client_id: str) -> None:
+    """Per-client rate-limit for /clients/{id}/api-key/rotate (R3-24).
+
+    Each rotate burns bcrypt cost=12 + writes audit_log. Default
+    5/hour/client (env ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT).
     """
-    Per-client rate-limit for /clients/{id}/api-key/rotate.
-
-    Audit R3-24 — without this, a compromised client (or a benign
-    misbehaving script) can spam rotates: each call invalidates the
-    previous key, mints a new one, AND fires an audit-log entry. Run
-    in a tight loop it pollutes audit_log and burns the bcrypt cost-12
-    hashing budget. Cap defaults to 5/hour/client (env-tunable via
-    ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT). Failing open on Redis outage
-    matches the rest of the rate-limit family.
-    """
-    r = _redis()
-    if r is None:
-        return                  # fail open
-
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    key = f"rl:apikey:rotate:{client_id}:{hour}"
-
-    count = _incr_with_ttl(r, key, 3600)
-
-    limit = int(os.environ.get("ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT", "5"))
-    if count > limit:
-        ttl = int(r.ttl(key) or 3600)
-        raise RateLimited(
-            f"API key rotation rate exceeded ({limit}/hour). "
-            f"Try again in {ttl // 60 + 1} minutes.",
-            retry_after_sec=max(1, ttl),
-        )
+    rotate_limit = int(os.environ.get("ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT", "5"))
+    _hour_bucket_check(
+        prefix="apikey:rotate",
+        subject=client_id,
+        limit=rotate_limit,
+        user_message=f"API key rotation rate exceeded ({rotate_limit}/hour). "
+                     "Try again in {ttl_min} minutes.",
+    )
 
 
 def record_signup_success(ip: str) -> None:
