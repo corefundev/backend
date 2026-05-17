@@ -723,10 +723,28 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
-    # Image has python but no curl/wget/nc — use urllib for the probe.
+    # Functional healthcheck (incident 2026-05-17): the previous probe
+    # was an HTTP 200 check on /metrics, but Flask returns 200 even
+    # when rq-exporter has lost its Redis connection — it just emits
+    # an empty `rq_*` series. As a result the exporter ran "healthy"
+    # for 12 days while emitting zero data (DNS cache stale after a
+    # redis container recreate). Probe now asserts that at least one
+    # `rq_workers` line is in the response body, which can only be
+    # true if the Redis scrape succeeded. When this fails for 3
+    # consecutive 30-second intervals, autoheal restarts the container
+    # → DNS cache clears → metrics resume.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request, sys; urllib.request.urlopen('http://localhost:9726/metrics', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9726/metrics',timeout=3).read().decode(); sys.exit(0 if 'rq_workers{' in r else 1)"]
       interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      # autoheal restarts containers with status=unhealthy; the rq-
+      # exporter's DNS-cache-stale failure mode is exactly what autoheal
+      # is for, but only with a functional healthcheck above to surface
+      # the underlying failure.
+      autoheal: "true"
       timeout: 5s
       retries: 3
       start_period: 10s
