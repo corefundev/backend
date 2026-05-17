@@ -85,6 +85,40 @@ from src.api._helpers import (
     assert_json_depth as _assert_json_depth,
 )
 
+# R5-M6: hoist lazy imports for src.audit + src.auth.signup_rate_limit.
+# These two modules are LEAF nodes in the import graph (verified: neither
+# imports src.api.main back, so no circular-import risk). Hoisting collapses
+# ~31 function-local re-imports — same warm-path performance, slightly
+# slower first-process-start by an amount swallowed by uvicorn boot.
+from src.audit import (
+    record_event,
+    recent_failed_logins,
+    verify_chain,
+    list_for_client,
+    EVT_ADMIN_ACTION,
+    EVT_LOGIN,
+    EVT_MODEL_TRAIN,
+    EVT_OAUTH_CALLBACK,
+    EVT_OTP_SEND,
+    EVT_OTP_VERIFY,
+    EVT_PASSWORD_CHANGE,
+    EVT_PLAN_CHANGE,
+    EVT_SECRET_ROTATION,
+    EVT_SIGNUP,
+)
+from src.auth.signup_rate_limit import (
+    client_ip,
+    check_signup_attempt,
+    check_token_attempt,
+    check_login_attempt,
+    check_otp_verify_attempt,
+    check_rotate_attempt,
+    check_predict_attempt,
+    record_signup_success,
+    assert_signup_allowed,
+    RateLimited,
+)
+
 CONFIG_PATH = os.getenv("CONFIG_PATH", "configs/config.yaml")
 
 # ── Prometheus ────────────────────────────────────────────────────────────────
@@ -239,7 +273,6 @@ def _emit_secret_rotation_event_if_changed() -> None:
     if last_id == current_id:
         return       # no rotation since last boot — quiet
 
-    from src.audit import record_event, EVT_SECRET_ROTATION
     record_event(
         event_type=EVT_SECRET_ROTATION, event_subtype="lockbox_sa_key",
         target_type="yc_sa_key", target_id=current_id,
@@ -597,12 +630,9 @@ async def get_token(req: TokenRequest, http_req: Request):
     """
     import hmac as _hmac
     from src.auth.api_keys import is_well_formed, verify_api_key
-    from src.auth.signup_rate_limit import (
-        check_token_attempt, client_ip as _client_ip, RateLimited,
-    )
 
     try:
-        check_token_attempt(_client_ip(http_req))
+        check_token_attempt(client_ip(http_req))
     except RateLimited as e:
         raise HTTPException(
             status_code=429,
@@ -766,9 +796,6 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         already canonicalizes inside) — we also stash canonical_email
         in the OTP row so /verify uses the same value at insert time.
     """
-    from src.auth.signup_rate_limit import (
-        check_signup_attempt, client_ip, RateLimited,
-    )
     from src.auth.disposable_domains import is_disposable
     from src.auth.email_normalize import canonical_email
 
@@ -822,14 +849,12 @@ async def auth_signup(req: SignupRequest, http_req: Request):
     if existing is not None:
         logger.info("signup: duplicate email_hash=%s (silent 202)", _email_hash(canonical))
         try:
-            from src.audit import record_event, EVT_SIGNUP
-            from src.auth.signup_rate_limit import client_ip as _client_ip
             record_event(
                 event_type=EVT_SIGNUP,
                 event_subtype="duplicate_email_ignored",
                 client_id=existing.client_id,
                 actor_email=canonical,
-                ip=_client_ip(http_req),
+                ip=client_ip(http_req),
                 user_agent=http_req.headers.get("user-agent"),
                 success=False,
                 metadata={"reason": "email_already_registered"},
@@ -900,11 +925,6 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         record after success)
     """
     from src.auth.email_normalize import canonical_email
-    from src.auth.signup_rate_limit import (
-        assert_signup_allowed, record_signup_success,
-        check_otp_verify_attempt,
-        client_ip, RateLimited,
-    )
 
     # Audit R4-4 — per-IP cap on OTP verify. Lockout-via-audit_log keys
     # on actor_email, so an attacker rotating across many emails never
@@ -924,7 +944,6 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid email format")
 
-    from src.audit import record_event, recent_failed_logins, EVT_OTP_VERIFY
     _audit_ip = client_ip(http_req)
     _audit_ua = http_req.headers.get("user-agent")
 
@@ -1054,7 +1073,6 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         # roll it back (audit-ugly), but we log loudly.
         logger.warning("signup: post-create rate-limit hit for ip=%s", ip)
 
-    from src.audit import record_event, EVT_SIGNUP
     record_event(
         event_type=EVT_SIGNUP,
         client_id=desired_cid, actor_email=canonical,
@@ -1087,11 +1105,8 @@ async def auth_login_email(req: LoginEmailRequest, http_req: Request):
     flood Resend quota, spam real users' mailboxes, and probe registration
     via response timing.
     """
-    from src.auth.signup_rate_limit import (
-        check_login_attempt, client_ip as _client_ip, RateLimited,
-    )
     try:
-        check_login_attempt(_client_ip(http_req))
+        check_login_attempt(client_ip(http_req))
     except RateLimited as e:
         raise HTTPException(
             status_code=429, detail=str(e),
@@ -1136,13 +1151,11 @@ async def auth_login_email(req: LoginEmailRequest, http_req: Request):
 
     # Audit: only the user-facing intent — we don't audit the "user does
     # not exist" branch to keep the enumeration story consistent.
-    from src.audit import record_event, EVT_OTP_SEND
-    from src.auth.signup_rate_limit import client_ip as _client_ip
     record_event(
         event_type=EVT_OTP_SEND,
         actor_email=canonical,
         client_id=record.client_id if record else None,
-        ip=_client_ip(http_req),
+        ip=client_ip(http_req),
         user_agent=http_req.headers.get("user-agent"),
         success=record is not None and record.email_verified_at is not None,
         metadata={"purpose": "login"},
@@ -1175,11 +1188,8 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     issue another, repeat. The audit_log window catches that pattern.
     """
     # Audit R4-4 — per-IP cap on OTP verify (parallel to signup-verify).
-    from src.auth.signup_rate_limit import (
-        check_otp_verify_attempt, client_ip as _client_ip, RateLimited,
-    )
     try:
-        check_otp_verify_attempt(_client_ip(http_req))
+        check_otp_verify_attempt(client_ip(http_req))
     except RateLimited as e:
         raise HTTPException(
             status_code=429, detail=str(e),
@@ -1193,9 +1203,7 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid email format")
 
-    from src.audit import record_event, recent_failed_logins, EVT_LOGIN
-    from src.auth.signup_rate_limit import client_ip as _client_ip
-    _audit_ip = _client_ip(http_req)
+    _audit_ip = client_ip(http_req)
     _audit_ua = http_req.headers.get("user-agent")
 
     # ── Brute-force lockout (fail-closed when enabled, fail-open if
@@ -1472,9 +1480,6 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     from src.auth.oauth.google import OAuthError
     from src.auth.email_normalize import canonical_email
     from src.auth.api_keys import generate_api_key, hash_api_key
-    from src.auth.signup_rate_limit import (
-        client_ip, record_signup_success, RateLimited,
-    )
     from datetime import datetime as _dt, timezone as _tz
 
     p = get_provider(provider)
@@ -1485,7 +1490,6 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     if not state:
         raise HTTPException(400, detail="Missing 'state' parameter")
 
-    from src.audit import record_event, EVT_OAUTH_CALLBACK
     _audit_ip = client_ip(request)
     _audit_ua = request.headers.get("user-agent")
 
@@ -1581,7 +1585,6 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
             # 4c. Auto-create. Daily-cap pre-check for OAuth signups too.
             ip = client_ip(request) or "0.0.0.0"
             try:
-                from src.auth.signup_rate_limit import assert_signup_allowed
                 assert_signup_allowed(ip)
             except RateLimited as e:
                 raise HTTPException(429, detail=str(e),
@@ -1659,7 +1662,6 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     # ── Step 5: redirect to frontend with JWT ────────────────────────
     token = create_access_token(client_id=record.client_id, roles=["forecast"])
 
-    from src.audit import record_event, EVT_OAUTH_CALLBACK, EVT_SIGNUP
     _audit_ip = client_ip(request)
     _audit_ua = request.headers.get("user-agent")
     record_event(
@@ -1749,7 +1751,6 @@ async def internal_audit_verify(
     audit activity).
     """
     auth.require_role("admin")
-    from src.audit import verify_chain
     result = verify_chain(limit=limit)
     return {
         "ok":            result.ok,
@@ -1904,9 +1905,6 @@ async def rotate_api_key(
     # cost-12 + an audit_log row). Admin can still rotate any client's
     # key but is also subject to the cap (defence-in-depth against an
     # admin-token leak loop).
-    from src.auth.signup_rate_limit import (
-        check_rotate_attempt, client_ip as _client_ip, RateLimited,
-    )
     try:
         check_rotate_attempt(client_id)
     except RateLimited as e:
@@ -1926,11 +1924,10 @@ async def rotate_api_key(
     new_hash = hash_api_key(new_key)
     registry.update(client_id, api_key_hash=new_hash)
 
-    from src.audit import record_event, EVT_PASSWORD_CHANGE
     record_event(
         event_type=EVT_PASSWORD_CHANGE, event_subtype="api_key_rotate",
         client_id=client_id, actor_email=record.email_canonical or record.email,
-        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
         target_type="api_key", target_id=client_id,
         metadata={"actor_role": ",".join(auth.roles or [])},
     )
@@ -2031,8 +2028,6 @@ async def update_client(
     # affect horizon cap baked into the model cache.
     _services.pop(client_id, None)
 
-    from src.audit import record_event, EVT_ADMIN_ACTION
-    from src.auth.signup_rate_limit import client_ip as _client_ip
     # Snapshot of changed fields with old/new values (notes truncated to
     # avoid bloating the audit table with multi-paragraph operator notes).
     changes = {}
@@ -2046,7 +2041,7 @@ async def update_client(
     record_event(
         event_type=EVT_ADMIN_ACTION, event_subtype="client_update",
         client_id=client_id, actor_email=auth.client_id,
-        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
         target_type="client", target_id=client_id,
         metadata={"changes": changes},
     )
@@ -2254,13 +2249,11 @@ async def trigger_training(
         except Exception:    # noqa: BLE001
             pass
 
-    from src.audit import record_event, EVT_MODEL_TRAIN
-    from src.auth.signup_rate_limit import client_ip as _client_ip
     record_event(
         event_type=EVT_MODEL_TRAIN,
         event_subtype="enqueued" if job_id else "completed_sync",
         client_id=client_id, actor_email=record.email_canonical or record.email,
-        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
         target_type="model", target_id=run_id or client_id,
         metadata={
             "run_id":     run_id,
@@ -2541,9 +2534,6 @@ async def predict(
     # we spend any model-cache work — Redis fails open so a Redis hiccup
     # doesn't brick inference, only the limit silently doesn't apply.
     try:
-        from src.auth.signup_rate_limit import (
-            check_predict_attempt, RateLimited,
-        )
         plan_spec = get_plan_spec(record.plan)
         check_predict_attempt(client_id, plan_spec.predict_requests_per_hour)
     except RateLimited as e:
@@ -2841,13 +2831,11 @@ async def reset_client_config(
     # already audit; DELETE was the gap that closed here.
     record = registry.get(client_id)
     try:
-        from src.audit import record_event, EVT_PLAN_CHANGE
-        from src.auth.signup_rate_limit import client_ip as _client_ip
         record_event(
             event_type=EVT_PLAN_CHANGE, event_subtype="config_reset",
             client_id=client_id,
             actor_email=(record.email_canonical or record.email) if record else None,
-            ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+            ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
             target_type="client_config", target_id=client_id,
             metadata={"actor_role": ",".join(auth.roles or [])},
         )
@@ -3055,8 +3043,6 @@ async def upgrade_client_plan(
         client_id, record.plan, target.value, ",".join(auth.roles or []),
     )
 
-    from src.audit import record_event, EVT_PLAN_CHANGE
-    from src.auth.signup_rate_limit import client_ip as _client_ip
     # "upgrade" subtype only when moving to a higher tier; index uses
     # FREE < START < BUSINESS ordering implicit in the enum definition.
     plan_order = {Plan.FREE.value: 0, Plan.START.value: 1, Plan.BUSINESS.value: 2}
@@ -3064,7 +3050,7 @@ async def upgrade_client_plan(
     record_event(
         event_type=EVT_PLAN_CHANGE, event_subtype=subtype,
         client_id=client_id, actor_email=record.email_canonical or record.email,
-        ip=_client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
         target_type="plan", target_id=target.value,
         metadata={"old_plan": record.plan, "new_plan": target.value},
     )
@@ -3096,7 +3082,6 @@ async def list_audit_events(
         raise HTTPException(422, detail="limit must be between 1 and 500")
     if offset < 0:
         raise HTTPException(422, detail="offset must be ≥ 0")
-    from src.audit import list_for_client
     events = list_for_client(client_id, limit=limit, offset=offset)
     return {
         "client_id": client_id,
