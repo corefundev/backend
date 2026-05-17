@@ -24,10 +24,11 @@ import pytest
 # py3.11+ even though monkeypatch nominally restores at teardown.
 
 
-def test_inmem_revoke_prunes_expired_entries(monkeypatch):
+def test_inmem_revoke_prunes_expired_entries():
+    """R5-M7 — `_prune_inmem_revoked` does NOT touch Redis, so the
+    test doesn't need to mock _redis_client at all."""
     from src.auth import jwt_auth
 
-    monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
     jwt_auth._inmem_revoked.clear()
 
     # Seed: one expired entry (exp in the past), one fresh.
@@ -42,10 +43,14 @@ def test_inmem_revoke_prunes_expired_entries(monkeypatch):
 
 
 def test_inmem_revoke_respects_size_ceiling(monkeypatch):
+    """R5-M7 — ceiling is now `settings.jwt_inmem_revoked_max` (M4
+    follow-up). Test overrides via the public Settings attr; no
+    monkeypatching of the previous `_INMEM_REVOKED_MAX` module
+    constant (which was removed)."""
     from src.auth import jwt_auth
+    from src.settings import settings
 
-    monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
-    monkeypatch.setattr(jwt_auth, "_INMEM_REVOKED_MAX", 5)
+    monkeypatch.setattr(settings, "jwt_inmem_revoked_max", 5)
     jwt_auth._inmem_revoked.clear()
 
     # Seed 10 entries with staggered (future) expirations — none expired,
@@ -63,25 +68,26 @@ def test_inmem_revoke_respects_size_ceiling(monkeypatch):
 
 
 def test_inmem_revoke_empty_map_handled():
+    """R5-M7 — `is_token_revoked` with `redis=None` exercises the
+    in-memory fallback path explicitly (no implicit pool lookup)."""
     from src.auth import jwt_auth
 
     jwt_auth._inmem_revoked.clear()
     # Must not raise even if the map is empty (no-op prune).
     jwt_auth._prune_inmem_revoked()
-    assert jwt_auth.is_token_revoked("never-revoked") is False
+    assert jwt_auth.is_token_revoked("never-revoked", redis=None) is False
 
 
-def test_revoke_then_check_via_public_api(monkeypatch):
+def test_revoke_then_check_via_public_api():
     """Smoke: revoke_token + is_token_revoked round-trip through the
-    bounded in-memory map (no Redis available)."""
+    bounded in-memory map (Redis unavailable, R5-M7 DI shape)."""
     from src.auth import jwt_auth
 
-    monkeypatch.setattr(jwt_auth, "_redis_client", lambda: None)
     jwt_auth._inmem_revoked.clear()
 
-    jwt_auth.revoke_token("jti-roundtrip")
-    assert jwt_auth.is_token_revoked("jti-roundtrip") is True
-    assert jwt_auth.is_token_revoked("jti-never-seen") is False
+    jwt_auth.revoke_token("jti-roundtrip", redis=None)
+    assert jwt_auth.is_token_revoked("jti-roundtrip", redis=None) is True
+    assert jwt_auth.is_token_revoked("jti-never-seen", redis=None) is False
 
 
 # ── R3-7: webhook URL SSRF guard ──────────────────────────────────────────

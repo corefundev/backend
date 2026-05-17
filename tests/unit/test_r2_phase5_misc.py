@@ -56,10 +56,10 @@ def test_new_trace_id_unique():
 # ── R2-10: check_predict_attempt — pure logic with mocked Redis ──────────
 
 @pytest.fixture
-def mock_redis(monkeypatch):
-    """Replace _redis() with an in-memory dict so the test runs without
-    a real Redis container."""
-    from src.auth import signup_rate_limit as mod
+def fake_redis():
+    """In-memory Redis double — passed explicitly via the public
+    `redis=` keyword on the rate-limit functions (R5-M7 DI). No
+    monkeypatching of private module attributes."""
 
     class FakeRedis:
         def __init__(self):
@@ -77,53 +77,51 @@ def mock_redis(monkeypatch):
         def ttl(self, key):
             return self.ttls.get(key, -1)
 
-    fake = FakeRedis()
-    monkeypatch.setattr(mod, "_redis", lambda: fake)
-    return fake
+    return FakeRedis()
 
 
-def test_predict_rate_unlimited_is_noop(mock_redis):
+def test_predict_rate_unlimited_is_noop(fake_redis):
     from src.auth.signup_rate_limit import check_predict_attempt
     # None means unlimited — no Redis call, no raise.
     for _ in range(10):
-        check_predict_attempt("acme", None)
-    assert mock_redis.store == {}
+        check_predict_attempt("acme", None, redis=fake_redis)
+    assert fake_redis.store == {}
 
 
-def test_predict_rate_zero_is_noop(mock_redis):
+def test_predict_rate_zero_is_noop(fake_redis):
     from src.auth.signup_rate_limit import check_predict_attempt
     # 0 (or negative) is treated as unlimited rather than "block all".
-    check_predict_attempt("acme", 0)
-    assert mock_redis.store == {}
+    check_predict_attempt("acme", 0, redis=fake_redis)
+    assert fake_redis.store == {}
 
 
-def test_predict_rate_increments_per_call(mock_redis):
+def test_predict_rate_increments_per_call(fake_redis):
     from src.auth.signup_rate_limit import check_predict_attempt
-    for i in range(5):
-        check_predict_attempt("acme", 10)
+    for _ in range(5):
+        check_predict_attempt("acme", 10, redis=fake_redis)
     # The Redis key got 5 increments.
-    assert len(mock_redis.store) == 1
-    assert next(iter(mock_redis.store.values())) == 5
+    assert len(fake_redis.store) == 1
+    assert next(iter(fake_redis.store.values())) == 5
 
 
-def test_predict_rate_raises_at_limit(mock_redis):
+def test_predict_rate_raises_at_limit(fake_redis):
     from src.auth.signup_rate_limit import check_predict_attempt, RateLimited
     # Drive the counter just to the limit — passes.
     for _ in range(3):
-        check_predict_attempt("acme", 3)
+        check_predict_attempt("acme", 3, redis=fake_redis)
     # 4th call: count=4 > limit=3 → raise.
     with pytest.raises(RateLimited) as ei:
-        check_predict_attempt("acme", 3)
+        check_predict_attempt("acme", 3, redis=fake_redis)
     assert ei.value.retry_after_sec is not None
 
 
-def test_predict_rate_isolated_per_client(mock_redis):
+def test_predict_rate_isolated_per_client(fake_redis):
     from src.auth.signup_rate_limit import check_predict_attempt
     # Two distinct clients each get their own bucket.
     for _ in range(3):
-        check_predict_attempt("acme", 5)
+        check_predict_attempt("acme", 5, redis=fake_redis)
     for _ in range(2):
-        check_predict_attempt("beta", 5)
+        check_predict_attempt("beta", 5, redis=fake_redis)
     # acme = 3, beta = 2 → neither hits 5.
-    vals = sorted(mock_redis.store.values())
+    vals = sorted(fake_redis.store.values())
     assert vals == [2, 3]

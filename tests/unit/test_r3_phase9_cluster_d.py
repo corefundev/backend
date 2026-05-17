@@ -32,30 +32,39 @@ def test_check_rotate_attempt_exists():
     assert callable(check_rotate_attempt)
 
 
-def test_check_rotate_attempt_fail_open_when_redis_down(monkeypatch):
+def test_check_rotate_attempt_fail_open_when_redis_down():
     """If Redis is unreachable, the helper must NOT raise — same
-    fail-open posture as check_token_attempt / check_predict_attempt."""
+    fail-open posture as check_token_attempt / check_predict_attempt.
+
+    R5-M7 (2026-05-18) — DI via the public `redis=` keyword arg.
+    `redis=None` explicitly simulates an offline Redis (distinct from
+    the implicit `_USE_DEFAULT` sentinel, which would use the real
+    pool). No monkeypatching of `signup_rate_limit._redis` (private
+    module attribute) needed.
+    """
     from src.auth import signup_rate_limit
-    monkeypatch.setattr(signup_rate_limit, "_redis", lambda: None)
     # Must not raise.
-    signup_rate_limit.check_rotate_attempt("any-client")
+    signup_rate_limit.check_rotate_attempt("any-client", redis=None)
 
 
 def test_check_rotate_attempt_raises_above_cap(monkeypatch):
     """After the cap is exceeded, the helper raises RateLimited with
-    a Retry-After hint."""
+    a Retry-After hint.
+
+    R5-M7 — fake Redis injected via the public `redis=` keyword. The
+    fake's `.eval()` returns 999 (the count above the cap) and
+    `.ttl()` returns 1800 (so Retry-After comes through). No
+    monkeypatching of private `_redis` or `_incr_with_ttl`.
+    """
     from src.auth import signup_rate_limit
     fake = MagicMock()
-    fake.ttl.return_value = 1800   # 30 min remaining in bucket
-    monkeypatch.setattr(signup_rate_limit, "_redis", lambda: fake)
-    monkeypatch.setattr(signup_rate_limit, "_incr_with_ttl", lambda *a, **k: 999)
-    # R5-M4 follow-up — the rotate cap is now read from the Settings
-    # singleton, not os.environ on every call. Override via the public
-    # attribute; monkeypatch.setattr rolls back at teardown.
+    fake.eval.return_value = 999    # _incr_with_ttl path → count > limit
+    fake.ttl.return_value = 1800    # 30 min remaining in bucket
+    # R5-M4 follow-up — the rotate cap is read from Settings, not env.
     from src.settings import settings
     monkeypatch.setattr(settings, "rotate_attempt_per_hour_per_client", 5)
     with pytest.raises(signup_rate_limit.RateLimited) as ei:
-        signup_rate_limit.check_rotate_attempt("acme")
+        signup_rate_limit.check_rotate_attempt("acme", redis=fake)
     assert ei.value.retry_after_sec and ei.value.retry_after_sec > 0
 
 

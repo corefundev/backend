@@ -241,6 +241,15 @@ def decode_access_token(token: str) -> dict:
 
 # ── Revocation set (Redis-backed; in-memory fallback for dev) ─────────
 
+# R5-M7 sentinel — `redis=_USE_DEFAULT` (implicit default for all
+# public functions) means "resolve via _redis_client() factory".
+# Tests that need to simulate an offline Redis pass `redis=None`
+# explicitly; tests that inject a fake client pass `redis=fake`.
+# A single None couldn't separate "I didn't specify, use the pool"
+# from "I specifically want the fail-open path".
+_USE_DEFAULT: object = object()
+
+
 def _revocation_ttl_seconds() -> int:
     """Revoked-jti entries auto-expire after the max JWT lifetime so
     Redis doesn't grow unbounded. Anything older than this would have
@@ -251,10 +260,17 @@ def _revocation_ttl_seconds() -> int:
 # Audit R3-5 — bounded in-memory revocation map. Each jti is paired with
 # its expiration epoch so a sustained Redis outage can't grow the set
 # without bound. Entries older than the revocation TTL are pruned on
-# every read/write. Hard ceiling (`_INMEM_REVOKED_MAX`, default 10k) is
-# a defensive cap against degenerate-load scenarios — at that point the
-# Redis fallback is the wrong tool, but we still refuse to grow forever.
-_INMEM_REVOKED_MAX = int(os.environ.get("JWT_INMEM_REVOKED_MAX", "10000"))
+# every read/write. Hard ceiling (`settings.jwt_inmem_revoked_max`,
+# default 10k) is a defensive cap against degenerate-load scenarios —
+# at that point the Redis fallback is the wrong tool, but we still
+# refuse to grow forever.
+#
+# R5-M7 (2026-05-18) — the ceiling is now read from the central Settings
+# (M4) on every call rather than frozen at import. Test override is
+# `monkeypatch.setattr(settings, "jwt_inmem_revoked_max", N)` — clean
+# DI through the public Settings singleton, no module-level mutable
+# state.
+from src.settings import settings as _settings
 _inmem_revoked: dict[str, float] = {}
 
 
@@ -266,10 +282,11 @@ def _prune_inmem_revoked(now: float | None = None) -> None:
     expired = [j for j, exp in _inmem_revoked.items() if exp <= cutoff]
     for j in expired:
         _inmem_revoked.pop(j, None)
-    if len(_inmem_revoked) > _INMEM_REVOKED_MAX:
+    ceiling = _settings.jwt_inmem_revoked_max
+    if len(_inmem_revoked) > ceiling:
         # Drop oldest by expiration. dict preserves insertion order but
         # we want time-order — sort once and trim.
-        excess = len(_inmem_revoked) - _INMEM_REVOKED_MAX
+        excess = len(_inmem_revoked) - ceiling
         for j, _ in sorted(_inmem_revoked.items(), key=lambda kv: kv[1])[:excess]:
             _inmem_revoked.pop(j, None)
 
@@ -290,7 +307,7 @@ def _redis_client():
         return None
 
 
-def revoke_token(jti: str) -> None:
+def revoke_token(jti: str, *, redis=_USE_DEFAULT) -> None:
     """
     Mark a token as revoked. Future decode_access_token calls with this
     jti will be rejected. The entry auto-expires after the JWT's max
@@ -298,12 +315,15 @@ def revoke_token(jti: str) -> None:
 
     Called by `/auth/logout` and any "force-invalidate this session"
     flow. Idempotent — re-revoking is a no-op.
+
+    `redis`: R5-M7 DI hook — pass a Redis-compatible client to bypass
+    the default `_redis_client()` factory (None = use canonical pool).
     """
     if not jti:
         return
     now = time.time()
     expires_at = now + _revocation_ttl_seconds()
-    client = _redis_client()
+    client = _redis_client() if redis is _USE_DEFAULT else redis
     if client is None:
         _inmem_revoked[jti] = expires_at
         _prune_inmem_revoked(now)
@@ -316,8 +336,11 @@ def revoke_token(jti: str) -> None:
         _prune_inmem_revoked(now)
 
 
-def is_token_revoked(jti: str) -> bool:
-    """True iff `jti` is in the revocation set."""
+def is_token_revoked(jti: str, *, redis=_USE_DEFAULT) -> bool:
+    """True iff `jti` is in the revocation set.
+
+    `redis`: R5-M7 DI hook (None = use canonical pool).
+    """
     if not jti:
         return False
     # Audit R3-5 — bounded in-mem store; check + lazy-prune.
@@ -325,7 +348,7 @@ def is_token_revoked(jti: str) -> bool:
     _prune_inmem_revoked(now)
     if jti in _inmem_revoked:
         return True
-    client = _redis_client()
+    client = _redis_client() if redis is _USE_DEFAULT else redis
     if client is None:
         return False
     try:
@@ -337,10 +360,13 @@ def is_token_revoked(jti: str) -> bool:
         return False
 
 
-def reset_revocation_set_for_tests() -> None:
-    """Wipe both in-memory and Redis revocation entries. Test-only."""
+def reset_revocation_set_for_tests(*, redis=_USE_DEFAULT) -> None:
+    """Wipe both in-memory and Redis revocation entries. Test-only.
+
+    `redis`: R5-M7 DI hook (None = use canonical pool).
+    """
     _inmem_revoked.clear()
-    client = _redis_client()
+    client = _redis_client() if redis is _USE_DEFAULT else redis
     if client is None:
         return
     try:

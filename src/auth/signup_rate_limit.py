@@ -147,6 +147,16 @@ def subnet(ip_str: str) -> str:
 
 # ── Redis interaction ──────────────────────────────────────────────────
 
+# R5-M7 sentinel — `redis=_USE_DEFAULT` (the implicit default for all
+# public functions) means "resolve via _redis() factory". Tests that
+# need to simulate an offline Redis pass `redis=None` explicitly;
+# tests that inject a fake client pass `redis=fake`. This separates
+# "I didn't specify, use the pool" from "I specifically want the
+# fail-open path triggered" — both of which a single None couldn't
+# distinguish.
+_USE_DEFAULT: object = object()
+
+
 def _redis():
     """Return a Redis connection or None if unreachable. Caller fails open.
 
@@ -208,6 +218,8 @@ def _hour_bucket_check(
     subject: str,
     limit: int,
     user_message: str,
+    *,
+    redis=None,
 ) -> None:
     """
     Common rate-limit primitive — atomic INCR on an hour-bucketed
@@ -220,10 +232,14 @@ def _hour_bucket_check(
       user_message:  template for the 429 body. Must contain the
                      literal `{ttl_min}` placeholder for "Try again
                      in N minutes" formatting.
+      redis:         DI hook (R5-M7) — pass a Redis-compatible client
+                     to bypass the default `_redis()` factory. Used
+                     by tests + future DI in route handlers. None
+                     means "use the canonical pool factory".
     """
     if limit <= 0:
         return                  # unlimited
-    r = _redis()
+    r = _redis() if redis is _USE_DEFAULT else redis
     if r is None:
         return                  # fail open — auth path must not fail-closed on Redis outage
 
@@ -239,12 +255,15 @@ def _hour_bucket_check(
         )
 
 
-def check_signup_attempt(ip: str) -> None:
+def check_signup_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/signup (R2-4).
 
     Counts every attempt regardless of captcha outcome — bot scripts
     that fail captcha should still get throttled. Default limit from
     `_attempt_limit()` (env SIGNUP_ATTEMPT_PER_HOUR_PER_SUBNET).
+
+    `redis`: R5-M7 DI hook — pass a Redis-compatible client to bypass
+    the default `_redis()` factory (None = use canonical pool).
     """
     _hour_bucket_check(
         prefix="signup:attempt",
@@ -252,15 +271,18 @@ def check_signup_attempt(ip: str) -> None:
         limit=_attempt_limit(),
         user_message="Too many signup attempts from your network. "
                      "Try again in {ttl_min} minutes.",
+        redis=redis,
     )
 
 
-def check_predict_attempt(client_id: str, limit_per_hour: int | None) -> None:
+def check_predict_attempt(
+    client_id: str, limit_per_hour: int | None, *, redis=_USE_DEFAULT,
+) -> None:
     """Per-client rate-limit for /predict + /predict/batch (R2-10).
 
     Authenticated endpoint — subject is `client_id`, not IP. Limit
     comes from the plan spec (`predict_requests_per_hour`); None or 0
-    = unlimited (Business tier).
+    = unlimited (Business tier). `redis`: R5-M7 DI hook.
     """
     _hour_bucket_check(
         prefix="predict",
@@ -269,14 +291,16 @@ def check_predict_attempt(client_id: str, limit_per_hour: int | None) -> None:
         user_message=f"Predict request rate exceeded for this plan "
                      f"({limit_per_hour}/hour). Try again in "
                      f"{{ttl_min}} minutes or upgrade for higher throughput.",
+        redis=redis,
     )
 
 
-def check_token_attempt(ip: str) -> None:
+def check_token_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/token (R2-4).
 
     bcrypt cost=12 throttles single-host to ~4 req/sec, but distributed
-    attacks aren't bounded by that. Limit from settings.
+    attacks aren't bounded by that. Limit from settings. `redis`: R5-M7
+    DI hook.
     """
     _hour_bucket_check(
         prefix="token:attempt",
@@ -284,14 +308,16 @@ def check_token_attempt(ip: str) -> None:
         limit=settings.token_attempt_per_hour_per_subnet,
         user_message="Too many token-exchange attempts from your network. "
                      "Try again in {ttl_min} minutes.",
+        redis=redis,
     )
 
 
-def check_login_attempt(ip: str) -> None:
+def check_login_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/login (R4-3).
 
     Captcha-solver farms flood /auth/login with valid captchas,
     triggering OTP creates + email sends. Limit from settings.
+    `redis`: R5-M7 DI hook.
     """
     _hour_bucket_check(
         prefix="login:attempt",
@@ -299,13 +325,15 @@ def check_login_attempt(ip: str) -> None:
         limit=settings.login_attempt_per_hour_per_subnet,
         user_message="Too many login attempts from your network. "
                      "Try again in {ttl_min} minutes.",
+        redis=redis,
     )
 
 
-def check_otp_verify_attempt(ip: str) -> None:
+def check_otp_verify_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/login/verify + /auth/signup/verify (R4-4).
 
     Closes the cross-email OTP-spray gap. Limit from settings.
+    `redis`: R5-M7 DI hook.
     """
     _hour_bucket_check(
         prefix="otp:verify",
@@ -313,14 +341,15 @@ def check_otp_verify_attempt(ip: str) -> None:
         limit=settings.otp_verify_per_hour_per_subnet,
         user_message="Too many verification attempts from your network. "
                      "Try again in {ttl_min} minutes.",
+        redis=redis,
     )
 
 
-def check_rotate_attempt(client_id: str) -> None:
+def check_rotate_attempt(client_id: str, *, redis=_USE_DEFAULT) -> None:
     """Per-client rate-limit for /clients/{id}/api-key/rotate (R3-24).
 
     Each rotate burns bcrypt cost=12 + writes audit_log. Limit from
-    settings.
+    settings. `redis`: R5-M7 DI hook.
     """
     rotate_limit = settings.rotate_attempt_per_hour_per_client
     _hour_bucket_check(
@@ -329,10 +358,11 @@ def check_rotate_attempt(client_id: str) -> None:
         limit=rotate_limit,
         user_message=f"API key rotation rate exceeded ({rotate_limit}/hour). "
                      "Try again in {ttl_min} minutes.",
+        redis=redis,
     )
 
 
-def record_signup_success(ip: str) -> None:
+def record_signup_success(ip: str, *, redis=_USE_DEFAULT) -> None:
     """
     Bump the per-day success counter. Call AFTER /auth/signup/verify
     creates the client record.
@@ -342,8 +372,10 @@ def record_signup_success(ip: str) -> None:
     to come back tomorrow. (We could also pre-check before creating, but
     the post-check race window is harmless: at most one extra account
     slips through per day, which is below the noise floor.)
+
+    `redis`: R5-M7 DI hook.
     """
-    r = _redis()
+    r = _redis() if redis is _USE_DEFAULT else redis
     if r is None:
         return                  # fail open
 
@@ -357,19 +389,21 @@ def record_signup_success(ip: str) -> None:
     if count > limit:
         ttl = int(r.ttl(key) or 24 * 3600)
         raise RateLimited(
-            f"Too many new accounts created from your network today. Try again tomorrow.",
+            "Too many new accounts created from your network today. Try again tomorrow.",
             retry_after_sec=max(60, ttl),
         )
 
 
-def assert_signup_allowed(ip: str) -> None:
+def assert_signup_allowed(ip: str, *, redis=_USE_DEFAULT) -> None:
     """
     Pre-check called from /auth/signup/verify, BEFORE creating the
     client. We check the daily cap here (the attempt cap is already
     enforced on /auth/signup). This way we don't have to delete a
     half-created client if the cap was hit between attempt and verify.
+
+    `redis`: R5-M7 DI hook.
     """
-    r = _redis()
+    r = _redis() if redis is _USE_DEFAULT else redis
     if r is None:
         return
 
