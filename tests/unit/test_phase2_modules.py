@@ -267,14 +267,28 @@ class TestHierarchicalReconciler:
         with pytest.raises(ValueError, match="missing columns"):
             recon.fit(bad_lookup)
 
-    def test_top_down_preserves_total(self):
+    def test_top_down_raises_not_implemented(self):
+        """Audit R4-15: the previous top_down code path was a silent
+        math no-op (`(x / sum) * sum == x` followed by bottom_up).
+        Must raise NotImplementedError until the API change lands so
+        callers don't silently regress to bottom_up math."""
         from src.models.hierarchical import HierarchicalReconciler, HierarchyConfig
         cfg   = HierarchyConfig()
         recon = HierarchicalReconciler(cfg, method="top_down")
         recon.fit(self._make_lookup())
-        result = recon.reconcile(self._make_forecasts())
-        # Total should still be present
-        assert "total" in result["hierarchy_level"].values
+        with pytest.raises(NotImplementedError, match="top_down.*not implemented"):
+            recon.reconcile(self._make_forecasts())
+
+    def test_middle_out_raises_not_implemented(self):
+        """Audit R4-15: same shape as top_down — silent no-op before
+        the audit. Must raise NotImplementedError until the API change
+        lands. Bottom-up remains the only working method."""
+        from src.models.hierarchical import HierarchicalReconciler, HierarchyConfig
+        cfg   = HierarchyConfig()
+        recon = HierarchicalReconciler(cfg, method="middle_out")
+        recon.fit(self._make_lookup())
+        with pytest.raises(NotImplementedError, match="middle_out.*not implemented"):
+            recon.reconcile(self._make_forecasts())
 
 
 # ══════════════════════════════════════════════════════════════

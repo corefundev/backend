@@ -8,9 +8,20 @@ Hierarchy:
     SKU → category → region → total
 
 Reconciliation methods:
-  - bottom_up:   aggregate from SKU level upward
-  - top_down:    disaggregate from total downward (proportional)
-  - middle_out:  reconcile from category level
+  - bottom_up:   aggregate from SKU level upward (the only working
+                 method as of R4-15 audit — see below).
+  - top_down:    NotImplementedError — see _top_down docstring.
+                 Prior implementation was a silent math no-op.
+  - middle_out:  NotImplementedError — see _middle_out docstring.
+                 Same silent no-op shape.
+
+Audit R4-15 (2026-05-17): bottom_up is mathematically correct;
+top_down + middle_out were silent no-ops that returned their input
+unchanged then ran it through bottom_up. The proper implementations
+need authoritative aggregate forecasts on the input, which requires
+an API change to `reconcile()`. Until then, the broken methods
+raise NotImplementedError so callers can't silently regress to
+bottom-up math while believing they have top-down/middle-out.
 
 Reference: Hyndman & Athanasopoulos, "Forecasting: P&P"
 """
@@ -138,44 +149,76 @@ class HierarchicalReconciler:
 
     def _top_down(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Compute total forecast, then distribute down proportionally
-        using historical averages.
+        TOP-DOWN reconciliation — NOT IMPLEMENTED (audit R4-15).
+
+        Why this raises instead of running: the previous code path was
+        a silent mathematical no-op. It computed:
+
+            totals = df.groupby([date, "step"])[fc].transform("sum")
+            sums   = df.groupby([date, "step"])[fc].transform("sum")   # ← identical sum
+            df[fc] = (df[fc] / (sums + 1e-8)) * totals                 # ← = df[fc]
+
+        i.e. `(x / sum) * sum == x`, so the method returned its input
+        unchanged (modulo a 1e-8 rounding wobble) then fed it back into
+        `_bottom_up`. Result: top_down behaved exactly like bottom_up
+        with no warning to the caller. Two consequences:
+
+          1. WMAPE comparisons between methods were meaningless — the
+             "top_down" forecast was the bottom_up forecast.
+          2. Anyone enabling method="top_down" in good faith got
+             bottom_up math while believing they had hierarchical
+             top-down reconciliation.
+
+        Proper top-down requires an AUTHORITATIVE total-level forecast
+        (from a separate top-level model — e.g. a slow-moving total
+        ARIMA — or from external sales planning) and a stable set of
+        DOWN-PROPORTIONS (historical share of each SKU in the total,
+        or forecasted shares). The current `reconcile(sku_forecasts)`
+        signature has no place to pass either input. Implementing
+        correctly requires an API change:
+
+            reconcile(
+                sku_forecasts: pd.DataFrame,
+                aggregate_forecasts: pd.DataFrame | None = None,    # ← total + category
+                proportions: pd.DataFrame | None = None,            # ← historical shares
+            )
+
+        Until that change ships, fail loudly so callers can choose
+        bottom_up explicitly or implement the proper top-down pipeline.
         """
-        fc   = self.cfg.forecast_col
-        date = self.cfg.date_col
-
-        # Total per date/step
-        totals = df.groupby([date, "step"])[fc].transform("sum")
-        sums   = df.groupby([date, "step"])[fc].transform("sum")
-
-        # Proportional shares per SKU
-        df = df.copy()
-        df["proportion"]  = df[fc] / (sums + 1e-8)
-        df["reconciled"]  = df["proportion"] * totals
-        df[fc]            = df["reconciled"].clip(lower=0)
-        df.drop(columns=["proportion", "reconciled"], inplace=True)
-
-        return self._bottom_up(df)   # re-aggregate after reconciliation
+        raise NotImplementedError(
+            "HierarchicalReconciler.method='top_down' is not implemented. "
+            "The prior code path was a silent math no-op (audit R4-15). "
+            "Use method='bottom_up' for SKU→total aggregation, or implement "
+            "the API change documented in _top_down.__doc__ to ship real "
+            "top-down reconciliation."
+        )
 
     def _middle_out(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Category-level forecasts are taken as authoritative,
-        then distributed to SKU proportionally.
+        MIDDLE-OUT reconciliation — NOT IMPLEMENTED (audit R4-15).
+
+        Same shape as the _top_down no-op: the prior implementation
+        computed `cat_totals` and `sku_cat_sum` as identical groupby
+        sums, then ran `(x / sku_cat_sum) * cat_totals == x` and
+        delegated back to `_bottom_up`. Returned its input unchanged.
+
+        Proper middle-out requires AUTHORITATIVE category-level
+        forecasts (from a category-level model, separate from the SKU
+        models) as input. With those, the method would distribute each
+        category total to its SKUs using historical SKU shares within
+        the category, then aggregate back up via bottom-up.
+
+        Implementing correctly needs the same API change documented on
+        `_top_down`: an `aggregate_forecasts` parameter containing the
+        authoritative category-level series.
         """
-        fc   = self.cfg.forecast_col
-        df   = df.copy()
-        cat  = self.cfg.category_col
-        date = self.cfg.date_col
-
-        # Category totals
-        cat_totals  = df.groupby([cat, date, "step"])[fc].transform("sum")
-        sku_cat_sum = df.groupby([cat, date, "step"])[fc].transform("sum")
-        df["sku_proportion"] = df[fc] / (sku_cat_sum + 1e-8)
-        df[fc] = df["sku_proportion"] * cat_totals
-        df[fc] = df[fc].clip(lower=0)
-        df.drop(columns=["sku_proportion"], inplace=True)
-
-        return self._bottom_up(df)
+        raise NotImplementedError(
+            "HierarchicalReconciler.method='middle_out' is not implemented. "
+            "The prior code path was a silent math no-op (audit R4-15). "
+            "Use method='bottom_up' or implement the API change documented "
+            "in _top_down.__doc__ to ship real middle-out reconciliation."
+        )
 
     def compute_metrics_by_level(
         self,
