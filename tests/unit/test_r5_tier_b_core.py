@@ -51,13 +51,38 @@ def test_get_current_client_uses_constant_time_compare():
 
 # ── R5-8: telegram_webhook timing + empty-secret refuse ───────────────────
 
+def _telegram_webhook_source() -> str:
+    """Return the source block of `telegram_webhook`. Tries main.py
+    first (pre-R5-M1) and falls back to routers/notifications.py
+    (post-R5-M1 slice 3). The R5-8 invariants live wherever the
+    handler lives — the file path is incidental, the behaviour is
+    what we protect."""
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "notifications.py",
+    )
+    for f in candidates:
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        idx = text.find("async def telegram_webhook(")
+        if idx < 0:
+            continue
+        # Stop at the next route decorator (either @app. or @router.)
+        end_app    = text.find("\n@app.",    idx + 1)
+        end_router = text.find("\n@router.", idx + 1)
+        ends = [e for e in (end_app, end_router) if e > 0]
+        end = min(ends) if ends else -1
+        return text[idx:end] if end > 0 else text[idx:idx + 4000]
+    raise AssertionError(
+        "telegram_webhook handler not found in main.py or "
+        "routers/notifications.py — has it been deleted?"
+    )
+
+
 def test_telegram_webhook_uses_compare_digest():
     """telegram_webhook must use hmac.compare_digest, not raw `!=`."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    idx = text.find("async def telegram_webhook(")
-    assert idx > 0
-    end = text.find("\n@app.", idx + 1)
-    block = text[idx:end] if end > 0 else text[idx:idx + 4000]
+    block = _telegram_webhook_source()
     assert "hmac.compare_digest" in block or "_hmac.compare_digest" in block, (
         "telegram_webhook must use hmac.compare_digest (R5-8)"
     )
@@ -76,10 +101,7 @@ def test_telegram_webhook_refuses_empty_secret_in_prod():
     """telegram_webhook must refuse with 503 when
     TELEGRAM_WEBHOOK_SECRET is empty AND APP_ENV=production
     (previously fell through and accepted any POST)."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    idx = text.find("async def telegram_webhook(")
-    end = text.find("\n@app.", idx + 1)
-    block = text[idx:end] if end > 0 else text[idx:idx + 4000]
+    block = _telegram_webhook_source()
     assert 'app_env == "production"' in block or \
            "APP_ENV" in block or "app_env" in block, (
         "telegram_webhook must check APP_ENV for prod-empty refusal (R5-8)"

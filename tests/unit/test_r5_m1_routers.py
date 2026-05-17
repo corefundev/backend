@@ -119,6 +119,37 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_notifications_domain_lives_in_router():
+    """The `notifications` domain (R5-M1 slice 3) — 4 routes — must
+    live in `src/api/routers/notifications.py`, not main.py."""
+    notif_router = _ROUTERS_DIR / "notifications.py"
+    assert notif_router.is_file(), (
+        "src/api/routers/notifications.py must exist after R5-M1 slice 3"
+    )
+    text = notif_router.read_text()
+    assert "router = APIRouter" in text
+    for path_method in (
+        ('post', '/clients/{client_id}/telegram/link-token'),
+        ('delete', '/clients/{client_id}/telegram'),
+        ('get', '/clients/{client_id}/telegram'),
+        ('post', '/telegram/webhook'),
+    ):
+        method, path = path_method
+        assert f'@router.{method}("{path}"' in text, (
+            f"notifications.py must own {method.upper()} {path}"
+        )
+
+    main_text = _MAIN.read_text()
+    for path in (
+        "/clients/{client_id}/telegram/link-token",
+        "/telegram/webhook",
+    ):
+        assert f'"{path}"' not in main_text, (
+            f"main.py still references {path} — must be in notifications.py"
+        )
+    assert "notifications_router" in main_text
+
+
 def test_audit_domain_lives_in_router():
     """The `audit` domain (R5-M1 slice 2) must live in
     `src/api/routers/audit.py`, not main.py."""

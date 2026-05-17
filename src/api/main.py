@@ -460,8 +460,10 @@ app.include_router(uploads_router)
 # or after auth without collision.
 from src.api.routers.legal import router as legal_router
 from src.api.routers.audit import router as audit_router
+from src.api.routers.notifications import router as notifications_router
 app.include_router(legal_router)
 app.include_router(audit_router)
+app.include_router(notifications_router)
 
 # ══════════════════════════════════════════════════════════════════
 # Schemas
@@ -3014,129 +3016,3 @@ async def upgrade_client_plan(
         metadata={"old_plan": record.plan, "new_plan": target.value},
     )
     return {"plan": target.value, "display_name": spec.display_name, "changed": True}
-
-
-# ──────────────────────────────────────────────────────────────────
-# Audit log read API — user's own security timeline
-# ──────────────────────────────────────────────────────────────────
-
-# ──────────────────────────────────────────────────────────────────
-# Telegram notifications — link / unlink / inbound webhook
-# ──────────────────────────────────────────────────────────────────
-
-@app.post("/clients/{client_id}/telegram/link-token", tags=["notifications"])
-async def telegram_link_token(
-    client_id: str,
-    auth: AuthContext = Depends(get_current_client),
-):
-    """
-    Generate a one-shot deep-link token for connecting the user's
-    Telegram. Frontend opens the returned URL in a new tab; the user
-    sends /start <token> to the bot, the bot's webhook stores the
-    chat_id on the client config. Token TTL = 10 min.
-    """
-    require_client_access(client_id, auth)
-    from src.notifications.telegram import (
-        create_link_token, build_link_url, bot_username,
-    )
-    if not bot_username():
-        raise HTTPException(503, detail="Telegram bot is not configured")
-    token = create_link_token(client_id)
-    return {"token": token, "url": build_link_url(token), "expires_in_sec": 600}
-
-
-@app.delete("/clients/{client_id}/telegram", tags=["notifications"])
-async def telegram_unlink(
-    client_id: str,
-    auth: AuthContext = Depends(get_current_client),
-):
-    """Remove the chat_id from client config so notifications stop."""
-    require_client_access(client_id, auth)
-    registry = get_registry()
-    record = registry.get(client_id)
-    if record is None:
-        raise HTTPException(404, detail=f"Client '{client_id}' not found")
-    cfg = dict(record.config or {})
-    notifs = dict(cfg.get("notifications") or {})
-    tg = dict(notifs.get("telegram") or {})
-    if "chat_id" in tg:
-        tg.pop("chat_id", None)
-    notifs["telegram"] = tg
-    cfg["notifications"] = notifs
-    registry.update(client_id, config=cfg)
-    return {"linked": False}
-
-
-@app.get("/clients/{client_id}/telegram", tags=["notifications"])
-async def telegram_status(
-    client_id: str,
-    auth: AuthContext = Depends(get_current_client),
-):
-    """Return whether the client currently has a chat linked."""
-    require_client_access(client_id, auth)
-    record = get_registry().get(client_id)
-    if record is None:
-        raise HTTPException(404)
-    cfg = (record.config or {})
-    tg = (cfg.get("notifications") or {}).get("telegram", {}) or {}
-    from src.notifications.telegram import bot_username
-    return {
-        "linked":   bool(tg.get("chat_id")),
-        "bot":      bot_username(),
-        "training_complete_enabled": bool(tg.get("training_complete", True)),
-    }
-
-
-@app.post("/telegram/webhook", tags=["notifications"])
-async def telegram_webhook(request: Request):
-    """
-    Telegram → us. Validated via the X-Telegram-Bot-Api-Secret-Token
-    header (registered alongside setWebhook). Always responds 200 so
-    Telegram doesn't keep retrying.
-
-    R5-8 (2026-05-17) — two security fixes here:
-      1. Empty `TELEGRAM_WEBHOOK_SECRET` no longer fails open. The
-         previous `if expected and received != expected:` short-
-         circuited when expected was empty, accepting ANY POST. In
-         production that lets a leaked one-shot link-token (cf.
-         `/clients/{id}/telegram/link-token`) be redeemed by an
-         attacker forging Telegram updates → chat_id binding hijack.
-         Now refuse in production (`APP_ENV=production`) when the
-         secret is empty; dev/test still accepts unsigned posts.
-      2. Header compare is now `hmac.compare_digest` instead of `!=`
-         to close the per-byte timing channel that previously leaked
-         the secret to a flooding attacker.
-    """
-    import hmac as _hmac
-    expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
-    received = request.headers.get("x-telegram-bot-api-secret-token", "")
-    app_env  = (os.environ.get("APP_ENV") or "").lower()
-
-    if not expected:
-        # Empty secret in production → refuse loudly. Dev/test path
-        # accepts unsigned posts (matches existing local-dev usage).
-        if app_env == "production":
-            logger.error(
-                "telegram webhook: TELEGRAM_WEBHOOK_SECRET empty in prod — refusing (R5-8)"
-            )
-            raise HTTPException(status_code=503, detail="webhook secret not configured")
-        # dev / test: log + fall through
-        logger.warning("telegram webhook: TELEGRAM_WEBHOOK_SECRET empty (dev/test only)")
-    else:
-        # Constant-time compare — `!=` leaks per-byte timing latency.
-        if not _hmac.compare_digest(received.encode("utf-8"), expected.encode("utf-8")):
-            logger.warning(
-                "telegram webhook: secret mismatch from %s",
-                request.client.host if request.client else "?",
-            )
-            # Reject silently — return 200 anyway so Telegram doesn't
-            # know we noticed; logs the attempt for security review.
-            return {"ok": True}
-
-    try:
-        update = await request.json()
-        from src.notifications.telegram import handle_update
-        handle_update(update)
-    except Exception as e:    # noqa: BLE001
-        logger.warning("telegram webhook handling failed: %s", e)
-    return {"ok": True}
