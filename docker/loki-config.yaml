@@ -57,3 +57,24 @@ query_range:
 
 analytics:
   reporting_enabled: false
+
+# Audit R2-8 / R4 incident 2026-05-17 — Loki ruler ports the three
+# log-based security alerts (JWT decode spike, OAuth state rejection,
+# Vault bootstrap failure) from prometheus alerts.yml where they
+# never parsed (PromQL doesn't support LogQL streams). Rules file is
+# mounted at /loki/rules/fake/loki-rules.yml — `fake` is Loki's
+# default tenant when auth_enabled=false.
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-tmp
+  alertmanager_url: http://alertmanager:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  enable_alertmanager_v2: true
+  evaluation_interval: 30s
+  poll_interval: 1m

@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Loki ruler — log-based alerts that can't be expressed as PromQL.
+#
+# Audit R2-8 originally tried to write these as Prometheus alerts, but
+# `{logger_name=...} |~ "regex"` is Loki LogQL syntax, not Prometheus.
+# Prometheus rejected the entire alerts.yml on container recreate
+# (incident 2026-05-17). Removed from prometheus alerts.yml in commit
+# 7cf0f9a; ported here now (commit-of-this-file).
+#
+# Three security-relevant log signals, none of which are covered by
+# Prometheus counters:
+#   • JwtDecodeFailureSpike     — token brute force
+#   • OauthStateRejectedSpike   — CSRF campaign / broken integration
+#   • LockboxBootstrapFailed    — degraded-mode secrets fetch
+#
+# All three rules use Loki's `rate({stream} |~ "regex" [window])` shape,
+# which is native to LogQL — Promtail labels every log line with
+# `logger_name` and `level` (see SKUJsonFormatter in src/logging_setup.py).
+#
+# Tenant ID: for auth_enabled=false setups, Loki uses tenant `fake`.
+# The ruler mount-path must be /loki/rules/fake/<file>.yml.
+# ──────────────────────────────────────────────────────────────────────────
+
+groups:
+  - name: security-events
+    interval: 30s
+    rules:
+
+      # JWT decode failure spike — token brute force or compromised key.
+      # Baseline near zero; >1/sec for 3 min is almost certainly malicious.
+      - alert: JwtDecodeFailureSpike
+        expr: |
+          sum(rate({logger_name="src.auth.jwt_auth", level="warning"} |~ "JWT decode failed" [5m])) > 1
+        for: 3m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "JWT decode failures >1/sec for 3 min — possible token brute force"
+          description: "Source IPs likely concentrated; correlate in Loki: `{logger_name=\"src.auth.jwt_auth\"} |= \"JWT decode failed\"`. If a single client_id repeats in the audit log, that account is being targeted."
+
+      # OAuth state rejection — each callback whose state HMAC fails is a
+      # CSRF probe (or a stale browser-back). A few per day is normal;
+      # sustained rate = CSRF campaign or broken integration.
+      - alert: OauthStateRejectedSpike
+        expr: |
+          sum(rate({logger_name="src.auth.oauth"} |~ "state (mismatch|invalid|expired)" [10m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "OAuth state rejections >6/min sustained for 5 min"
+          description: "Each rejection means a callback URL was hit with a state token that didn't match a fresh nonce cookie. Stale browser-back fits 1-2/min; sustained higher = CSRF campaign or broken integration."
+
+      # Lockbox / Vault bootstrap failure — secrets fetch failed; container
+      # is running in degraded mode (audit-log HMAC off, signed-pickle off,
+      # etc). startup_safety hard-fails on the worst flags; this alert
+      # catches the soft-warn cases that still let degraded mode happen.
+      - alert: LockboxBootstrapFailed
+        expr: |
+          sum(rate({logger_name="vault.bootstrap", level="warning"} |~ "Vault bootstrap failed|Lockbox bootstrap failed" [10m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team:     forecasting
+        annotations:
+          summary:     "Lockbox/Vault bootstrap failures in the last 5m"
+          description: "Container failed to fetch secrets at startup; running on whatever env vars were present. Inspect container logs for the exact missing key. Rotate the SA key or fix the secret payload in YC Lockbox."

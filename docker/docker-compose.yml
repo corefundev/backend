@@ -1005,6 +1005,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      # Loki ruler — rules under /loki/rules/<tenant>/. tenant=fake
+      # for auth_enabled=false setups. Ports the 3 log-based alerts
+      # that R2-8 originally tried (and failed) to express in
+      # prometheus alerts.yml. See loki-config.yaml `ruler:` block.
+      - ./loki-rules.yml:/loki/rules/fake/loki-rules.yml:ro
       - loki_data:/loki
     command: -config.file=/etc/loki/local-config.yaml
     healthcheck:
