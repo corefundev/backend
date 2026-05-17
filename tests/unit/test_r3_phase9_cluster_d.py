@@ -49,7 +49,11 @@ def test_check_rotate_attempt_raises_above_cap(monkeypatch):
     fake.ttl.return_value = 1800   # 30 min remaining in bucket
     monkeypatch.setattr(signup_rate_limit, "_redis", lambda: fake)
     monkeypatch.setattr(signup_rate_limit, "_incr_with_ttl", lambda *a, **k: 999)
-    monkeypatch.setenv("ROTATE_ATTEMPT_PER_HOUR_PER_CLIENT", "5")
+    # R5-M4 follow-up — the rotate cap is now read from the Settings
+    # singleton, not os.environ on every call. Override via the public
+    # attribute; monkeypatch.setattr rolls back at teardown.
+    from src.settings import settings
+    monkeypatch.setattr(settings, "rotate_attempt_per_hour_per_client", 5)
     with pytest.raises(signup_rate_limit.RateLimited) as ei:
         signup_rate_limit.check_rotate_attempt("acme")
     assert ei.value.retry_after_sec and ei.value.retry_after_sec > 0

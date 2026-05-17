@@ -101,8 +101,17 @@ def test_env_example_has_explicit_postgres_password():
 # ── R3-14: TRUSTED_PROXIES default narrowed ───────────────────────────────
 
 def test_trusted_proxies_default_is_loopback_only(monkeypatch):
-    """Default must be `127.0.0.0/8` only — no RFC1918 ranges."""
-    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    """Default must be `127.0.0.0/8` only — no RFC1918 ranges.
+
+    R5-M4 follow-up (2026-05-18): `_trusted_proxies()` now reads from
+    the central Settings singleton, not `os.environ` directly. Tests
+    must override the public Settings attribute (DI through the
+    public surface), not the env-var (which the already-constructed
+    singleton has long since cached). `monkeypatch.setattr` rolls
+    back the value at test teardown, so no cross-test leak.
+    """
+    from src.settings import settings
+    monkeypatch.setattr(settings, "trusted_proxies", "127.0.0.0/8")
     from src.auth.signup_rate_limit import _trusted_proxies
     nets = _trusted_proxies()
     assert len(nets) == 1, f"expected single loopback CIDR, got {nets}"
@@ -112,7 +121,8 @@ def test_trusted_proxies_default_is_loopback_only(monkeypatch):
 def test_trusted_proxies_does_not_default_to_rfc1918(monkeypatch):
     """Explicitly NOT trusting docker bridges by default — those are
     the spoof surface the R3-14 audit called out."""
-    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    from src.settings import settings
+    monkeypatch.setattr(settings, "trusted_proxies", "127.0.0.0/8")
     from src.auth.signup_rate_limit import _trusted_proxies
     nets = _trusted_proxies()
     for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
@@ -123,7 +133,10 @@ def test_trusted_proxies_does_not_default_to_rfc1918(monkeypatch):
 
 def test_trusted_proxies_honours_env_override(monkeypatch):
     """Prod sets TRUSTED_PROXIES to the actual nginx bridge CIDR."""
-    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.0/8,172.20.0.0/16")
+    from src.settings import settings
+    monkeypatch.setattr(
+        settings, "trusted_proxies", "127.0.0.0/8,172.20.0.0/16"
+    )
     from src.auth.signup_rate_limit import _trusted_proxies
     nets = _trusted_proxies()
     cidrs = {str(n) for n in nets}
@@ -132,7 +145,11 @@ def test_trusted_proxies_honours_env_override(monkeypatch):
 
 def test_trusted_proxies_skips_malformed_cidrs(monkeypatch):
     """Garbage in env shouldn't crash — drop bad entries, keep good."""
-    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.0/8,not-a-cidr,172.20.0.0/16")
+    from src.settings import settings
+    monkeypatch.setattr(
+        settings, "trusted_proxies",
+        "127.0.0.0/8,not-a-cidr,172.20.0.0/16",
+    )
     from src.auth.signup_rate_limit import _trusted_proxies
     nets = _trusted_proxies()
     cidrs = {str(n) for n in nets}
