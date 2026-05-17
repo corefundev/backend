@@ -99,6 +99,12 @@ rollback() {
     echo "  rolling back to API_IMAGE_TAG=$prev_tag"
     export API_IMAGE_TAG="$prev_tag"
     export WORKER_IMAGE_TAG="$prev_tag"
+    # R4-1 — sandbox image is per-deploy too; keep it on the same prev_tag
+    # so process-worker resolves SANDBOX_IMAGE through the matching GHCR
+    # ref. If the prev_tag sandbox image isn't in GHCR (very old rollback),
+    # the rollback fails at `docker run` time — acceptable, mismatch is
+    # safer than running new-sandbox under old-worker.
+    export SANDBOX_IMAGE_TAG="$prev_tag"
 
     docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans api worker scan-worker process-worker
 

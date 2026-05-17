@@ -77,8 +77,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # R4-17 — keyless cosign signing via GitHub OIDC requires id-token.
+      id-token: write
     outputs:
-      tag: ${{ steps.tag.outputs.sha }}
+      tag:            ${{ steps.tag.outputs.sha }}
+      digest_api:     ${{ steps.api.outputs.digest }}
+      digest_worker:  ${{ steps.worker.outputs.digest }}
+      digest_sandbox: ${{ steps.sandbox.outputs.digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -87,29 +92,38 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      # R4-17 — install cosign so the post-build step can sign each
+      # image digest keylessly via GitHub OIDC. Previously only
+      # release.yml (tagged releases) ran cosign; CD-built images on
+      # main were unsigned — which is what prod actually runs.
+      - uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
+
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # R4-21 — `:latest` tag is no longer pushed by CD. Compose's
+      # default fallback flipped to `:main` (always points at the
+      # tip of main, narrower attack surface than the unbounded
+      # `:latest` namespace). `:<sha>` is the deploy artefact;
+      # `:main` is the dev / fresh-VPS fallback.
       - name: Build + push api image
+        id: api
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           file: docker/Dockerfile
           push: true
-          # :latest as defense-in-depth — compose's default fallback in
-          # docker-compose.yml is `${API_IMAGE_TAG:-latest}`, so a fresh
-          # VPS without the env var still pulls a real image.
           tags: |
             ${{ env.IMAGE_API }}:${{ steps.tag.outputs.sha }}
             ${{ env.IMAGE_API }}:main
-            ${{ env.IMAGE_API }}:latest
           cache-from: type=registry,ref=${{ env.IMAGE_API }}:buildcache
           cache-to:   type=registry,ref=${{ env.IMAGE_API }}:buildcache,mode=max
 
       - name: Build + push worker image
+        id: worker
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
@@ -118,7 +132,6 @@ jobs:
           tags: |
             ${{ env.IMAGE_WORKER }}:${{ steps.tag.outputs.sha }}
             ${{ env.IMAGE_WORKER }}:main
-            ${{ env.IMAGE_WORKER }}:latest
           cache-from: type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache
           cache-to:   type=registry,ref=${{ env.IMAGE_WORKER }}:buildcache,mode=max
 
@@ -131,6 +144,7 @@ jobs:
       # so apt-upgrade (Trivy debian patches) + requirements-sandbox.txt
       # changes actually land in prod.
       - name: Build + push sandbox image
+        id: sandbox
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
@@ -139,9 +153,32 @@ jobs:
           tags: |
             ${{ env.IMAGE_SANDBOX }}:${{ steps.tag.outputs.sha }}
             ${{ env.IMAGE_SANDBOX }}:main
-            ${{ env.IMAGE_SANDBOX }}:latest
           cache-from: type=registry,ref=${{ env.IMAGE_SANDBOX }}:buildcache
           cache-to:   type=registry,ref=${{ env.IMAGE_SANDBOX }}:buildcache,mode=max
+
+      # R4-17 — sign each pushed image keylessly via cosign + GitHub OIDC.
+      # Anyone with `docker pull` access can verify with:
+      #   cosign verify ghcr.io/corefundev/sku-forecasting-<svc>@<digest> \
+      #     --certificate-identity-regexp '.*corefundev/backend.*' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # `cosign sign` operates on the digest (not the tag) — tag→digest
+      # races between push and sign can't slip a different image past
+      # the signature. build-push-action's `outputs.digest` is the
+      # authoritative reference for the image we just pushed.
+      - name: Sign images (keyless cosign)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          for svc in api worker sandbox; do
+              case "$svc" in
+                  api)     img="${{ env.IMAGE_API }}";     d='${{ steps.api.outputs.digest }}'     ;;
+                  worker)  img="${{ env.IMAGE_WORKER }}";  d='${{ steps.worker.outputs.digest }}'  ;;
+                  sandbox) img="${{ env.IMAGE_SANDBOX }}"; d='${{ steps.sandbox.outputs.digest }}' ;;
+              esac
+              echo "  signing ${img}@${d}"
+              cosign sign --yes "${img}@${d}"
+          done
 
   deploy-staging:
     name: Deploy → staging

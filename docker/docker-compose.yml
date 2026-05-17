@@ -86,7 +86,7 @@ x-common-env: &common-env
   # compose service (docker:26-cli + docker.sock bind-mount), which CD
   # never reran AND exposed the host docker daemon. Override the whole
   # ref via SANDBOX_IMAGE if needed (e.g., local dev with `docker build`).
-  SANDBOX_IMAGE: ${SANDBOX_IMAGE:-ghcr.io/corefundev/sku-forecasting-sandbox:${SANDBOX_IMAGE_TAG:-latest}}
+  SANDBOX_IMAGE: ${SANDBOX_IMAGE:-ghcr.io/corefundev/sku-forecasting-sandbox:${SANDBOX_IMAGE_TAG:-main}}
   SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-30}
   SANDBOX_MEM_LIMIT: ${SANDBOX_MEM_LIMIT:-512m}
   SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}
@@ -109,7 +109,7 @@ services:
   # outdated schema. Replaces in-process DDL that used to race on
   # pg_type during multi-worker startup.
   migrate:
-    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-latest}
+    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-main}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -124,9 +124,11 @@ services:
   # Image is published to GHCR by .github/workflows/cd.yml. Local dev
   # also works: `docker compose build api` produces an image with the
   # same tag so `up` reuses it without pulling. Pin the tag via env
-  # var API_IMAGE_TAG=<sha>; defaults to :latest for dev.
+  # var API_IMAGE_TAG=<sha>; defaults to :main for dev (R4-21 — `:latest`
+  # is no longer pushed by CD, narrowing the attack surface of the
+  # unbounded `:latest` namespace; `:main` always tracks main-tip).
   api:
-    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-latest}
+    image: ghcr.io/corefundev/sku-forecasting-api:${API_IMAGE_TAG:-main}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -159,7 +161,7 @@ services:
 
   # ── Training worker (rq worker) ───────────────────────────────
   worker:
-    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-main}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
@@ -191,7 +193,7 @@ services:
   # ── Upload pipeline: scan worker ──────────────────────────────
   # Streams untrusted bytes into ClamAV; never writes attacker data to disk.
   scan-worker:
-    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-main}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
@@ -235,7 +237,7 @@ services:
   # Needs access to the Docker socket to launch secure_parser containers.
   # Run on a dedicated node in prod; treat as privileged.
   process-worker:
-    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-latest}
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-main}
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
