@@ -2202,13 +2202,50 @@ async def trigger_training(
         logger.warning("could not create training_runs row: %s", e)
         run_id = None
 
-    job_id = enqueue_training(
-        client_id=client_id,
-        data_path=effective_data_path,
-        config_path=CONFIG_PATH,
-        run_id=run_id,
-        extend_from_path=extend_from_path,
-    )
+    # R5-4 (2026-05-17) — refund counter on enqueue failure.
+    # record_training_started() bumps training_runs_this_month BEFORE
+    # enqueue. Without this try/except, a Redis hiccup, queue config
+    # error, or any other enqueue-time exception consumes the counter
+    # without starting a job — the FREE-plan user loses one of their
+    # N runs/month for nothing. The refund mirrors the atomic bump:
+    # an UPDATE that decrements by 1 and clears last_trained_at iff
+    # it equals the just-stamped value (best-effort, fail-silent —
+    # the rollback for a rollback shouldn't itself break the request).
+    try:
+        job_id = enqueue_training(
+            client_id=client_id,
+            data_path=effective_data_path,
+            config_path=CONFIG_PATH,
+            run_id=run_id,
+            extend_from_path=extend_from_path,
+        )
+    except Exception as enq_err:    # noqa: BLE001
+        logger.warning(
+            "R5-4: enqueue_training failed for client=%s — refunding quota counter: %s",
+            client_id, enq_err,
+        )
+        try:
+            # Decrement counter; the counter is monotonic-up via the
+            # R4-16 atomic UPDATE, so a simple decrement is correct
+            # iff no other request has slid in. If a concurrent
+            # request DID slide in, the decrement under-refunds (by
+            # 0 instead of by 1) which is still safer than the
+            # alternative (double-refund creating a free run).
+            fresh = registry.get(client_id)
+            if fresh and (fresh.training_runs_this_month or 0) > 0:
+                registry.update(
+                    client_id,
+                    training_runs_this_month=fresh.training_runs_this_month - 1,
+                    status="ready",
+                )
+        except Exception as refund_err:    # noqa: BLE001
+            logger.warning(
+                "R5-4: refund-counter step also failed: %s", refund_err,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not enqueue training: {enq_err}",
+        )
     # Stamp job_id onto the row so we can correlate later.
     if run_id and job_id:
         try:
@@ -3156,14 +3193,46 @@ async def telegram_webhook(request: Request):
     Telegram → us. Validated via the X-Telegram-Bot-Api-Secret-Token
     header (registered alongside setWebhook). Always responds 200 so
     Telegram doesn't keep retrying.
+
+    R5-8 (2026-05-17) — two security fixes here:
+      1. Empty `TELEGRAM_WEBHOOK_SECRET` no longer fails open. The
+         previous `if expected and received != expected:` short-
+         circuited when expected was empty, accepting ANY POST. In
+         production that lets a leaked one-shot link-token (cf.
+         `/clients/{id}/telegram/link-token`) be redeemed by an
+         attacker forging Telegram updates → chat_id binding hijack.
+         Now refuse in production (`APP_ENV=production`) when the
+         secret is empty; dev/test still accepts unsigned posts.
+      2. Header compare is now `hmac.compare_digest` instead of `!=`
+         to close the per-byte timing channel that previously leaked
+         the secret to a flooding attacker.
     """
+    import hmac as _hmac
     expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
     received = request.headers.get("x-telegram-bot-api-secret-token", "")
-    if expected and received != expected:
-        # Reject silently — return 200 anyway so Telegram doesn't
-        # know we noticed; logs the attempt.
-        logger.warning("telegram webhook: secret mismatch from %s", request.client.host if request.client else "?")
-        return {"ok": True}
+    app_env  = (os.environ.get("APP_ENV") or "").lower()
+
+    if not expected:
+        # Empty secret in production → refuse loudly. Dev/test path
+        # accepts unsigned posts (matches existing local-dev usage).
+        if app_env == "production":
+            logger.error(
+                "telegram webhook: TELEGRAM_WEBHOOK_SECRET empty in prod — refusing (R5-8)"
+            )
+            raise HTTPException(status_code=503, detail="webhook secret not configured")
+        # dev / test: log + fall through
+        logger.warning("telegram webhook: TELEGRAM_WEBHOOK_SECRET empty (dev/test only)")
+    else:
+        # Constant-time compare — `!=` leaks per-byte timing latency.
+        if not _hmac.compare_digest(received.encode("utf-8"), expected.encode("utf-8")):
+            logger.warning(
+                "telegram webhook: secret mismatch from %s",
+                request.client.host if request.client else "?",
+            )
+            # Reject silently — return 200 anyway so Telegram doesn't
+            # know we noticed; logs the attempt for security review.
+            return {"ok": True}
+
     try:
         update = await request.json()
         from src.notifications.telegram import handle_update

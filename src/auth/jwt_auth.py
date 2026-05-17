@@ -18,6 +18,7 @@ Env vars (REQUIRED in production — no insecure fallbacks):
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import time
@@ -403,7 +404,14 @@ async def get_current_client(
 
     if api_key:
         _ensure_secrets_loaded()
-        if api_key == STATIC_API_KEY:
+        # R5-9 (2026-05-17) — constant-time compare. Raw `==` leaks
+        # the static API key via per-byte timing latency. `/auth/token`
+        # already uses hmac.compare_digest at lines 619/649 — making
+        # the auth dependency consistent. The static key grants ADMIN
+        # role, so the timing channel was high-value.
+        if STATIC_API_KEY and hmac.compare_digest(
+            api_key.encode("utf-8"), STATIC_API_KEY.encode("utf-8"),
+        ):
             return AuthContext(
                 client_id   = "api_key_client",
                 roles       = ["admin", "forecast"],

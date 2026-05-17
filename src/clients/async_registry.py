@@ -116,22 +116,39 @@ class AsyncClientRegistry:
         return
 
     async def register(self, record) -> None:
-        d = asdict(record) if hasattr(record, '__dataclass_fields__') else vars(record)
-        async with self._pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO sku_clients
-                    (client_id, config, storage_path, created_at, status, horizon, notes)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (client_id) DO NOTHING
-            """,
-                d["client_id"],
-                json.dumps(d.get("config") or {}),
-                d.get("storage_path", ""),
-                d.get("created_at", datetime.now(timezone.utc).isoformat()),
-                d.get("status", "registered"),
-                d.get("horizon", 14),
-                d.get("notes"),
-            )
+        """
+        R5-1 (2026-05-17) — NOT IMPLEMENTED.
+
+        The original implementation INSERTed only 7 columns
+        (client_id, config, storage_path, created_at, status, horizon,
+        notes), silently dropping every Phase-6/7/8 column that
+        PostgresClientRegistry.register persists:
+
+          api_key_hash, email, email_canonical, email_verified_at,
+          oauth_provider, oauth_subject, plan, last_trained_at, …
+
+        Exactly the regression the sync registry's docstring
+        documents as catastrophic — fresh signups land in
+        `sku_clients` with `api_key_hash=NULL` and login breaks.
+        Currently dormant (zero production code paths await this
+        method — only `get_async_registry().close()` runs at
+        lifespan shutdown), so the bug never bit, BUT the moment
+        any handler is migrated to the async path the regression
+        ships silently.
+
+        Fail-loud instead. To re-enable, mirror the full INSERT
+        shape from PostgresClientRegistry.register including
+        `ON CONFLICT (client_id) DO UPDATE` and all Phase-6/7/8
+        columns with COALESCE-for-NULL semantics. See the sync
+        sibling at src/clients/registry.py:131.
+        """
+        raise NotImplementedError(
+            "AsyncClientRegistry.register is not implemented (R5-1). "
+            "Use the sync PostgresClientRegistry.register via "
+            "src.clients.registry.get_registry() for new client inserts "
+            "— it persists all Phase-6/7/8 columns. The async pool here "
+            "is read/close-only until the full INSERT shape is mirrored."
+        )
 
     async def get(self, client_id: str) -> Optional[object]:
         from src.clients.registry import ClientRecord

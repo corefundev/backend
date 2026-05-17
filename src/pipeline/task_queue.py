@@ -228,6 +228,20 @@ def _training_job(
     # Email + Telegram in parallel, both best-effort. Each channel
     # has its own opt-out in client config and silently skips
     # when not configured.
+    #
+    # R5-5 (2026-05-17) — Redis-backed idempotency guard. RQ
+    # retries the job on worker SIGTERM / OOM mid-finalisation; if
+    # _training_job ran past the registry FINISHED update and into
+    # this block, but the worker was killed before returning, the
+    # retry re-runs the entire pipeline and re-fires email +
+    # telegram. Without the guard, users get duplicate "training
+    # complete" emails. SET NX with TTL=7d on a run_id-keyed flag:
+    # second invocation skips notifications cleanly.
+    #
+    # No run_id (legacy / pre-R5 jobs) → no idempotency — preserves
+    # the prior behaviour where best-effort notifications might
+    # fire twice. Acceptable because legacy jobs aren't queued any
+    # more.
     metrics = result.get("metrics") or {}
     notif_args = dict(
         client_id=client_id,
@@ -236,16 +250,42 @@ def _training_job(
         wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
         mase=metrics.get("mase_global",  metrics.get("mase_mean")),
     )
-    try:
-        from src.notifications.training_email import notify_training_finished as _email
-        _email(**notif_args)
-    except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-        logger.info("notify_training_finished (email) skipped: %s", notif_err)
-    try:
-        from src.notifications.telegram import notify_training_finished as _tg
-        _tg(**notif_args)
-    except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-        logger.info("notify_training_finished (telegram) skipped: %s", notif_err)
+
+    should_notify = True
+    if run_id:
+        try:
+            from src.redis_pool import get_redis_or_none
+            r = get_redis_or_none()
+            if r is not None:
+                # SET key value NX EX 604800 → True only on first set;
+                # subsequent calls (RQ retry of the same run_id)
+                # return False and we skip notifications.
+                key = f"notif:training:{run_id}"
+                first = r.set(key, "1", nx=True, ex=7 * 24 * 3600)
+                if not first:
+                    should_notify = False
+                    logger.info(
+                        "R5-5: notifications already sent for run_id=%s — skipping (RQ retry)",
+                        run_id,
+                    )
+        except Exception as idem_err:    # noqa: BLE001
+            # Idempotency-check failure is non-fatal. Fall through to
+            # send — duplicate notification is better than missed.
+            logger.warning(
+                "R5-5: idempotency guard failed (%s) — sending anyway", idem_err,
+            )
+
+    if should_notify:
+        try:
+            from src.notifications.training_email import notify_training_finished as _email
+            _email(**notif_args)
+        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+            logger.info("notify_training_finished (email) skipped: %s", notif_err)
+        try:
+            from src.notifications.telegram import notify_training_finished as _tg
+            _tg(**notif_args)
+        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+            logger.info("notify_training_finished (telegram) skipped: %s", notif_err)
 
     # ── Auto-batch-forecast for the whole catalogue ──────────────
     # The user shouldn't have to pick an SKU + horizon by hand after
