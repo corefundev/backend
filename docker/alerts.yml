@@ -340,22 +340,31 @@ groups:
           summary:     "Postgres WAL archive_command failing or exporter silent"
           description: "wal_archive.sh is failing to push to S3 (or postgres-exporter is down). WAL accumulates in pg_wal/ on the postgres data volume until the host disk fills. Inspect: `docker logs docker-postgres-1 --tail 50 | grep archive`; `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. Likely causes: S3 outage, Beget key rotation, Lockbox SA expiry, or backup bucket policy change."
 
-      # R5-17 — sibling alert. archive_timeout=60s forces a WAL switch
-      # every 60s even on a quiet DB, so `last_archive_age` should
-      # never exceed ~90s in steady state. >600s = wal_archive.sh has
-      # been silently broken for 10 minutes — operator gets paged
-      # before pg_wal/ disk fill becomes the symptom.
+      # R5-17 — sibling stale-archive alert. archive_timeout=60s only
+      # forces a WAL switch when there's been WAL ACTIVITY since the
+      # last switch — on a completely quiet DB (no writes), postgres
+      # never auto-switches. Sunday-afternoon prod traffic dipped below
+      # the timer threshold 2026-05-17 13:30-13:50 UTC and this rule
+      # fired despite a healthy archiver (failed_count=0, manual
+      # pg_switch_wal succeeded immediately).
+      # Threshold raised 10m → 30m (post-mortem 2026-05-17). The
+      # primary R5-17 alert (WalArchiveFailing on increase of
+      # failed_count) catches the real "archive_command failing"
+      # case bullet-proof; this stale-side rule is only a back-up
+      # signal, so longer for-window is fine. 30m = 30x baseline
+      # archive_timeout, still well within the PITR-degradation
+      # window (14d WAL retention).
       - alert: WalArchiveStale
         expr: |
-          pg_stat_archiver_last_archive_age{job="postgres"} > 600
+          pg_stat_archiver_last_archive_age{job="postgres"} > 1800
             or absent(pg_stat_archiver_last_archive_age{job="postgres"})
-        for:   10m
+        for:   15m
         labels:
           severity: warning
           team:     forecasting
         annotations:
-          summary:     "Postgres WAL archive idle >10 min (archive_timeout is 60s)"
-          description: "No new WAL segment archived in 10 min, but archive_timeout=60s should force one every minute. Either archive_command is stuck retrying a transient failure, or postgres-exporter lost connection. Tightens the WalArchiveFailing window from the failed-count side."
+          summary:     "Postgres WAL archive idle >30 min (archive_timeout is 60s)"
+          description: "No new WAL segment archived in 30 min. On a busy DB this is suspicious — archive_command may be stuck retrying. On a fully idle DB this can be a false positive (archive_timeout only forces a switch on WAL activity, not on a wall-clock timer). Primary signal: WalArchiveFailing on failed_count > 0. Inspect: `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. If failed_count = 0 and last_failed_time is null, this is likely a quiet-period false positive."
 
   - name: container-lifecycle
     rules:

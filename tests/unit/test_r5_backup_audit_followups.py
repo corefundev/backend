@@ -56,13 +56,17 @@ def test_wal_archive_failing_alert_exists():
 
 def test_wal_archive_stale_alert_exists():
     """WalArchiveStale must alert on `last_archive_age` exceeding the
-    expected archive_timeout window (10× the 60s force-switch)."""
+    quiet-DB-tolerant window. Threshold raised to 30 min after the
+    initial 10-min version false-positive'd on Sunday-afternoon
+    low-traffic period (archive_timeout only fires on WAL activity,
+    not on a wall-clock timer)."""
     block = _alert_block("WalArchiveStale")
     assert "pg_stat_archiver_last_archive_age" in block, (
         "WalArchiveStale must reference pg_stat_archiver_last_archive_age (R5-17)"
     )
-    assert "> 600" in block, (
-        "stale threshold should be ~10× archive_timeout=60s (R5-17)"
+    assert "> 1800" in block, (
+        "stale threshold must be ≥30 min to avoid quiet-DB false "
+        "positives (R5-17 post-mortem 2026-05-17)"
     )
     assert "absent(pg_stat_archiver_last_archive_age" in block, (
         "must have absent() defence — exporter-down catcher"
