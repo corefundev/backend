@@ -760,6 +760,23 @@ services:
     # R4-20 digest-pinned 2026-05-17
     image: prom/pushgateway:v1.9.0@sha256:98a458415f8f5afcfd45622d289a0aa67063563bec0f90d598ebc76783571936
     restart: unless-stopped
+    # R5-16 (2026-05-17) — persistence flag + named volume. The
+    # pushgateway state is in-memory by default; every container
+    # recreate wipes all pushed series and the metrics stay absent
+    # until each producer pushes again at its next cron interval.
+    # Observed twice in two hours (Phase 2 full recreate + R5-15
+    # nginx-rebuild side-effect on pushgateway-1) — BackupStale +
+    # BaseBackupStale fired on the gap until manual re-push. With
+    # `--persistence.file=/data/pushgateway.dump` pushgateway writes
+    # state to disk on every push + on graceful shutdown, and reads
+    # it on startup. Survives container recreate. Trade-off: tiny
+    # disk write per push (~10 metrics × few hundred bytes) +
+    # `pushgateway_data` named volume (kB-scale).
+    command:
+      - "--persistence.file=/data/pushgateway.dump"
+      - "--persistence.interval=5m"
+    volumes:
+      - pushgateway_data:/data
     # Internal-only — backup pushes from inside docker network,
     # prometheus scrapes from inside docker network.
     healthcheck:
@@ -1093,3 +1110,5 @@ volumes:
   alertmanager_data:
   backups:
   promtail_positions:
+  # R5-16 — pushgateway persistence so recreate doesn't wipe metrics.
+  pushgateway_data:

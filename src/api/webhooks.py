@@ -136,24 +136,31 @@ def _build_pinned_opener(pinned_ip: str):
     import socket as _socket
     import urllib.request
 
+    # mypy --follow-imports=silent (our CI config) can't see the
+    # stdlib HTTP(S)Connection attributes we inherit, so each cross-
+    # boundary access carries `# type: ignore[attr-defined]`. The
+    # attributes exist at runtime — they're standard parts of
+    # http.client.HTTP{S,}Connection.
     class PinnedHTTPSConnection(http.client.HTTPSConnection):
         def connect(self) -> None:
             self.sock = _socket.create_connection(
-                (pinned_ip, self.port), self.timeout, self.source_address,
+                (pinned_ip, self.port), self.timeout,
+                self.source_address,                          # type: ignore[attr-defined]
             )
-            if self._tunnel_host:
-                self._tunnel()
+            if self._tunnel_host:                              # type: ignore[attr-defined]
+                self._tunnel()                                 # type: ignore[attr-defined]
             # `self.host` is the original hostname — used for SNI +
             # cert validation. `pinned_ip` is what we actually connect
             # to. This is exactly the shape that defeats DNS-rebinding.
-            self.sock = self._context.wrap_socket(
+            self.sock = self._context.wrap_socket(             # type: ignore[attr-defined]
                 self.sock, server_hostname=self.host,
             )
 
     class PinnedHTTPConnection(http.client.HTTPConnection):
         def connect(self) -> None:
             self.sock = _socket.create_connection(
-                (pinned_ip, self.port), self.timeout, self.source_address,
+                (pinned_ip, self.port), self.timeout,
+                self.source_address,                          # type: ignore[attr-defined]
             )
 
     class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
