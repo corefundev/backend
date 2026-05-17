@@ -13,6 +13,11 @@
 #   zone=auth_rl  — /auth/token,  10 r/m per IP
 #   zone=upload_rl — /clients/*/uploads (POST), 20 r/m per IP
 #   zone=api_rl    — everything else, 600 r/m per IP (generous; API is tenant-scoped)
+#
+# R3-15 / R5-15 — every `proxy_pass` below uses `http://$api_upstream`
+# (variable) so nginx re-resolves api:8000 through the Docker DNS
+# resolver declared in nginx.conf. Plain `proxy_pass http://api:8000`
+# would cache the IP at worker startup forever.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── 80: HTTP → redirect to HTTPS, except ACME challenge path ────────────────
@@ -103,7 +108,9 @@ server {
     location /metrics {
         allow ${ADMIN_CIDR};
         deny all;
-        proxy_pass http://api_upstream;
+        # R3-15 / R5-15 — variable form forces runtime DNS re-resolution.
+        set $api_upstream "api:8000";
+        proxy_pass http://$api_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -114,7 +121,9 @@ server {
     # burst=5 gives a small cushion for legitimate retries.
     location = /auth/token {
         limit_req zone=auth_rl burst=5 nodelay;
-        proxy_pass http://api_upstream;
+        # R3-15 / R5-15 — variable form forces runtime DNS re-resolution.
+        set $api_upstream "api:8000";
+        proxy_pass http://$api_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -126,7 +135,9 @@ server {
     # through the generic block below.
     location ~ ^/clients/[^/]+/uploads$ {
         limit_req zone=upload_rl burst=10 nodelay;
-        proxy_pass http://api_upstream;
+        # R3-15 / R5-15 — variable form forces runtime DNS re-resolution.
+        set $api_upstream "api:8000";
+        proxy_pass http://$api_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -136,7 +147,9 @@ server {
     # Everything else — predicts, trainings, config, etc.
     location / {
         limit_req zone=api_rl burst=100 nodelay;
-        proxy_pass http://api_upstream;
+        # R3-15 / R5-15 — variable form forces runtime DNS re-resolution.
+        set $api_upstream "api:8000";
+        proxy_pass http://$api_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
