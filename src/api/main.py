@@ -125,31 +125,6 @@ REQUEST_COUNT   = Counter("forecast_requests_total",   "Total requests",       [
 REQUEST_LATENCY = Histogram("forecast_latency_seconds", "Predict latency",     ["client_id"])
 FALLBACK_COUNT  = Counter("fallback_model_used_total",  "Fallback model uses", ["client_id"])
 
-# ── In-process model cache ────────────────────────────────────────────────────
-# Guarded by `_services_lock` — multiple worker threads hitting /predict for
-# the same client used to race, triggering a double model load and, worse,
-# a half-initialized service being cached. Lock-per-client so different
-# clients don't serialize. We also enforce a soft timeout on fallback load.
-#
-# Bounded LRU (audit R2-7, 2026-05-15): both `_services` and
-# `_per_client_locks` previously had no eviction policy — every client
-# that ever hit /predict left a permanent entry. At 10k unique clients
-# that's 10k cached models in memory + 10k Lock objects. Now both are
-# OrderedDicts capped at MODEL_CACHE_MAX (default 256, env-tunable);
-# accessing a key moves it to the front and a write past the cap evicts
-# the LRU entry. Locks are evicted in tandem with services so a key
-# that gets re-loaded picks up a fresh lock — safe because cached=None
-# at that point so no concurrent reader is holding stale state.
-import threading as _threading
-from collections import OrderedDict
-
-_MODEL_CACHE_MAX = max(1, int(os.environ.get("MODEL_CACHE_MAX", "256")))
-
-_services: "OrderedDict[str, ForecastingService]" = OrderedDict()
-_services_lock = _threading.Lock()
-_per_client_locks: "OrderedDict[str, _threading.Lock]" = OrderedDict()
-
-
 def _client_lock(client_id: str) -> _threading.Lock:
     with _services_lock:
         lk = _per_client_locks.get(client_id)
@@ -466,6 +441,23 @@ app.include_router(legal_router)
 app.include_router(audit_router)
 app.include_router(notifications_router)
 app.include_router(plans_router)
+
+# R5-M1 slice-5 prep — service-cache state lives in src/api/service_cache.py
+# so router files can call `invalidate(client_id)` without circular-import
+# gymnastics on main.py. The load-on-miss orchestration (_get_service,
+# _client_lock, _cache_service) stays here because it pulls on
+# ForecastingService / ClientStorage / CONFIG_PATH. Both modules mutate the
+# same OrderedDict objects — `from ... import _services` binds a reference,
+# not a copy, so pop/setitem propagate.
+import threading as _threading
+from src.api.service_cache import (
+    MODEL_CACHE_MAX as _MODEL_CACHE_MAX,
+    _services,
+    _services_lock,
+    _per_client_locks,
+    invalidate as _invalidate_service_cache,
+    cached_client_ids as _cached_client_ids,
+)
 
 # ══════════════════════════════════════════════════════════════════
 # Schemas
@@ -1788,7 +1780,7 @@ async def internal_state(auth: AuthContext = Depends(get_current_client)):
     """
     return {
         "status": "ok",
-        "models_cached": list(_services.keys()),
+        "models_cached": _cached_client_ids(),
         "storage_backend": os.getenv("STORAGE_BACKEND", "local"),
         "auth_method": auth.auth_method,
         "client_id": auth.client_id,
@@ -2038,7 +2030,7 @@ async def update_client(
     updated = registry.get(client_id)
     # Invalidate any cached model for this client — plan change might
     # affect horizon cap baked into the model cache.
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
 
     # Snapshot of changed fields with old/new values (notes truncated to
     # avoid bloating the audit table with multi-paragraph operator notes).
@@ -2281,7 +2273,7 @@ async def trigger_training(
             message=f"Training enqueued. Poll /jobs/{job_id}",
         )
     registry.update(client_id, status="ready")
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
     return TrainResponse(
         client_id=client_id, job_id=None, status="completed",
         message="Training completed synchronously.",
@@ -2681,7 +2673,7 @@ async def predict_batch(
 async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):
     """Invalidate model cache — forces reload from storage on next request."""
     require_client_access(client_id, auth)
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
     _get_service(client_id)
     return {"client_id": client_id, "status": "reloaded"}
 
@@ -2772,7 +2764,7 @@ async def set_client_config(
         raise HTTPException(status_code=422, detail=str(e))
 
     # Invalidate model cache so next predict uses new config
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
 
     return ClientConfigResponse(
         client_id=client_id,
@@ -2817,7 +2809,7 @@ async def patch_client_config(
     except ConfigValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
 
     return ClientConfigResponse(
         client_id=client_id,
@@ -2855,7 +2847,7 @@ async def reset_client_config(
         logger.warning("config-reset audit event failed: %s", e)
 
     mgr.reset(client_id, registry)
-    _services.pop(client_id, None)
+    _invalidate_service_cache(client_id)
     return {"client_id": client_id, "status": "reset to system defaults"}
 
 
