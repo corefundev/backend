@@ -119,6 +119,28 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_audit_domain_lives_in_router():
+    """The `audit` domain (R5-M1 slice 2) must live in
+    `src/api/routers/audit.py`, not main.py."""
+    audit_router = _ROUTERS_DIR / "audit.py"
+    assert audit_router.is_file(), (
+        "src/api/routers/audit.py must exist after R5-M1 slice 2"
+    )
+    text = audit_router.read_text()
+    assert "router = APIRouter" in text, "audit.py must declare APIRouter"
+    assert '@router.get("/clients/{client_id}/audit"' in text, (
+        "audit.py must own GET /clients/{client_id}/audit"
+    )
+
+    main_text = _MAIN.read_text()
+    assert '@app.get("/clients/{client_id}/audit"' not in main_text, (
+        "main.py still has @app.get for /clients/{client_id}/audit — "
+        "must be in audit.py"
+    )
+    assert "from src.api.routers.audit import router as audit_router" in main_text
+    assert "app.include_router(audit_router)" in main_text
+
+
 def test_main_py_compiles():
     """main.py must still compile after the extraction — incomplete
     decorator removal or dangling import leaves a SyntaxError that

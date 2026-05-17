@@ -94,7 +94,6 @@ from src.audit import (
     record_event,
     recent_failed_logins,
     verify_chain,
-    list_for_client,
     EVT_ADMIN_ACTION,
     EVT_LOGIN,
     EVT_MODEL_TRAIN,
@@ -460,7 +459,9 @@ app.include_router(uploads_router)
 # longest-prefix for typed ones, so legal routes can register before
 # or after auth without collision.
 from src.api.routers.legal import router as legal_router
+from src.api.routers.audit import router as audit_router
 app.include_router(legal_router)
+app.include_router(audit_router)
 
 # ══════════════════════════════════════════════════════════════════
 # Schemas
@@ -3018,50 +3019,6 @@ async def upgrade_client_plan(
 # ──────────────────────────────────────────────────────────────────
 # Audit log read API — user's own security timeline
 # ──────────────────────────────────────────────────────────────────
-
-@app.get("/clients/{client_id}/audit", tags=["audit"])
-async def list_audit_events(
-    client_id: str,
-    limit:  int = 100,
-    offset: int = 0,
-    auth: AuthContext = Depends(get_current_client),
-):
-    """
-    Recent security events for the caller's account: logins, OAuth,
-    plan changes, password changes. Backs the "Security" tab in the
-    UI. Caller can only see their own events — admin role can read
-    any client's via the same endpoint.
-
-    Bounded params (limit ≤ 500) so a malicious caller can't DOS the
-    DB with a huge OFFSET scan.
-    """
-    require_client_access(client_id, auth)
-    if limit < 1 or limit > 500:
-        raise HTTPException(422, detail="limit must be between 1 and 500")
-    if offset < 0:
-        raise HTTPException(422, detail="offset must be ≥ 0")
-    events = list_for_client(client_id, limit=limit, offset=offset)
-    return {
-        "client_id": client_id,
-        "count":     len(events),
-        "events":    [
-            {
-                "id":            e.id,
-                "ts":            e.ts,
-                "event_type":    e.event_type,
-                "event_subtype": e.event_subtype,
-                "actor_email":   e.actor_email,
-                "target_type":   e.target_type,
-                "target_id":     e.target_id,
-                "ip":            e.ip,
-                "user_agent":    e.user_agent,
-                "success":       e.success,
-                "metadata":      e.metadata,
-            }
-            for e in events
-        ],
-    }
-
 
 # ──────────────────────────────────────────────────────────────────
 # Telegram notifications — link / unlink / inbound webhook
