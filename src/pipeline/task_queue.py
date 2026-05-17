@@ -69,6 +69,304 @@ def get_queue(queue_name: str = "sku-training"):
 
 # ── Job functions (executed by rq worker) ─────────────────────────────────────
 
+# ── RQ training-job orchestration: R5-M5 split (2026-05-17) ────────────────
+#
+# The previous monolithic `_training_job` was 190 LOC + 22 bare
+# `except Exception` clauses, mixing five distinct concerns with
+# inconsistent error-swallow semantics. Each concern now lives in
+# its own helper with a clearly-scoped error contract:
+#
+#   _now_iso()                  — utc-iso timestamp for run rows.
+#   _start_run()                — open training_runs row (RUNNING).
+#   _resolve_data_path()        — merge extend-from datasets if needed.
+#   _run_pipeline_or_fail()     — actual ML training + FAILED handler.
+#   _record_run_finished()      — training_runs FINISHED + sku_clients=ready.
+#   _notify_finished_idempotent() — email+telegram with Redis SETNX guard.
+#   _post_training_artifacts()  — forecasts + anomalies (best-effort).
+#
+# The orchestrator below is now linear + obvious. Behaviour preserved
+# exactly — same Redis keys, same DB writes, same notifications.
+
+
+def _now_iso() -> str:
+    """UTC ISO timestamp for training_runs row writes."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _start_run(run_id: Optional[str]):
+    """Open the training_runs row in RUNNING state.
+
+    Returns the registry handle (or None if run_id is unset OR the
+    registry write failed — both are best-effort, the actual
+    training proceeds regardless).
+    """
+    if not run_id:
+        return None
+    try:
+        from src.storage.training_runs import get_training_runs_registry, RUNNING
+        runs = get_training_runs_registry()
+        runs.update(run_id, status=RUNNING, started_at=_now_iso())
+        return runs
+    except Exception as e:    # noqa: BLE001
+        logger.warning("training_runs RUNNING update failed: %s", e)
+        return None
+
+
+def _mark_run_failed(runs, run_id: Optional[str], error: str) -> None:
+    """Write training_runs FAILED + ended_at + error column.
+
+    Best-effort: a registry-write failure must not mask the original
+    pipeline error that's about to re-raise.
+    """
+    if runs is None or not run_id:
+        return
+    try:
+        from src.storage.training_runs import FAILED
+        runs.update(run_id, status=FAILED, ended_at=_now_iso(), error=error)
+    except Exception as upd_err:    # noqa: BLE001 — audit R2-25
+        logger.warning(
+            "training_runs FAILED update failed for run_id=%s: %s",
+            run_id, upd_err,
+        )
+
+
+def _resolve_data_path(
+    data_path: str,
+    extend_from_path: Optional[str],
+    config_path: str,
+    runs,
+    run_id: Optional[str],
+):
+    """Resolve the effective parquet path the training pipeline reads.
+
+    Returns `(effective_data_path, cleanup_path_or_None)`:
+      - effective_data_path: what `run_training_pipeline` should read.
+      - cleanup_path_or_None: temp file to unlink after training; None
+        when no merge was performed.
+
+    Failure during merge writes training_runs FAILED and re-raises so
+    the orchestrator's outer behaviour stays "merge fail → job fail".
+    """
+    if not extend_from_path:
+        return data_path, None
+    try:
+        merged = _merge_datasets(
+            base_path=extend_from_path,
+            new_path=data_path,
+            config_path=config_path,
+        )
+        logger.info(
+            "extend_from: merged %s + %s → %s",
+            extend_from_path, data_path, merged,
+        )
+        return merged, merged
+    except Exception as e:    # noqa: BLE001
+        _mark_run_failed(runs, run_id, f"dataset merge failed: {e}")
+        raise
+
+
+def _run_pipeline_or_fail(
+    client_id: str,
+    effective_data_path: str,
+    config_path: str,
+    runs,
+    run_id: Optional[str],
+) -> dict:
+    """Invoke `run_training_pipeline`; on exception, write FAILED to
+    training_runs + flip sku_clients.status=failed + fire failure
+    notifications, then re-raise.
+
+    R5-3 (2026-05-17) — the sku_clients.status flip is the regression
+    fix that ensures the client row doesn't stay stuck at "training"
+    forever after an RQ-mode failure (the legacy code only updated
+    training_runs).
+    """
+    from src.pipeline.train import run_training_pipeline
+    try:
+        return run_training_pipeline(
+            data_path=effective_data_path,
+            config_path=config_path,
+            client_id=client_id,
+        )
+    except Exception as e:
+        _mark_run_failed(runs, run_id, str(e))
+        # R5-3 — sku_clients.status="failed" so UI/API can stop showing the
+        # client as "training" after the RQ-mode failure.
+        try:
+            from src.clients.registry import get_registry as _get_registry
+            _get_registry().update(client_id, status="failed")
+        except Exception as st_err:    # noqa: BLE001
+            logger.warning(
+                "R5-3: sku_clients.status FAILED update failed for %s: %s",
+                client_id, st_err,
+            )
+        # Fire failure notifications — both channels best-effort,
+        # silently skip if user hasn't opted in.
+        for kind, dotted in (
+            ("email", "src.notifications.training_email"),
+            ("telegram", "src.notifications.telegram"),
+        ):
+            try:
+                module = __import__(dotted, fromlist=["notify_training_failed"])
+                module.notify_training_failed(client_id=client_id, error=str(e))
+            except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+                logger.info("notify_training_failed (%s) skipped: %s", kind, notif_err)
+        raise
+
+
+def _record_run_finished(
+    runs,
+    run_id: Optional[str],
+    result: dict,
+    client_id: str,
+) -> None:
+    """Write training_runs FINISHED + metrics + paths AND flip
+    sku_clients.status="ready". Best-effort throughout — registry
+    failures must not retro-fail a completed training run.
+    """
+    if runs is not None and run_id:
+        try:
+            from src.storage.training_runs import FINISHED
+            metrics = result.get("metrics") or {}
+            # Prefer the pooled "global" metrics over the per-SKU mean.
+            # _mean treats every SKU equally and explodes when a few SKUs
+            # have intermittent zero-actual periods (NaN-handling
+            # asymmetry between per-fold and combined aggregations).
+            # _global = sum_all(|err|) / sum_all(|actual|), monotonic in
+            # fold metrics and matches what users see on a chart.
+            runs.update(
+                run_id,
+                status=FINISHED,
+                ended_at=_now_iso(),
+                elapsed_sec=result.get("elapsed_sec"),
+                n_skus=result.get("n_skus"),
+                n_features=result.get("n_features"),
+                n_rows=result.get("n_rows"),
+                wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+                mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+                smape=metrics.get("smape_global", metrics.get("smape_mean")),
+                model_path=result.get("model_path"),
+                mlflow_run_id=result.get("mlflow_run_id"),
+            )
+        except Exception as e:    # noqa: BLE001
+            logger.warning("training_runs FINISHED update failed: %s", e)
+
+    # R5-3 — sku_clients.status="ready" so UI/API knows training is over.
+    try:
+        from src.clients.registry import get_registry as _get_registry
+        _get_registry().update(client_id, status="ready")
+    except Exception as st_err:    # noqa: BLE001
+        logger.warning(
+            "R5-3: sku_clients.status READY update failed for %s: %s",
+            client_id, st_err,
+        )
+
+
+def _notify_finished_idempotent(
+    client_id: str,
+    run_id: Optional[str],
+    result: dict,
+) -> None:
+    """Fire "training complete" email + telegram, guarded by a
+    Redis SETNX idempotency flag on `notif:training:<run_id>` (7-day
+    TTL).
+
+    R5-5 (2026-05-17) — without this, RQ retries on worker SIGTERM /
+    OOM mid-finalisation produce duplicate notifications. Guard
+    failure falls through to send — duplicate is better than miss.
+    No run_id → no guard (legacy jobs preserve pre-R5 behaviour).
+    """
+    metrics = result.get("metrics") or {}
+    notif_args = dict(
+        client_id=client_id,
+        duration_sec=result.get("elapsed_sec"),
+        n_skus=result.get("n_skus"),
+        wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+        mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+    )
+
+    should_notify = True
+    if run_id:
+        try:
+            from src.redis_pool import get_redis_or_none
+            r = get_redis_or_none()
+            if r is not None:
+                key = f"notif:training:{run_id}"
+                first = r.set(key, "1", nx=True, ex=7 * 24 * 3600)
+                if not first:
+                    should_notify = False
+                    logger.info(
+                        "R5-5: notifications already sent for run_id=%s — skipping (RQ retry)",
+                        run_id,
+                    )
+        except Exception as idem_err:    # noqa: BLE001
+            logger.warning(
+                "R5-5: idempotency guard failed (%s) — sending anyway", idem_err,
+            )
+
+    if not should_notify:
+        return
+
+    for kind, dotted in (
+        ("email", "src.notifications.training_email"),
+        ("telegram", "src.notifications.telegram"),
+    ):
+        try:
+            module = __import__(dotted, fromlist=["notify_training_finished"])
+            module.notify_training_finished(**notif_args)
+        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
+            logger.info(
+                "notify_training_finished (%s) skipped: %s", kind, notif_err,
+            )
+
+
+def _post_training_artifacts(
+    client_id: str,
+    effective_data_path: str,
+    config_path: str,
+    run_id: Optional[str],
+    result: dict,
+) -> None:
+    """Generate batch forecasts + persist anomalies after a successful
+    training. Both best-effort — failure here doesn't fail the run,
+    the trained model is still saved and serveable.
+    """
+    try:
+        _generate_and_store_forecasts(
+            client_id=client_id,
+            data_path=effective_data_path,
+            model_path=result.get("model_path"),
+            config_path=config_path,
+            run_id=run_id or "",
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
+
+    try:
+        _detect_and_store_anomalies(
+            client_id=client_id,
+            data_path=effective_data_path,
+            config_path=config_path,
+            run_id=run_id or "",
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("post-training anomaly detection failed: %s", e, exc_info=True)
+
+
+def _cleanup_merged(merged_cleanup: Optional[str]) -> None:
+    """Best-effort unlink of the temp merged parquet (only set when
+    `extend_from_path` triggered a dataset merge). Failure is silent
+    — the next cron / OS tmp clean will catch it."""
+    if not merged_cleanup:
+        return
+    try:
+        import os as _os
+        _os.unlink(merged_cleanup)
+    except Exception:    # noqa: BLE001
+        pass
+
+
 def _training_job(
     client_id: str,
     data_path: str,
@@ -89,243 +387,35 @@ def _training_job(
     deduplicates by (sku, date) preferring new values, and trains
     the model from scratch on the combined set. This is the
     "продолжить обучение свежими данными" flow.
+
+    R5-M5 (2026-05-17) — orchestrator only; concerns split into
+    named helpers above (see comment block before `_now_iso`).
     """
     import os
-    from datetime import datetime, timezone
     os.environ.setdefault("STORAGE_BACKEND", storage_backend)
 
-    def _now():
-        return datetime.now(timezone.utc).isoformat()
+    runs = _start_run(run_id)
 
-    runs = None
-    if run_id:
-        try:
-            from src.storage.training_runs import get_training_runs_registry, RUNNING
-            runs = get_training_runs_registry()
-            runs.update(run_id, status=RUNNING, started_at=_now())
-        except Exception as e:    # noqa: BLE001
-            logger.warning("training_runs RUNNING update failed: %s", e)
-
-    # If asked to extend a prior dataset, build the merged file BEFORE
-    # training; the rest of the pipeline only ever sees one path.
-    effective_data_path = data_path
-    merged_cleanup: Optional[str] = None
-    if extend_from_path:
-        try:
-            effective_data_path = _merge_datasets(
-                base_path=extend_from_path,
-                new_path=data_path,
-                config_path=config_path,
-            )
-            merged_cleanup = effective_data_path
-            logger.info(
-                "extend_from: merged %s + %s → %s",
-                extend_from_path, data_path, effective_data_path,
-            )
-        except Exception as e:    # noqa: BLE001
-            if runs is not None:
-                try:
-                    from src.storage.training_runs import FAILED
-                    runs.update(
-                        run_id, status=FAILED, ended_at=_now(),
-                        error=f"dataset merge failed: {e}",
-                    )
-                except Exception as upd_err:  # noqa: BLE001 — audit R2-25
-                    logger.warning(
-                        "training_runs FAILED update failed for run_id=%s: %s",
-                        run_id, upd_err,
-                    )
-            raise
-
-    from src.pipeline.train import run_training_pipeline
-    try:
-        result = run_training_pipeline(
-            data_path=effective_data_path,
-            config_path=config_path,
-            client_id=client_id,
-        )
-    except Exception as e:
-        if runs is not None:
-            try:
-                from src.storage.training_runs import FAILED
-                runs.update(run_id, status=FAILED, ended_at=_now(), error=str(e))
-            except Exception as upd_err:    # noqa: BLE001
-                logger.warning("training_runs FAILED update failed: %s", upd_err)
-        # R5-3 (2026-05-17) — also transition sku_clients.status back
-        # to "failed" so the API/UI can stop showing the client as
-        # "training". Previously only training_runs got updated;
-        # sku_clients.status stayed "training" forever after any
-        # RQ-mode (production default) failure.
-        try:
-            from src.clients.registry import get_registry as _get_registry
-            _get_registry().update(client_id, status="failed")
-        except Exception as st_err:    # noqa: BLE001
-            logger.warning(
-                "R5-3: sku_clients.status FAILED update failed for %s: %s",
-                client_id, st_err,
-            )
-        # Notify on failure too — both channels, silently skip if
-        # the user hasn't opted in or hasn't linked.
-        try:
-            from src.notifications.training_email import notify_training_failed as _email_fail
-            _email_fail(client_id=client_id, error=str(e))
-        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-            logger.info("notify_training_failed (email) skipped: %s", notif_err)
-        try:
-            from src.notifications.telegram import notify_training_failed as _tg_fail
-            _tg_fail(client_id=client_id, error=str(e))
-        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-            logger.info("notify_training_failed (telegram) skipped: %s", notif_err)
-        raise
-
-    # Persist final metrics so the History tab can show them after
-    # RQ has expired the job result.
-    if runs is not None:
-        try:
-            from src.storage.training_runs import FINISHED
-            metrics = result.get("metrics") or {}
-            # Prefer the pooled "global" metrics over the per-SKU mean.
-            # _mean treats every SKU equally and explodes when a few
-            # SKUs have intermittent zero-actual periods (NaN-handling
-            # asymmetry between per-fold and combined aggregations).
-            # _global = sum_all(|err|) / sum_all(|actual|), monotonic
-            # in fold metrics and matches what users see on a chart.
-            runs.update(
-                run_id,
-                status=FINISHED,
-                ended_at=_now(),
-                elapsed_sec=result.get("elapsed_sec"),
-                n_skus=result.get("n_skus"),
-                n_features=result.get("n_features"),
-                n_rows=result.get("n_rows"),
-                wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
-                mase=metrics.get("mase_global",  metrics.get("mase_mean")),
-                smape=metrics.get("smape_global", metrics.get("smape_mean")),
-                model_path=result.get("model_path"),
-                mlflow_run_id=result.get("mlflow_run_id"),
-            )
-        except Exception as e:    # noqa: BLE001
-            logger.warning("training_runs FINISHED update failed: %s", e)
-
-    # R5-3 (2026-05-17) — transition sku_clients.status from "training"
-    # → "ready" on success. The API sets "training" at enqueue time
-    # (src/api/main.py trigger_training); only this RQ-job and
-    # auto_retrain.run_auto_retrain knew to flip it back, and only the
-    # latter actually did. Effect of the gap: every async (production
-    # default) training left the client row stuck in status="training"
-    # forever, blocking any UI/route that gates on a non-training state.
-    # Best-effort — registry failures must not retro-fail a completed run.
-    try:
-        from src.clients.registry import get_registry as _get_registry
-        _get_registry().update(client_id, status="ready")
-    except Exception as st_err:    # noqa: BLE001
-        logger.warning(
-            "R5-3: sku_clients.status READY update failed for %s: %s",
-            client_id, st_err,
-        )
-
-    # ── Notify the user that training is done ──────────────────
-    # Email + Telegram in parallel, both best-effort. Each channel
-    # has its own opt-out in client config and silently skips
-    # when not configured.
-    #
-    # R5-5 (2026-05-17) — Redis-backed idempotency guard. RQ
-    # retries the job on worker SIGTERM / OOM mid-finalisation; if
-    # _training_job ran past the registry FINISHED update and into
-    # this block, but the worker was killed before returning, the
-    # retry re-runs the entire pipeline and re-fires email +
-    # telegram. Without the guard, users get duplicate "training
-    # complete" emails. SET NX with TTL=7d on a run_id-keyed flag:
-    # second invocation skips notifications cleanly.
-    #
-    # No run_id (legacy / pre-R5 jobs) → no idempotency — preserves
-    # the prior behaviour where best-effort notifications might
-    # fire twice. Acceptable because legacy jobs aren't queued any
-    # more.
-    metrics = result.get("metrics") or {}
-    notif_args = dict(
-        client_id=client_id,
-        duration_sec=result.get("elapsed_sec"),
-        n_skus=result.get("n_skus"),
-        wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
-        mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+    effective_data_path, merged_cleanup = _resolve_data_path(
+        data_path=data_path,
+        extend_from_path=extend_from_path,
+        config_path=config_path,
+        runs=runs,
+        run_id=run_id,
     )
 
-    should_notify = True
-    if run_id:
-        try:
-            from src.redis_pool import get_redis_or_none
-            r = get_redis_or_none()
-            if r is not None:
-                # SET key value NX EX 604800 → True only on first set;
-                # subsequent calls (RQ retry of the same run_id)
-                # return False and we skip notifications.
-                key = f"notif:training:{run_id}"
-                first = r.set(key, "1", nx=True, ex=7 * 24 * 3600)
-                if not first:
-                    should_notify = False
-                    logger.info(
-                        "R5-5: notifications already sent for run_id=%s — skipping (RQ retry)",
-                        run_id,
-                    )
-        except Exception as idem_err:    # noqa: BLE001
-            # Idempotency-check failure is non-fatal. Fall through to
-            # send — duplicate notification is better than missed.
-            logger.warning(
-                "R5-5: idempotency guard failed (%s) — sending anyway", idem_err,
-            )
+    result = _run_pipeline_or_fail(
+        client_id=client_id,
+        effective_data_path=effective_data_path,
+        config_path=config_path,
+        runs=runs,
+        run_id=run_id,
+    )
 
-    if should_notify:
-        try:
-            from src.notifications.training_email import notify_training_finished as _email
-            _email(**notif_args)
-        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-            logger.info("notify_training_finished (email) skipped: %s", notif_err)
-        try:
-            from src.notifications.telegram import notify_training_finished as _tg
-            _tg(**notif_args)
-        except Exception as notif_err:    # noqa: BLE001 — audit R2-25
-            logger.info("notify_training_finished (telegram) skipped: %s", notif_err)
-
-    # ── Auto-batch-forecast for the whole catalogue ──────────────
-    # The user shouldn't have to pick an SKU + horizon by hand after
-    # training: we already know both. Generate forecasts for every
-    # SKU over the plan's max_horizon_days and persist into
-    # sku_forecasts. Best-effort — failure here doesn't fail the
-    # training run, the model is still saved and trainable.
-    try:
-        _generate_and_store_forecasts(
-            client_id=client_id,
-            data_path=effective_data_path,
-            model_path=result.get("model_path"),
-            config_path=config_path,
-            run_id=run_id or "",
-        )
-    except Exception as e:    # noqa: BLE001
-        logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
-
-    # ── Persist last-90-days anomalies for the forecast viewer ───
-    # The detector ran during training to set sample weights; we
-    # rerun it on the same data here so the (sku, date) flags can
-    # be persisted into sku_anomalies. Cheap (~seconds for 60×3y).
-    try:
-        _detect_and_store_anomalies(
-            client_id=client_id,
-            data_path=effective_data_path,
-            config_path=config_path,
-            run_id=run_id or "",
-        )
-    except Exception as e:    # noqa: BLE001
-        logger.warning("post-training anomaly detection failed: %s", e, exc_info=True)
-
-    # Tidy up the temp merged parquet now that both training and
-    # post-training forecasts have read it.
-    if merged_cleanup:
-        try:
-            import os as _os
-            _os.unlink(merged_cleanup)
-        except Exception:
-            pass
+    _record_run_finished(runs, run_id, result, client_id)
+    _notify_finished_idempotent(client_id, run_id, result)
+    _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
+    _cleanup_merged(merged_cleanup)
 
     return result
 

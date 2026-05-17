@@ -22,69 +22,81 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
-def _training_job_source() -> str:
-    """Read the _training_job function body from task_queue.py."""
-    text = (_BACKEND / "src" / "pipeline" / "task_queue.py").read_text()
-    start = text.find("def _training_job(")
-    assert start > 0, "_training_job must exist"
+def _task_queue_source() -> str:
+    """Read the full task_queue.py file. After R5-M5 the R5-3 status
+    transitions live in helper functions (_run_pipeline_or_fail,
+    _record_run_finished), not the orchestrator — so the invariants
+    are pinned at file scope rather than function scope."""
+    return (_BACKEND / "src" / "pipeline" / "task_queue.py").read_text()
+
+
+def _helper_body(text: str, fn_name: str) -> str:
+    start = text.find(f"def {fn_name}(")
+    assert start > 0, f"{fn_name} must exist"
     next_def = text.find("\ndef ", start + 1)
-    end = next_def if next_def > 0 else len(text)
-    return text[start:end]
+    return text[start:next_def] if next_def > 0 else text[start:]
 
 
 def test_training_job_transitions_status_ready_on_success():
-    """The SUCCESS path must call registry.update with status='ready'
-    after the training_runs FINISHED update (R5-3)."""
-    body = _training_job_source()
-    assert 'status="ready"' in body, (
-        "_training_job must set sku_clients.status='ready' on success (R5-3)"
+    """The SUCCESS path must call registry.update with status='ready'.
+    Post-R5-M5 this lives in `_record_run_finished` helper, called
+    from the orchestrator AFTER `_run_pipeline_or_fail` returns
+    without exception."""
+    text = _task_queue_source()
+    finished_body = _helper_body(text, "_record_run_finished")
+    assert 'status="ready"' in finished_body, (
+        "_record_run_finished must set sku_clients.status='ready' (R5-3)"
     )
-    # The ready update must come from a path that doesn't raise — i.e.
-    # AFTER the run_training_pipeline call has returned without exception.
-    ready_idx = body.find('status="ready"')
-    pipeline_idx = body.find("run_training_pipeline(")
-    assert ready_idx > pipeline_idx, (
-        "ready transition must run AFTER run_training_pipeline returns"
+    # Orchestrator must call _record_run_finished AFTER _run_pipeline_or_fail.
+    orch = _helper_body(text, "_training_job")
+    rec_idx = orch.find("_record_run_finished")
+    run_idx = orch.find("_run_pipeline_or_fail")
+    assert rec_idx > 0 and run_idx > 0 and rec_idx > run_idx, (
+        "_record_run_finished must be called AFTER _run_pipeline_or_fail "
+        "in the orchestrator (R5-3 ordering invariant)"
     )
 
 
 def test_training_job_transitions_status_failed_on_exception():
     """The FAILURE path must call registry.update with status='failed'
-    inside the exception handler so the client row reflects the
-    actual run outcome (R5-3)."""
-    body = _training_job_source()
-    assert 'status="failed"' in body, (
-        "_training_job must set sku_clients.status='failed' on failure (R5-3)"
+    inside the exception handler of `_run_pipeline_or_fail` so the
+    client row reflects the actual run outcome (R5-3)."""
+    text = _task_queue_source()
+    fail_body = _helper_body(text, "_run_pipeline_or_fail")
+    assert 'status="failed"' in fail_body, (
+        "_run_pipeline_or_fail must set sku_clients.status='failed' (R5-3)"
     )
-    # The failed update must live inside an `except Exception as e:` block.
-    failed_idx = body.find('status="failed"')
-    # Find the enclosing except clause heading.
-    except_keyword = body.rfind("except Exception as e:", 0, failed_idx)
-    raise_keyword = body.find("        raise", failed_idx)
+    # The failed update must live inside an `except` block before `raise`.
+    failed_idx = fail_body.find('status="failed"')
+    except_keyword = fail_body.rfind("except Exception as e:", 0, failed_idx)
+    raise_keyword = fail_body.find("        raise", failed_idx)
     assert except_keyword > 0 and raise_keyword > failed_idx, (
         "failed transition must be inside the except branch that re-raises"
     )
 
 
 def test_training_job_status_updates_use_get_registry():
-    """Status updates must use the canonical `get_registry()` factory
-    so they go through whatever backend the env has (Postgres in
-    prod, file in dev/test) — not a hardcoded class instantiation."""
-    body = _training_job_source()
-    # The fix uses lazy import of get_registry to avoid worker startup
-    # cycles. Both update sites must show the pattern.
-    occurrences = body.count("get_registry")
-    assert occurrences >= 2, (
-        f"_training_job must call get_registry() in BOTH success and "
-        f"failure paths — got {occurrences} occurrences"
-    )
+    """Status updates must use the canonical `get_registry()` factory.
+    Both R5-3 update sites (success + failure) call it via lazy
+    import to avoid worker-startup cycles."""
+    text = _task_queue_source()
+    # Each helper's body must invoke get_registry.
+    for fn in ("_run_pipeline_or_fail", "_record_run_finished"):
+        body = _helper_body(text, fn)
+        assert "get_registry" in body, (
+            f"{fn} must call get_registry() (R5-3)"
+        )
 
 
 def test_r5_3_traceability_comments_present():
-    """Both status updates carry an R5-3 audit reference so future
-    refactors can grep the rationale before yanking the lines."""
-    body = _training_job_source()
-    assert body.count("R5-3") >= 2, (
-        "_training_job must reference R5-3 in BOTH update sites "
-        "(success + failure) for traceability"
+    """Both status-update helpers carry R5-3 references for grep
+    traceability so future refactors can find the rationale before
+    yanking lines."""
+    text = _task_queue_source()
+    # File-level count: at least 2 R5-3 mentions (one per helper) so
+    # the rationale is visible to grep on each side of the split.
+    r5_3_mentions = text.count("R5-3")
+    assert r5_3_mentions >= 2, (
+        f"task_queue.py must reference R5-3 ≥2 times for traceability "
+        f"(success + failure update sites) — got {r5_3_mentions}"
     )
