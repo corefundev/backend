@@ -1,24 +1,37 @@
 """
-Regression tests for R5-21 — yc-sa-key.json file permissions
-(2026-05-17).
+Regression tests for R5-21 post-mortem — yc-sa-key.json perms must
+stay at chmod 644 (2026-05-17, updated 13:50 UTC).
 
-Discovered after user asked about the dual private_key+public_key
-shape of authorized_key.json (which is normal for `yc iam key
-create`). While checking, found the file was world-readable (644)
-on BOTH prod and staging VPS — any local user could `cat` the
-SA's private_key block. The comment in docker-compose.lockbox.yml
-+ scripts/rotate_lockbox_key.sh literally documented 644 with a
-WRONG rationale (claimed container reads as non-root). Verified
-on prod: every Lockbox-consuming container enters as root for
-lockbox_bootstrap.sh, root bypasses host bind-mount perms, so
-chmod 600 works fine.
+History: original R5-21 fix tightened the SA key to chmod 600
+thinking 644 was unnecessary world-read. Wrong. The migrate
+container in the CD pipeline (api image, runs as uid 999 = sku)
+plus alertmanager + postgres-exporter (uid 65534 = nobody) all
+read this file directly — 600 owned by host uid 1000 (deploy)
+blocked them. The CD `Deploy → production` step for commit
+ecbfe90 exited 1 at the migrate step:
 
-Live state after fix:
-  /srv/backend/secrets/                  drwx------ 700 deploy:deploy
-  /srv/backend/secrets/yc-sa-key.json    -rw------- 600 deploy:deploy
+  Permission denied: '/run/secrets/yc-sa-key.json'
+  RuntimeError: FATAL: No secrets configured for production!
 
-Source-level pins so the legacy "chmod 644" recommendation can't
-re-emerge in docs/scripts.
+Three different container UIDs read this file:
+  uid 0    (root)    — backup, postgres        ✅ bypass any perms
+  uid 999  (sku)     — api, worker, migrate    ❌ blocked by 600
+  uid 65534 (nobody) — alertmanager, pg-exp    ❌ blocked by 600
+
+644 is the only mode that lets all three read. Tightening beyond
+644 requires either Linux ACLs (`setfacl -m u:999:r,u:65534:r`)
+or Dockerfile changes to align container UIDs into a shared host
+group — both out of scope.
+
+The actual defence is the parent dir at chmod 700:
+  drwx------ 700 deploy:deploy /srv/backend/secrets/
+which prevents any non-deploy non-root local user from `ls`-ing
+the file. Combined with the deploy-only VPS user model, this
+matches the actual attacker shape.
+
+Source-level pin: the executable `chmod` in scripts/docs must
+remain 644 — the 600 attempt failed in prod and these tests are
+the canary that catches the next over-eager hardening.
 """
 from __future__ import annotations
 
@@ -29,55 +42,73 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
-def test_rotate_lockbox_key_uses_chmod_600():
-    """scripts/rotate_lockbox_key.sh must `chmod 600` the new SA key
-    after scp — NOT 644 (the legacy world-readable mode)."""
+def test_rotate_lockbox_key_uses_chmod_644():
+    """scripts/rotate_lockbox_key.sh must `chmod 644` the SA key
+    after scp. Tightening to 600 broke prod deploy of ecbfe90."""
     text = (_BACKEND / "scripts" / "rotate_lockbox_key.sh").read_text()
-    # The executable shell line must use 600.
-    assert re.search(r'chmod\s+600\s+\$\{?VPS_PATH', text), (
-        "rotate_lockbox_key.sh must chmod 600 the new SA key (R5-21)"
+    # Find the executable chmod line (not in a comment).
+    found_644 = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if re.search(r'chmod\s+644\s+\$\{?VPS_PATH', line):
+            found_644 = True
+            break
+    assert found_644, (
+        "rotate_lockbox_key.sh must chmod 644 the SA key — 600 broke "
+        "non-root container reads (R5-21 post-mortem)"
     )
-    # And the executable line must NOT chmod 644 (legacy comment can
-    # mention it as history, but the actual shell command can't).
+    # And no executable `chmod 600` for the SA key (comments OK).
     for line in text.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("#"):
             continue
-        if "chmod 644" in line:
+        if re.search(r'chmod\s+600\s+\$\{?VPS_PATH', line):
             raise AssertionError(
-                "rotate_lockbox_key.sh: executable `chmod 644` on SA "
-                "key must be removed (R5-21)"
+                "rotate_lockbox_key.sh: executable `chmod 600` on SA "
+                "key must be reverted — broke prod (R5-21 post-mortem)"
             )
 
 
-def test_compose_lockbox_comment_recommends_chmod_600():
-    """docker/docker-compose.lockbox.yml's `Prerequisite on host:`
-    block must point operators at `chmod 600`, not 644. Stale advice
-    is exactly how this leak persisted to today."""
+def test_compose_lockbox_comment_recommends_chmod_644():
+    """docker/docker-compose.lockbox.yml's prereq comment must point
+    operators at `chmod 644` for the SA key file."""
     text = (_BACKEND / "docker" / "docker-compose.lockbox.yml").read_text()
-    # Find the prereq comment block (lines starting with `# ` describing setup).
-    # The `chmod 600 ./secrets/yc-sa-key.json` must appear in the prereq area.
-    assert "chmod 600 ./secrets/yc-sa-key.json" in text, (
-        "compose.lockbox.yml prereq comment must recommend chmod 600 (R5-21)"
+    assert "chmod 644 ./secrets/yc-sa-key.json" in text, (
+        "compose.lockbox.yml prereq must recommend chmod 644 — "
+        "non-root container UIDs need read access (R5-21 post-mortem)"
     )
-    # The standalone `chmod 644 ./secrets/yc-sa-key.json` recommendation
-    # must be gone (a wider mention of 644 inside historical context is OK).
-    for line in text.splitlines():
-        if line.lstrip().startswith("#") and "chmod 644 ./secrets/yc-sa-key.json" in line:
-            raise AssertionError(
-                "compose.lockbox.yml prereq must not recommend `chmod 644 "
-                "./secrets/yc-sa-key.json` (R5-21)"
-            )
 
 
-def test_r5_21_traceability():
-    """Both fix sites must reference R5-21 so a future grep finds the
-    rationale + linked finding."""
+def test_r5_21_post_mortem_documented():
+    """Both files must reference R5-21 + the post-mortem rationale so
+    the next contributor doesn't repeat the 600 mistake."""
     for relpath in (
         "scripts/rotate_lockbox_key.sh",
         "docker/docker-compose.lockbox.yml",
     ):
         text = (_BACKEND / relpath).read_text()
-        assert "R5-21" in text, (
-            f"{relpath} must reference R5-21 for traceability"
+        assert "R5-21" in text, f"{relpath} must reference R5-21"
+        # Look for explanation that mentions the breakage mechanism —
+        # any of: "uid 999", "uid 65534", "non-root", "post-mortem".
+        explanation_hits = sum(
+            kw in text for kw in
+            ("uid 999", "uid 65534", "non-root", "post-mortem")
         )
+        assert explanation_hits >= 1, (
+            f"{relpath} must document WHY 644 is required "
+            "(uid mismatch / non-root containers / post-mortem) — "
+            "otherwise next reviewer tightens to 600 again"
+        )
+
+
+def test_parent_secrets_dir_is_700_documented():
+    """The compose comment must mention the parent-dir chmod 700 as
+    the actual protective layer — otherwise readers see 644 and
+    assume world-read is fine, missing the real defence."""
+    text = (_BACKEND / "docker" / "docker-compose.lockbox.yml").read_text()
+    assert ("dir is 700" in text or
+            "Parent dir" in text and "700" in text), (
+        "compose.lockbox.yml must document parent-dir 700 as the real "
+        "protective layer (R5-21 post-mortem)"
+    )

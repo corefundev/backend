@@ -115,17 +115,24 @@ echo "       new key id = $NEW_KEY_ID"
 # gets interrupted, the live file is untouched.
 echo "[2/5] scp → ${VPS_PATH}.new"
 scp -q "$NEW_KEY_FILE" "${VPS_USER}@${VPS_HOST}:${VPS_PATH}.new"
-# R5-21 (2026-05-17) — chmod 600. The legacy comment here claimed
-# 644 was required because the container reads as uid 999 (sku);
-# that was WRONG. Every Lockbox-consuming container (backup,
-# postgres, alertmanager, postgres-exporter) enters as root (uid 0)
-# at lockbox_bootstrap.sh time — root bypasses host file perms on
-# bind-mounts. Verified on prod: chmod 600 + container restart →
-# `lockbox_bootstrap: injected 84 variables`. 644 was leaving the
-# private_key world-readable to any local user on the VPS — minor
-# but real privilege escalation surface.
+# R5-21 (2026-05-17, post-mortem) — chmod 644 (NOT 600). The
+# original 644 was correct after all; my first R5-21 fix to 600
+# was a false positive. Containers that read this file run as
+# THREE different UIDs:
+#   - backup / postgres   → root (uid 0) — root bypasses 600 OK
+#   - alertmanager        → uid 65534 (nobody)
+#   - postgres-exporter   → uid 65534 (nobody)
+#   - api / migrate       → uid 999 (sku)
+# chmod 600 (owner-deploy-only) blocked the last three, breaking
+# `Lockbox bootstrap: injected … from secret` at container start
+# → migrate container exited 1 → CD `Deploy → production` failed
+# on commit ecbfe90 (2026-05-17 13:34 UTC). Properly tightening
+# this would need Linux ACLs (`setfacl -m u:999:r,u:65534:r`) or
+# Dockerfile changes to align container UIDs to a host group —
+# both out of scope for now. Threat model under 644 + parent dir
+# 700 + deploy-only VPS user is acceptable.
 ssh -q "${VPS_USER}@${VPS_HOST}" \
-    "chmod 600 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
+    "chmod 644 ${VPS_PATH}.new && mv ${VPS_PATH}.new ${VPS_PATH}"
 
 # ── Step 3: restart containers — they'll pick up new key at startup ─────
 # Order matters: api first (shortest downtime users feel), then workers.

@@ -18,12 +18,21 @@
 #
 # Prerequisite on host:
 #   • Place the downloaded `authorized_key.json` at ./secrets/yc-sa-key.json
-#   • chmod 600 ./secrets/yc-sa-key.json   (R5-21 — owner-only read;
-#     containers enter as root for lockbox_bootstrap and root bypasses
-#     host bind-mount perms, so 600 doesn't break the read path. The
-#     parent ./secrets/ dir is 700 separately. Defense-in-depth: 600
-#     prevents any non-deploy local user on the VPS from cat'ing the
-#     private_key block.)
+#   • chmod 644 ./secrets/yc-sa-key.json
+#   • Parent dir ./secrets/ MUST be `chmod 700 deploy:deploy` — that's
+#     the actual protective layer (other UIDs can't `ls` to find the
+#     filename even if they could `cat` it).
+#
+# R5-21 post-mortem (2026-05-17) — tried chmod 600 thinking 644 was
+# unnecessary world-read; that broke the migrate / api / alertmanager
+# / postgres-exporter containers (uids 999 sku and 65534 nobody can't
+# read 600-owned-by-deploy files; only root-entrypoint containers
+# bypass the perm check). Reverted to 644 after CD prod deploy
+# failure. To actually tighten beyond 644 needs either Linux ACLs
+# (`setfacl -m u:999:r,u:65534:r`) or Dockerfile changes — neither
+# done. The parent-dir-700 + single-deploy-user VPS threat model
+# makes 644 acceptable under enterprise rule "match defence to actual
+# attacker shape".
 #
 # The file NEVER gets rebuilt into images and NEVER gets checked into git
 # (add ./secrets/ to .gitignore).
