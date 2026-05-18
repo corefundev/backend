@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-_MAIN = Path(__file__).resolve().parents[2] / "src" / "api" / "main.py"
+_MAIN = Path(__file__).resolve().parents[2] / "src" / "api" / "routers" / "auth.py"
 
 
 def _signup_block() -> str:
@@ -30,7 +30,7 @@ def _signup_block() -> str:
     start = text.find("async def auth_signup")
     assert start > 0, "auth_signup handler missing"
     # End at the next decorator/route definition.
-    end = text.find('@app.post("/auth/signup/verify"', start)
+    end = text.find('@router.post("/auth/signup/verify"', start)
     assert end > start, "auth_signup/verify route missing — handler boundary lost"
     return text[start:end]
 

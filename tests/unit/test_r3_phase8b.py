@@ -70,7 +70,7 @@ def test_oauth_callback_has_email_verified_guard_before_jwt():
     create_access_token(). Regression: if a refactor moves the JWT
     call above the guard, this test fails."""
     from pathlib import Path
-    src = Path(__file__).resolve().parents[2] / "src" / "api" / "main.py"
+    src = Path(__file__).resolve().parents[2] / "src" / "api" / "routers" / "auth.py"
     text = src.read_text()
     idx_guard = text.find("Audit R3-8")
     idx_token = text.find(
@@ -87,7 +87,7 @@ def test_oauth_email_verified_guard_uses_403():
     """The guard rejects with 403 (forbidden) so the frontend can show
     a 'finish email verification' page rather than a generic 500."""
     from pathlib import Path
-    src = Path(__file__).resolve().parents[2] / "src" / "api" / "main.py"
+    src = Path(__file__).resolve().parents[2] / "src" / "api" / "routers" / "auth.py"
     text = src.read_text()
     # Find the guard block and confirm 403 + "Email verification"
     start = text.find("Audit R3-8")

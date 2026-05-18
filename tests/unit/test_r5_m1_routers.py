@@ -119,6 +119,51 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_auth_domain_lives_in_router():
+    """The `auth` domain (R5-M1 slice 9) — 9 routes + 9 schemas —
+    lives in `src/api/routers/auth.py`. Largest slice; preserves
+    R2-4 / R3-9 / R4-3 / R4-4 / R5-9 / R6-2 invariants verbatim.
+    """
+    a = _ROUTERS_DIR / "auth.py"
+    assert a.is_file(), "src/api/routers/auth.py must exist after R5-M1 slice 9"
+    text = a.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('post', '/auth/token'),
+        ('post', '/auth/signup'),
+        ('post', '/auth/signup/verify'),
+        ('post', '/auth/login'),
+        ('post', '/auth/login/verify'),
+        ('post', '/auth/logout'),
+        ('get',  '/auth/oauth/providers'),
+        ('get',  '/auth/oauth/{provider}/start'),
+        ('get',  '/auth/oauth/{provider}/callback'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"auth.py must own {method.upper()} {path}"
+        )
+    # Critical security invariants preserved (text-level pins).
+    assert "hmac.compare_digest" in text or "_hmac.compare_digest" in text  # R5-9
+    assert "R3-9" in text   # silent 202 on duplicate-email signup
+    assert "R4-4" in text   # OTP verify rate-limit
+    assert "R6-2" in text   # pydantic protected_namespaces=()
+    # M6 hoist preserved.
+    assert "from src.audit import" in text
+    assert "from src.auth.signup_rate_limit import" in text
+
+    main_text = _MAIN.read_text()
+    for path in (
+        "/auth/token", "/auth/signup", "/auth/signup/verify",
+        "/auth/login", "/auth/login/verify", "/auth/logout",
+        "/auth/oauth/providers",
+    ):
+        for method in ('get', 'post'):
+            assert f'@app.{method}("{path}"' not in main_text, (
+                f"main.py still has @app.{method.upper()} for {path}"
+            )
+    assert "auth_router" in main_text
+
+
 def test_inference_domain_lives_in_router():
     """The `inference` domain (R5-M1 slice 8) — 5 routes + 3 schemas
     + 1 helper — lives in `src/api/routers/inference.py`. Slice 8

@@ -233,14 +233,39 @@ def test_check_otp_verify_attempt_exists():
     assert callable(getattr(signup_rate_limit, "check_otp_verify_attempt", None))
 
 
+def _auth_module_text() -> str:
+    """R5-M1 slice 9 (2026-05-18) — auth handlers moved to
+    routers/auth.py. Try the new location first; fall back to main.py
+    so the test still works mid-rollout."""
+    for f in (
+        _BACKEND / "src" / "api" / "routers" / "auth.py",
+        _BACKEND / "src" / "api" / "main.py",
+    ):
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        if "async def auth_login_email" in text:
+            return text
+    raise AssertionError(
+        "auth handlers not found in main.py or routers/auth.py"
+    )
+
+
+def _auth_handler_block(text: str, signature: str) -> str:
+    """Slice out one handler. Stops at the next @app. or @router. line."""
+    start = text.find(signature)
+    assert start > 0, f"{signature!r} not found"
+    end_app    = text.find('\n@app.',    start + 1)
+    end_router = text.find('\n@router.', start + 1)
+    ends = [e for e in (end_app, end_router) if e > 0]
+    end = min(ends) if ends else len(text)
+    return text[start:end]
+
+
 def test_auth_login_route_calls_check_login_attempt():
     """/auth/login handler must invoke check_login_attempt before
     captcha + DB work."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def auth_login_email")
-    assert start > 0
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    block = _auth_handler_block(_auth_module_text(), "async def auth_login_email")
     assert "check_login_attempt" in block, (
         "/auth/login must wire check_login_attempt (R4-3)"
     )
@@ -253,20 +278,14 @@ def test_auth_login_route_calls_check_login_attempt():
 
 
 def test_auth_signup_verify_calls_check_otp_verify_attempt():
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def auth_signup_verify")
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    block = _auth_handler_block(_auth_module_text(), "async def auth_signup_verify")
     assert "check_otp_verify_attempt" in block, (
         "/auth/signup/verify must wire check_otp_verify_attempt (R4-4)"
     )
 
 
 def test_auth_login_verify_calls_check_otp_verify_attempt():
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def auth_login_verify")
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    block = _auth_handler_block(_auth_module_text(), "async def auth_login_verify")
     assert "check_otp_verify_attempt" in block, (
         "/auth/login/verify must wire check_otp_verify_attempt (R4-4)"
     )
