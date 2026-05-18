@@ -28,7 +28,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 def test_loki_rules_file_has_three_alerts():
     """loki-rules.yml must define JwtDecodeFailureSpike,
     OauthStateRejectedSpike, LockboxBootstrapFailed."""
-    text = (_BACKEND / "docker" / "loki-rules.yml").read_text()
+    text = (_BACKEND / "docker" / "loki" / "rules" / "fake" / "loki-rules.yml").read_text()
     for alert in (
         "JwtDecodeFailureSpike",
         "OauthStateRejectedSpike",
@@ -43,7 +43,7 @@ def test_loki_rules_use_logql_stream_syntax():
     """Each alert expression must use LogQL stream syntax
     `{logger_name=...} |~ ...` — that's the whole point of Loki ruler
     (Prometheus rejects this syntax, which is why R2-8 failed)."""
-    text = (_BACKEND / "docker" / "loki-rules.yml").read_text()
+    text = (_BACKEND / "docker" / "loki" / "rules" / "fake" / "loki-rules.yml").read_text()
     assert '{logger_name="src.auth.jwt_auth"' in text, (
         "JwtDecodeFailureSpike must filter on logger_name=src.auth.jwt_auth"
     )
@@ -61,7 +61,7 @@ def test_lockbox_alert_is_critical():
     """LockboxBootstrapFailed is the only critical-severity rule —
     secrets fetch failure means degraded-mode (audit-log HMAC off,
     signed-pickle off). Operator must page."""
-    text = (_BACKEND / "docker" / "loki-rules.yml").read_text()
+    text = (_BACKEND / "docker" / "loki" / "rules" / "fake" / "loki-rules.yml").read_text()
     lockbox_idx = text.find("alert: LockboxBootstrapFailed")
     next_alert = text.find("- alert:", lockbox_idx + 1)
     block = text[lockbox_idx:next_alert] if next_alert > 0 else text[lockbox_idx:]
@@ -74,8 +74,8 @@ def test_loki_config_has_ruler_block():
     """loki-config.yaml must declare a `ruler:` block pointing at
     alertmanager:9093, otherwise the ruler is dormant and the alerts
     never fire even if the file is mounted."""
-    text = (_BACKEND / "docker" / "loki-config.yaml").read_text()
-    assert "ruler:" in text, "loki-config.yaml must declare ruler block"
+    text = (_BACKEND / "docker" / "loki" / "etc" / "local-config.yaml").read_text()
+    assert "ruler:" in text, "loki/etc/local-config.yaml must declare ruler block"
     assert "alertmanager_url: http://alertmanager:9093" in text, (
         "ruler must target the compose alertmanager service"
     )
@@ -91,15 +91,28 @@ def test_loki_config_has_ruler_block():
 def test_compose_mounts_loki_rules_at_tenant_fake_path():
     """Loki expects rule files under
     `<storage.local.directory>/<tenant>/`. With auth_enabled=false
-    the tenant is `fake` — so the host file must mount at
-    `/loki/rules/fake/loki-rules.yml`."""
+    the tenant is `fake` — so the host directory must mount at
+    `/loki/rules` and contain a `fake/loki-rules.yml`.
+
+    R7-7 (2026-05-19) — switched from single-file mount
+    (`./loki-rules.yml:/loki/rules/fake/loki-rules.yml`) to
+    directory mount (`./loki/rules:/loki/rules`) to dodge the
+    R6-5 inode-replace trap. The file path inside the host
+    directory still ends with `fake/loki-rules.yml`.
+    """
     text = (_BACKEND / "docker" / "docker-compose.yml").read_text()
     loki_idx = text.find("  loki:")
     next_svc = text.find("\n  promtail:", loki_idx)
     block = text[loki_idx:next_svc]
-    assert "./loki-rules.yml:/loki/rules/fake/loki-rules.yml" in block, (
-        "compose must mount loki-rules.yml at /loki/rules/fake/ "
-        "(Loki's tenant path for auth_enabled=false)"
+    assert "./loki/rules:/loki/rules" in block, (
+        "compose must mount ./loki/rules at /loki/rules (R7-7 dir mount)"
+    )
+    # File exists at the canonical tenant=fake path.
+    rules_file = _BACKEND / "docker" / "loki" / "rules" / "fake" / "loki-rules.yml"
+    assert rules_file.is_file(), (
+        f"{rules_file.relative_to(_BACKEND)} must exist on disk so "
+        "the directory mount surfaces /loki/rules/fake/loki-rules.yml "
+        "inside the container"
     )
 
 

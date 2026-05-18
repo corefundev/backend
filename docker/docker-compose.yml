@@ -1032,7 +1032,11 @@ services:
     volumes:
       # Template — contains ${TELEGRAM_ALERT_BOT_TOKEN} and
       # ${TELEGRAM_ALERT_CHAT_ID} placeholders, rendered at startup.
-      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml.tpl:ro
+      # R7-7 (2026-05-19) — directory bind-mount to dodge the
+      # single-file inode trap (see R6-5). entrypoint reads
+      # /etc/alertmanager/alertmanager.yml.tpl and renders to
+      # /tmp/alertmanager.yml.
+      - ./alertmanager:/etc/alertmanager:ro
       - alertmanager_data:/alertmanager
     restart: unless-stopped
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
@@ -1059,7 +1063,8 @@ services:
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
-      - ./tempo-config.yaml:/etc/tempo/config.yaml:ro
+      # R7-7 — directory bind-mount (see R6-5 inode-trap fix).
+      - ./tempo:/etc/tempo:ro
       - tempo_data:/var/tempo
     command: -config.file=/etc/tempo/config.yaml
     healthcheck:
@@ -1083,12 +1088,15 @@ services:
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
-      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      # R7-7 — directory bind-mounts (see R6-5 inode-trap fix).
+      # Loki has two mount points: config + ruler rules.
+      - ./loki/etc:/etc/loki:ro
       # Loki ruler — rules under /loki/rules/<tenant>/. tenant=fake
       # for auth_enabled=false setups. Ports the 3 log-based alerts
       # that R2-8 originally tried (and failed) to express in
-      # prometheus alerts.yml. See loki-config.yaml `ruler:` block.
-      - ./loki-rules.yml:/loki/rules/fake/loki-rules.yml:ro
+      # prometheus alerts.yml. See loki/etc/local-config.yaml
+      # `ruler:` block.
+      - ./loki/rules:/loki/rules:ro
       - loki_data:/loki
     command: -config.file=/etc/loki/local-config.yaml
     healthcheck:
@@ -1107,7 +1115,8 @@ services:
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
-      - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
+      # R7-7 — directory bind-mount (see R6-5 inode-trap fix).
+      - ./promtail:/etc/promtail:ro
       # Container logs (json-file driver writes here).
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       # Docker socket for SD (discovers running containers + their labels).

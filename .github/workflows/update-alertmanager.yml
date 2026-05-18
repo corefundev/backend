@@ -67,8 +67,15 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          scp -q docker/alertmanager.yml \
-                 docker/docker-compose.yml \
+          # R7-7 (2026-05-19) — alertmanager.yml now lives in
+          # docker/alertmanager/ as alertmanager.yml.tpl (bind-mount
+          # the directory, not the single file, to avoid the R6-5
+          # inode-replace trap).
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              'mkdir -p /srv/backend/docker/alertmanager'
+          scp -q docker/alertmanager/alertmanager.yml.tpl \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/alertmanager/"
+          scp -q docker/docker-compose.yml \
                  docker/docker-compose.lockbox.yml \
                  docker/Dockerfile.alertmanager \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
