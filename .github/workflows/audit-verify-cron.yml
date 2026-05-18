@@ -1,0 +1,116 @@
+# R7-2 (2026-05-19) — daily audit-log chain integrity check + Telegram
+# notification on `ok=false`.
+#
+# Why: `audit_log` is the HMAC-chained table that captures every
+# security-relevant event (login, password rotation, plan change,
+# OAuth callback, model train). The chain integrity check
+# (`src.audit.log.verify_chain`) walks the table and confirms each
+# row's HMAC matches `HMAC(prev_hash || row_data)`. If anyone
+# silently rewrote a row, the chain breaks at that point.
+#
+# Without this cron, the chain integrity is only checked manually via
+# `/internal/audit/verify` — which means an attacker who tampered
+# with the table during a credential-rotation window could go
+# undetected until the next manual check.
+#
+# Why SSH instead of HTTP-via-nginx
+# ─────────────────────────────────
+# The endpoint requires admin JWT auth (or admin api-key via
+# `x-api-key` header). Either path means we'd need `ADMIN_API_KEY` in
+# GHA secrets. Instead we SSH into the prod VPS and call
+# `verify_chain()` directly inside the api container — it already has
+# `ADMIN_API_KEY` (and every other secret) injected by the Lockbox
+# bootstrap. The audit key never leaves Lockbox.
+#
+# Schedule: 04:00 UTC daily — after the 02:10 UTC `backup.sh` run so
+# the dump's chain state is also stable for verification.
+name: Audit chain verify (daily)
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: verify audit_log HMAC chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Setup SSH
+        env:
+          SSH_KEY:         ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Call verify_chain on prod (via api container)
+        id: verify
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # The python heredoc runs INSIDE docker-api-1 (which already
+          # has Lockbox secrets injected by bootstrap_secrets). We call
+          # verify_chain() directly — no HTTP, no JWT minting.
+          RESPONSE=$(
+            ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
+                ${VPS_USER}@${VPS_HOST} \
+                'docker exec docker-api-1 python3 -c "
+          from src.auth.vault_agent import bootstrap_secrets
+          bootstrap_secrets()
+          from src.audit import verify_chain
+          import json
+          r = verify_chain(limit=10000)
+          print(json.dumps({
+              \"ok\":           r.ok,
+              \"rows_checked\": r.rows_checked,
+              \"first_bad_id\": r.first_bad_id,
+              \"reason\":       r.reason,
+              \"detail\":       r.detail,
+          }))
+          "'
+          )
+          echo "::group::Verify result"
+          echo "$RESPONSE"
+          echo "::endgroup::"
+          # Capture for the next step.
+          echo "response<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$RESPONSE"     >> "$GITHUB_OUTPUT"
+          echo "EOF"           >> "$GITHUB_OUTPUT"
+          # Parse `ok` for the conditional Telegram step.
+          OK=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("ok", False)).lower())')
+          echo "ok=$OK" >> "$GITHUB_OUTPUT"
+
+      - name: Telegram alert on chain corruption
+        if: steps.verify.outputs.ok != 'true'
+        env:
+          TG_TOKEN:  ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          TG_CHAT:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          RESPONSE:  ${{ steps.verify.outputs.response }}
+        run: |
+          set -euo pipefail
+          # Compose the operator-actionable message. `first_bad_id`
+          # narrows down the row that broke the chain so SQL inspection
+          # is targeted.
+          MSG=$(printf '🔥 AUDIT CHAIN CORRUPT (R7-2 daily verify)\n\n%s\n\nInspect: docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c "SELECT * FROM audit_log WHERE id = <first_bad_id>"\n\nDo NOT clear / rewrite — leave for forensics.' "$RESPONSE")
+          curl -fsS -X POST \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=${MSG}"
+          # Fail the job so the cron history shows red.
+          exit 1
+
+      - name: Success summary
+        if: steps.verify.outputs.ok == 'true'
+        env:
+          RESPONSE: ${{ steps.verify.outputs.response }}
+        run: |
+          ROWS=$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("rows_checked", 0))')
+          echo "✅ audit_log chain integrity verified: $ROWS rows checked"
