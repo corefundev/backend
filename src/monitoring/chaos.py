@@ -243,6 +243,89 @@ def run_standard_chaos_suite() -> list[FaultResult]:
         exp.observe(f"Webhook failed in {elapsed:.1f}s without exception")
         results.append(exp.get_result())
 
+    # ── Experiment 5: JWT revocation in-memory fallback (R3-5) ──
+    # When Redis is unavailable, revoke_token + is_token_revoked
+    # must fall back to a BOUNDED in-process map. The bound (per
+    # `settings.jwt_inmem_revoked_max`, default 10k) protects against
+    # OOM during sustained Redis outage. R5-M7 DI lets us pass
+    # `redis=None` explicitly to simulate the outage.
+    with ChaosExperiment(
+        "jwt_revoke_no_redis",
+        "revoke_token + is_token_revoked work via in-memory bounded fallback"
+    ) as exp:
+        from src.auth import jwt_auth
+        from src.settings import settings
+
+        # Cap to 5 so we can test the bound without spinning 10k tokens.
+        original_max = settings.jwt_inmem_revoked_max
+        settings.jwt_inmem_revoked_max = 5
+        jwt_auth._inmem_revoked.clear()
+        try:
+            # Simulate Redis outage via R5-M7 DI shape.
+            for i in range(20):
+                jwt_auth.revoke_token(f"jti-{i:03d}", redis=None)
+            exp.observe(
+                f"Revoked 20 tokens with redis=None → "
+                f"in-mem map size: {len(jwt_auth._inmem_revoked)}"
+            )
+            exp.assert_steady_state(
+                len(jwt_auth._inmem_revoked) <= 5,
+                f"Bound enforced: |map| = {len(jwt_auth._inmem_revoked)} ≤ 5"
+            )
+            # Most recent revocation is still findable.
+            exp.assert_steady_state(
+                jwt_auth.is_token_revoked("jti-019", redis=None),
+                "Newest revoked jti is still in the in-mem map"
+            )
+            exp.observe("R3-5 bounded in-mem fallback + R5-M7 DI both correct")
+        finally:
+            settings.jwt_inmem_revoked_max = original_max
+            jwt_auth._inmem_revoked.clear()
+        results.append(exp.get_result())
+
+    # ── Experiment 6: Postgres-down → service cache still serves
+    # `service_cache.get_or_load` orchestrates cache + load_factory.
+    # On a cache HIT, the slow-path (factory call) is skipped — so
+    # even if Postgres is dead, previously-cached clients keep
+    # responding via in-memory model. This is the fail-soft posture
+    # for /predict: read-replica or DB outage doesn't kill inference
+    # for clients already warm in cache.
+    with ChaosExperiment(
+        "postgres_down_cache_hit",
+        "Cached model is served even when load_factory would fail (DB-down simulation)"
+    ) as exp:
+        from src.api.service_cache import get_or_load, invalidate
+        # Clean slate.
+        invalidate("chaos-client-cached")
+
+        # Pre-warm the cache with a dummy "service".
+        sentinel = object()
+        get_or_load(
+            "chaos-client-cached",
+            load_factory=lambda _cid: sentinel,
+        )
+        exp.observe("Pre-warmed cache for client 'chaos-client-cached'")
+
+        # Now simulate Postgres-down: load_factory would raise.
+        def _factory_raises(cid):
+            raise RuntimeError("Postgres unavailable (chaos simulation)")
+
+        result = get_or_load(
+            "chaos-client-cached",
+            load_factory=_factory_raises,
+        )
+        exp.assert_steady_state(
+            result is sentinel,
+            "Cache hit served the pre-warmed sentinel — DB outage not reached"
+        )
+        # Cleanup
+        invalidate("chaos-client-cached")
+        exp.observe(
+            "Fail-soft posture confirmed: /predict for cached clients "
+            "tolerates DB outage"
+        )
+        results.append(exp.get_result())
+
     # Summary
     passed = sum(1 for r in results if r.passed)
     logger.info(
