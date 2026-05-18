@@ -343,28 +343,51 @@ groups:
       # R5-17 — sibling stale-archive alert. archive_timeout=60s only
       # forces a WAL switch when there's been WAL ACTIVITY since the
       # last switch — on a completely quiet DB (no writes), postgres
-      # never auto-switches. Sunday-afternoon prod traffic dipped below
-      # the timer threshold 2026-05-17 13:30-13:50 UTC and this rule
-      # fired despite a healthy archiver (failed_count=0, manual
-      # pg_switch_wal succeeded immediately).
-      # Threshold raised 10m → 30m (post-mortem 2026-05-17). The
-      # primary R5-17 alert (WalArchiveFailing on increase of
-      # failed_count) catches the real "archive_command failing"
-      # case bullet-proof; this stale-side rule is only a back-up
-      # signal, so longer for-window is fine. 30m = 30x baseline
-      # archive_timeout, still well within the PITR-degradation
-      # window (14d WAL retention).
+      # never auto-switches and `last_archive_age` grows monotonically.
+      #
+      # History:
+      #   2026-05-17 13:30 UTC — fired during Sunday-afternoon traffic
+      #     dip (sku_forecasting xact_commit ≈ 0 for ~20min). Healthy
+      #     archiver, false positive. Post-mortem: threshold 10m → 30m,
+      #     for-window 0m → 15m (commit 7f22fa2).
+      #   2026-05-18 10:18 UTC — fired AGAIN. Same root cause (Monday
+      #     morning, ~17h since last commit on sku_forecasting). The
+      #     "longer threshold" fix didn't actually solve the false-
+      #     positive — it just delayed it. Manual pg_switch_wal()
+      #     showed archive_command healthy: archived_count 100→101,
+      #     failed_count=0, last_failed_time=NULL.
+      #
+      # Enterprise fix (2026-05-18): the *real* invariant is
+      # "archive is stale WHILE the DB is busy". Express it as an AND.
+      # `rate()` over 30m on the working DB's commit counter approximates
+      # "is the DB doing real work?" — on quiet weekends/nights it's ~0,
+      # on a live workload it's hundreds/sec. Threshold 5 commits / 30m
+      # (well below any real workload, well above scrape noise).
+      #
+      # `on()` joins across the differently-labeled metrics (archiver
+      # is server-scoped, xact_commit is db-scoped). `absent()` clause
+      # preserved so exporter outage still pages.
+      #
+      # The primary R5-17 alert (WalArchiveFailing on
+      # `increase(failed_count) > 0`) catches the real
+      # "archive_command broken" case bullet-proof — this stale-side
+      # rule is a backup signal only; the AND with activity removes
+      # the quiet-DB false-positive class entirely.
       - alert: WalArchiveStale
         expr: |
-          pg_stat_archiver_last_archive_age{job="postgres"} > 1800
-            or absent(pg_stat_archiver_last_archive_age{job="postgres"})
+          (
+            pg_stat_archiver_last_archive_age{job="postgres"} > 1800
+            and on()
+            increase(pg_stat_database_xact_commit{datname="sku_forecasting",job="postgres"}[30m]) > 5
+          )
+          or absent(pg_stat_archiver_last_archive_age{job="postgres"})
         for:   15m
         labels:
           severity: warning
           team:     forecasting
         annotations:
-          summary:     "Postgres WAL archive idle >30 min (archive_timeout is 60s)"
-          description: "No new WAL segment archived in 30 min. On a busy DB this is suspicious — archive_command may be stuck retrying. On a fully idle DB this can be a false positive (archive_timeout only forces a switch on WAL activity, not on a wall-clock timer). Primary signal: WalArchiveFailing on failed_count > 0. Inspect: `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. If failed_count = 0 and last_failed_time is null, this is likely a quiet-period false positive."
+          summary:     "Postgres WAL archive idle >30 min while DB has activity"
+          description: "No new WAL segment archived in 30 min AND `sku_forecasting` saw >5 commits in the same window — archive_command may be stuck retrying. Inspect: `docker exec docker-postgres-1 psql -U sku -d postgres -c 'SELECT * FROM pg_stat_archiver'`. If failed_count > 0, switch to WalArchiveFailing for the canonical diagnosis. If failed_count = 0 but archive is genuinely stale on an active DB, suspect S3 outage / Beget key rotation / Lockbox SA expiry. Quiet-DB false positives can no longer fire here (R5-17 enterprise fix 2026-05-18)."
 
   - name: container-lifecycle
     rules:
