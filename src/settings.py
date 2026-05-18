@@ -62,6 +62,18 @@ class Settings(BaseSettings):
         env_file=None,           # Lockbox bootstrap handles env injection.
         case_sensitive=False,    # env vars conventionally upper-case.
         extra="ignore",          # don't fail on unknown env vars.
+        # R6-2 (2026-05-18) — `model_signing_key` and `model_cache_max`
+        # collide with pydantic's reserved `model_` namespace (used for
+        # `model_config`, `model_validate`, `model_dump`, etc). Pydantic
+        # 2.x emits a UserWarning at class definition time; pydantic 3.x
+        # may upgrade that to a hard PydanticUserError, which would
+        # crash Settings construction → block app startup. Disabling
+        # the protected namespace check is the right shape here: our
+        # field names refer to the ML *model artefact* (not pydantic's
+        # data-model concept), they're already in Lockbox keys and
+        # .env.example across the org, and renaming would be a
+        # breaking change cross-repo for a cosmetic warning.
+        protected_namespaces=(),
     )
 
     # ── Environment / bootstrap ───────────────────────────────────────

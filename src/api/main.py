@@ -50,7 +50,7 @@ import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.auth.jwt_auth import (
     AuthContext, create_access_token, get_current_client, require_client_access,
@@ -536,6 +536,13 @@ class PredictRequest(BaseModel):
         return v
 
 class PredictResponse(BaseModel):
+    # R6-2 (2026-05-18) — `model_source` / `model_name` fields collide
+    # with pydantic's reserved `model_` namespace. Disable the check
+    # — these refer to the ML model artefact, not pydantic's data-model
+    # concept; the field names are public API and renaming would break
+    # frontend + grpc clients.
+    model_config = ConfigDict(protected_namespaces=())
+
     sku: str
     client_id: str
     forecast: list[float]
@@ -856,6 +863,9 @@ async def auth_signup(req: SignupRequest, http_req: Request):
 
 
 class SignupVerifyResponse(BaseModel):
+    # R6-2 — same `model_` namespace collision as PredictResponse.
+    model_config = ConfigDict(protected_namespaces=())
+
     client_id:   str
     plan:        str
     model_name:  str
