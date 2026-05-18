@@ -71,10 +71,27 @@ echo "[$(date -u +%FT%TZ)] base_backup: complete"
 
 # Push success-timestamp to pushgateway (for BasebackupStale alert
 # similar to BackupStale — TODO add the alert rule).
+#
+# R6-6 (post-mortem 2026-05-18) — 3-attempt retry with exponential
+# backoff. Same rationale as backup.sh: transient docker-network blip
+# during push silently drops the metric, surfacing as a stale alert
+# many hours later. Worst-case adds 50s to the weekly base backup.
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
 NOW=$(date -u +%s)
-curl -fsS --max-time 5 -X PUT \
-    --data-binary "# TYPE sku_base_backup_last_success_timestamp_seconds gauge
+push_ok=0
+for delay in 0 5 15; do
+    if [ "$delay" -gt 0 ]; then
+        sleep "$delay"
+    fi
+    if curl -fsS --max-time 5 -X PUT \
+            --data-binary "# TYPE sku_base_backup_last_success_timestamp_seconds gauge
 sku_base_backup_last_success_timestamp_seconds $NOW
-" "$PUSHGATEWAY_URL/metrics/job/base_backup/instance/sku-forecasting" >/dev/null 2>&1 || \
-    echo "[$(date -u +%FT%TZ)] base_backup: pushgateway push failed (non-fatal)"
+" "$PUSHGATEWAY_URL/metrics/job/base_backup/instance/sku-forecasting" >/dev/null 2>&1; then
+        echo "[$(date -u +%FT%TZ)] base_backup: pushed (delay=${delay}s)"
+        push_ok=1
+        break
+    fi
+done
+if [ "$push_ok" -ne 1 ]; then
+    echo "[$(date -u +%FT%TZ)] base_backup: pushgateway push failed after 3 attempts (non-fatal)"
+fi

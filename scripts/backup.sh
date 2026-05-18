@@ -84,16 +84,35 @@ echo "[$(date -u +%FT%TZ)] backup complete"
 
 # Push success-timestamp to Prometheus pushgateway. Prometheus scrapes
 # pushgateway and the BackupStale alert (alerts.yml) compares this
-# against `time()`. If push fails (e.g. pushgateway is down), the
-# backup itself is still considered successful — the alert will simply
-# fire on staleness, which is the correct fail-loud behaviour.
+# against `time()`. If push fails the backup itself is still considered
+# successful — the alert will fire on staleness, which is the correct
+# fail-loud behaviour.
+#
+# R6-6 (post-mortem 2026-05-18) — added 3-attempt retry with exponential
+# backoff. Without retry, a transient docker-network blip in the ~2s
+# scrape window between dump-complete and push (observed in prod
+# 2026-05-18 02:10:04 UTC) silently drops the metric for the full
+# scrape interval, surfacing 25h later as a critical BackupStale alert
+# even though the dump itself was on S3 and fine. Each attempt is
+# bounded at 5s; total worst-case adds 5+15+30=50s to the backup
+# run, which is well within the cron cadence.
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
 NOW=$(date -u +%s)
-if curl -fsS --max-time 5 -X PUT \
-        --data-binary "# TYPE sku_backup_last_success_timestamp_seconds gauge
+push_ok=0
+for delay in 0 5 15; do
+    if [ "$delay" -gt 0 ]; then
+        sleep "$delay"
+    fi
+    if curl -fsS --max-time 5 -X PUT \
+            --data-binary "# TYPE sku_backup_last_success_timestamp_seconds gauge
 sku_backup_last_success_timestamp_seconds $NOW
 " "$PUSHGATEWAY_URL/metrics/job/backup/instance/sku-forecasting" >/dev/null 2>&1; then
-    echo "[$(date -u +%FT%TZ)] pushed sku_backup_last_success_timestamp_seconds=$NOW"
-else
-    echo "[$(date -u +%FT%TZ)] WARNING: failed to push to $PUSHGATEWAY_URL (BackupStale alert will fire on next eval)" >&2
+        echo "[$(date -u +%FT%TZ)] pushed sku_backup_last_success_timestamp_seconds=$NOW (after ${delay}s delay)"
+        push_ok=1
+        break
+    fi
+    echo "[$(date -u +%FT%TZ)] WARNING: push attempt (delay=${delay}s) failed — retrying" >&2
+done
+if [ "$push_ok" -ne 1 ]; then
+    echo "[$(date -u +%FT%TZ)] ERROR: failed to push to $PUSHGATEWAY_URL after 3 attempts (BackupStale alert will fire on next eval)" >&2
 fi
