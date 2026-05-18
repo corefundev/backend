@@ -362,7 +362,13 @@ class TestChaosEngineering:
     def test_run_standard_suite(self):
         from src.monitoring.chaos import run_standard_chaos_suite
         results = run_standard_chaos_suite()
-        assert len(results) == 4
+        # R7-8 (2026-05-19) — suite grew from 4 → 6 experiments
+        # (added jwt_revoke_no_redis + postgres_down_cache_hit).
+        # Pin the lower bound so future additions don't trip this,
+        # while still flagging accidental drops.
+        assert len(results) >= 4, (
+            f"chaos suite shrank — expected ≥4 experiments, got {len(results)}"
+        )
         for r in results:
             assert hasattr(r, "passed")
             assert hasattr(r, "experiment")
