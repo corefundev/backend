@@ -64,6 +64,42 @@ def assert_production_config_safe() -> None:
     if email_provider == "console":
         hard_fails.append("EMAIL_PROVIDER=console (OTPs would be printed to logs, not emailed)")
 
+    # R7-4 (2026-05-19) — extend hard-fail set with two checks that
+    # silently degrade prod if misconfigured.
+    #
+    # ADMIN_API_KEY empty → no way to mint admin JWTs → ops scripts
+    # (back-office UI, manual re-train, audit-verify cron) all break.
+    # Currently a soft drift; making it hard means a Lockbox typo
+    # crashes the container at boot instead of bricking ops support 12h
+    # later when someone tries to re-train a stuck job.
+    admin_api_key = (os.environ.get("ADMIN_API_KEY") or "").strip()
+    if not admin_api_key:
+        hard_fails.append(
+            "ADMIN_API_KEY is empty (no admin path — ops scripts + "
+            "back-office UI + scheduled audit-verify will all fail 401)"
+        )
+    elif len(admin_api_key) < 32:
+        hard_fails.append(
+            f"ADMIN_API_KEY is only {len(admin_api_key)} chars "
+            "(must be ≥32 chars; HS256 minimum; "
+            "`openssl rand -hex 32`)"
+        )
+
+    # R5-M3 mandate: prod database connections MUST go through pgbouncer
+    # (transaction-pool, port 6432). Direct postgres:5432 connections
+    # exhaust pg's connection slots on traffic spikes — pgbouncer
+    # demultiplexes hundreds of API workers onto a handful of real pg
+    # backends. The R5-M3 cutover (2026-05-17) made pgbouncer the
+    # canonical route; this check pins it so a future Lockbox edit
+    # can't silently revert.
+    db_url = os.environ.get("DATABASE_URL") or ""
+    if db_url and ("pgbouncer" not in db_url) and (":6432" not in db_url):
+        hard_fails.append(
+            "DATABASE_URL bypasses pgbouncer (must contain `pgbouncer` "
+            "host or `:6432` port — R5-M3 mandate). Direct :5432 will "
+            "exhaust postgres slots on traffic spikes."
+        )
+
     # Audit R2-5 (2026-05-15): MODEL_SIGNING_KEY enforcement is a
     # SOFT WARNING for now, not a hard-fail. Rationale:
     # `src/storage/backend.py:_signing_key()` falls back to

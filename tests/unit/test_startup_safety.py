@@ -32,6 +32,8 @@ def clean_env(monkeypatch):
     for k in (
         "APP_ENV", "DISABLE_CAPTCHA", "EMAIL_PROVIDER",
         "EMAIL_FROM", "JWT_SECRET", "JWT_SECRET_KEY", "MODEL_SIGNING_KEY",
+        # R7-4 (2026-05-19) — new prod-gate checks: admin key + pgbouncer
+        "ADMIN_API_KEY", "DATABASE_URL",
     ):
         monkeypatch.delenv(k, raising=False)
     return monkeypatch
@@ -44,6 +46,10 @@ def _valid_prod(env):
     env.setenv("EMAIL_FROM", "noreply@example.com")
     env.setenv("JWT_SECRET_KEY", "x" * 32)   # R4-12: actual var name
     env.setenv("MODEL_SIGNING_KEY", "y" * 64)  # 32-byte hex; audit R2-5
+    # R7-4 — fill the new mandatory prod-config slots so tests for
+    # OTHER guard branches don't trip these by accident.
+    env.setenv("ADMIN_API_KEY", "a" * 32)
+    env.setenv("DATABASE_URL", "postgresql://sku:pw@pgbouncer:6432/sku_forecasting")
 
 
 # ── No-op cases ──────────────────────────────────────────────────────────
@@ -151,6 +157,10 @@ def test_email_provider_unset_only_warns(clean_env, caplog):
     clean_env.setenv("EMAIL_FROM", "noreply@example.com")
     clean_env.setenv("JWT_SECRET_KEY", "x" * 32)   # R4-12: actual var name
     clean_env.setenv("MODEL_SIGNING_KEY", "y" * 64)  # required since R2-5
+    # R7-4 — mandatory prod-config slots so this test doesn't trip
+    # ADMIN_API_KEY / DATABASE_URL hard-fail gates added today.
+    clean_env.setenv("ADMIN_API_KEY", "a" * 32)
+    clean_env.setenv("DATABASE_URL", "postgresql://sku:pw@pgbouncer:6432/sku")
     with caplog.at_level(logging.WARNING):
         _get_check()()  # no raise
 
@@ -161,3 +171,64 @@ def test_disable_captcha_zero_passes(clean_env):
     _valid_prod(clean_env)
     clean_env.setenv("DISABLE_CAPTCHA", "0")
     _get_check()()  # no raise
+
+
+# ── R7-4 (2026-05-19): ADMIN_API_KEY + DATABASE_URL hard fails ─────────────
+
+def test_fail_when_admin_api_key_missing(clean_env):
+    """No ADMIN_API_KEY in prod → no admin path → ops scripts brick.
+    Failing at boot beats discovering 12h later that audit-verify
+    cron can't authenticate."""
+    _valid_prod(clean_env)
+    clean_env.delenv("ADMIN_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ADMIN_API_KEY"):
+        _get_check()()
+
+
+def test_fail_when_admin_api_key_too_short(clean_env):
+    """ADMIN_API_KEY < 32 chars in prod → HS256 floor violation."""
+    _valid_prod(clean_env)
+    clean_env.setenv("ADMIN_API_KEY", "short")
+    with pytest.raises(RuntimeError, match="ADMIN_API_KEY"):
+        _get_check()()
+
+
+def test_fail_when_database_url_bypasses_pgbouncer(clean_env):
+    """Direct postgres:5432 in DATABASE_URL → R5-M3 mandate violation."""
+    _valid_prod(clean_env)
+    clean_env.setenv(
+        "DATABASE_URL",
+        "postgresql://sku:pw@postgres:5432/sku_forecasting",
+    )
+    with pytest.raises(RuntimeError, match="pgbouncer"):
+        _get_check()()
+
+
+def test_pgbouncer_in_hostname_passes(clean_env):
+    """`pgbouncer` in hostname is the canonical R5-M3 shape."""
+    _valid_prod(clean_env)
+    clean_env.setenv(
+        "DATABASE_URL",
+        "postgresql://sku:pw@pgbouncer:6432/sku_forecasting",
+    )
+    _get_check()()  # no raise
+
+
+def test_explicit_6432_port_passes(clean_env):
+    """Some deploys use `127.0.0.1:6432` or `localhost:6432` — port-only
+    detection is the fallback."""
+    _valid_prod(clean_env)
+    clean_env.setenv(
+        "DATABASE_URL",
+        "postgresql://sku:pw@127.0.0.1:6432/sku_forecasting",
+    )
+    _get_check()()  # no raise
+
+
+def test_empty_database_url_doesnt_fire(clean_env):
+    """If DATABASE_URL is empty/missing, R5-M3 check is silent — the
+    file-backend dev path doesn't use it. The check fires ONLY when
+    a wrong URL is configured, not when none is."""
+    _valid_prod(clean_env)
+    clean_env.delenv("DATABASE_URL", raising=False)
+    _get_check()()  # no raise (empty → skip)

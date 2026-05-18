@@ -69,8 +69,10 @@ echo "  base.tar.gz sha=$LOCAL_SHA  remote_etag=$REMOTE_ETAG"
 rm -rf "$WORK_DIR"
 echo "[$(date -u +%FT%TZ)] base_backup: complete"
 
-# Push success-timestamp to pushgateway (for BasebackupStale alert
-# similar to BackupStale — TODO add the alert rule).
+# Push success-timestamp to pushgateway. Drives BaseBackupStale
+# (>9d critical) + BaseBackupWarning (>8d warning) alerts in
+# docker/prometheus/alerts.yml — both exist since the M7 audit
+# pass 2026-05-13.
 #
 # R6-6 (post-mortem 2026-05-18) — 3-attempt retry with exponential
 # backoff. Same rationale as backup.sh: transient docker-network blip
