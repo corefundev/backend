@@ -1,0 +1,55 @@
+"""
+Model load factory for `service_cache.get_or_load`.
+
+R5-M1 slice 8 (2026-05-18) — extracted from src/api/main.py so
+both `main.py` (`/reload` handler) and `routers/inference.py`
+(`/predict` cold-cache path) can import the same cold-load
+function without circular import on main.py.
+
+This module pulls the ML stack (`ForecastingService`,
+`ClientStorage`) — so we keep it OUT of `src/api/service_cache.py`
+(which is intentionally ML-stack-free, only LRU + locks).
+"""
+from __future__ import annotations
+
+import logging
+import os
+
+from fastapi import HTTPException
+
+from src.models.fallback import ForecastingService
+from src.pipeline.inference_utils import get_config as _get_cfg
+from src.storage.backend import ClientStorage
+
+
+logger = logging.getLogger(__name__)
+
+CONFIG_PATH: str = os.getenv("CONFIG_PATH", "configs/config.yaml")
+
+
+def load_service_for_client(client_id: str) -> ForecastingService:
+    """Cold-load factory: construct `ForecastingService`, try
+    primary, fall back to fallback artefact on failure. Raises
+    HTTPException 404 (no trained model) or 503 (primary +
+    fallback both unavailable) — those propagate through
+    `service_cache.get_or_load` to the route handler.
+    """
+    config  = _get_cfg(CONFIG_PATH)
+    storage = ClientStorage(client_id)
+    service = ForecastingService(config)
+    if not storage.model_exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No trained model for client '{client_id}'. Run training first.",
+        )
+    try:
+        service.load_primary(storage)
+    except Exception as e:
+        logger.error(f"Primary load failed for {client_id}: {e}")
+        if not storage.fallback_exists():
+            raise HTTPException(
+                status_code=503,
+                detail="Primary unavailable, no fallback",
+            )
+        service.load_fallback_from_storage(storage)
+    return service

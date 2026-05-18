@@ -119,6 +119,63 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_inference_domain_lives_in_router():
+    """The `inference` domain (R5-M1 slice 8) — 5 routes + 3 schemas
+    + 1 helper — lives in `src/api/routers/inference.py`. Slice 8
+    is the most-prep-dependent slice; verify all supporting modules:
+      * src/api/metrics.py — Prometheus counters extraction
+      * src/api/loaders.py — load factory extraction
+      * src/api/service_cache.py — get_or_load orchestration (slice-8 prep)
+    """
+    inf_router = _ROUTERS_DIR / "inference.py"
+    assert inf_router.is_file(), (
+        "src/api/routers/inference.py must exist after R5-M1 slice 8"
+    )
+    text = inf_router.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('get',  '/clients/{client_id}/forecasts'),
+        ('get',  '/clients/{client_id}/anomalies'),
+        ('get',  '/clients/{client_id}/uploads/{upload_id}/skus'),
+        ('post', '/clients/{client_id}/predict'),
+        ('post', '/clients/{client_id}/predict/batch'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"inference.py must own {method.upper()} {path}"
+        )
+    # Cache uses public DI surface (not internal _services dict).
+    assert "from src.api.service_cache import get_or_load" in text
+    assert "from src.api.loaders import" in text
+    assert "from src.api.metrics import" in text
+    # R5-2 deadlock fix preserved.
+    assert "R5-2" in text and "asyncio.gather" in text
+
+    # Supporting modules exist.
+    for name in ("metrics.py", "loaders.py", "service_cache.py"):
+        assert (_BACKEND / "src" / "api" / name).is_file(), (
+            f"src/api/{name} must exist as slice-8 prep"
+        )
+
+    main_text = _MAIN.read_text()
+    for path in (
+        "/clients/{client_id}/predict",
+        "/clients/{client_id}/predict/batch",
+        "/clients/{client_id}/forecasts",
+        "/clients/{client_id}/anomalies",
+    ):
+        for method in ('get', 'post'):
+            assert f'@app.{method}("{path}"' not in main_text, (
+                f"main.py still has @app.{method.upper()} for {path}"
+            )
+    assert "class PredictRequest" not in main_text, (
+        "PredictRequest schema must move with the routes"
+    )
+    assert "_load_processed_for_sku" not in main_text, (
+        "_load_processed_for_sku helper must move with the routes"
+    )
+    assert "inference_router" in main_text
+
+
 def test_training_domain_lives_in_router():
     """The `training` domain (R5-M1 slice 7) — 3 routes — lives in
     `src/api/routers/training.py`. Also pins:
