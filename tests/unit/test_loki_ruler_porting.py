@@ -107,7 +107,9 @@ def test_legacy_promql_alerts_remain_removed():
     """The 3 LogQL-in-PromQL alerts removed from prometheus
     alerts.yml in commit 7cf0f9a must NOT reappear there. Their home
     is now loki-rules.yml exclusively."""
-    text = (_BACKEND / "docker" / "alerts.yml").read_text()
+    # R6-5 (2026-05-18) — alerts.yml moved into docker/prometheus/
+    # to enable directory bind-mount (fixes single-file inode trap).
+    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
     # They may appear in REMOVED comments, but not as real `- alert: X` defs.
     # Strict: search for the `- alert: <name>` heading at start of line.
     import re

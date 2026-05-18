@@ -820,8 +820,15 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      # R6-5 (2026-05-18) — bind-mount the directory, not single files.
+      # Docker bind-mounts single files at fixed inode at container
+      # start; a host-side atomic rewrite (scp/cp/mv) replaces the
+      # inode, but the container keeps reading the original. Directory
+      # bind-mounts resolve paths on every syscall, so editing files
+      # inside the directory propagates immediately — `/-/reload`
+      # alone is enough, no restart needed. Overlay onto
+      # /etc/prometheus/ (we don't use the image's default consoles/).
+      - ./prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

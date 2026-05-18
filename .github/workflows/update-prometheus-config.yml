@@ -56,12 +56,19 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          # Sync the four files the prometheus + blackbox containers
-          # care about. Bind-mounts in /srv/backend/docker/ pick them up
-          # at next read (prometheus reload, blackbox restart).
+          # R6-5 (2026-05-18) — prometheus.yml + alerts.yml moved into
+          # docker/prometheus/ directory so compose bind-mounts the
+          # directory (not individual files) and host-side rewrites
+          # propagate to the running container without restart.
+          # Send the prometheus/ directory recursively + remaining
+          # top-level files.
+          ssh -q "${VPS_USER}@${VPS_HOST}" \
+              "mkdir -p /srv/backend/docker/prometheus"
           scp -q \
-              docker/prometheus.yml \
-              docker/alerts.yml \
+              docker/prometheus/prometheus.yml \
+              docker/prometheus/alerts.yml \
+              "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/prometheus/"
+          scp -q \
               docker/ssl-exporter.yml \
               docker/docker-compose.yml \
               "${VPS_USER}@${VPS_HOST}:/srv/backend/docker/"
@@ -81,7 +88,12 @@ jobs:
           docker compose $COMPOSE_ARGS up -d ssl-exporter
           docker compose $COMPOSE_ARGS restart ssl-exporter
 
-          PROM=$(docker ps --filter ancestor=prom/prometheus:v2.51.2 --format '{{.ID}}' | head -1)
+          # R6-4 (2026-05-18) — filter by container name, not by
+          # pinned image ancestor. Prod has rolled prom/prometheus from
+          # v2.51.2 → v2.55.1 (#R4-20); the ancestor filter would have
+          # returned empty and aborted the workflow. The container
+          # name is stable across image upgrades — use it.
+          PROM=$(docker ps -f name=docker-prometheus-1 --format '{{.ID}}' | head -1)
           if [ -z "$PROM" ]; then
               echo "ERROR: prometheus container not running" >&2
               exit 1
@@ -145,5 +157,5 @@ jobs:
 
           set -e
           echo "--- on-disk prometheus.yml ---"
-          tail -25 /srv/backend/docker/prometheus.yml
+          tail -25 /srv/backend/docker/prometheus/prometheus.yml
           EOF

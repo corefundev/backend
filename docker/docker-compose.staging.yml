@@ -47,8 +47,11 @@ services:
   # exist on the prod stack (postgres-replica, ssl-pg-tls).
   prometheus:
     volumes: !override
+      # R6-5 — staging keeps its own prometheus.staging.yml (different
+      # scrape targets) but reuses the shared alerts.yml from the
+      # prometheus/ directory.
       - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro
-      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
 
   # Heavy services we don't need on staging — disable via a non-default
