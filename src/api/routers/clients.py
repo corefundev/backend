@@ -1,0 +1,269 @@
+"""
+Client management API — admin registration, listing, single read,
+update, plus the per-client api-key rotation flow.
+
+R5-M1 (2026-05-18) slice 6: extracted from src/api/main.py. 5
+routes, 2 request schemas, 1 safe-dict projector + safe-fields
+allowlist (R4-2). Audit-event emissions (R3-24 rate-limit on
+rotate, R3-25-style admin-action logging on update) preserved
+verbatim. Cache invalidation on /clients/{id} PUT goes through
+the public `service_cache.invalidate` (slice-5 prep, 80d1d86).
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
+
+from src.api._helpers import assert_json_depth as _assert_json_depth
+from src.api.service_cache import invalidate as invalidate_service_cache
+from src.audit import (
+    EVT_ADMIN_ACTION,
+    EVT_PASSWORD_CHANGE,
+    record_event,
+)
+from src.auth.api_keys import generate_api_key, hash_api_key
+from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
+from src.auth.signup_rate_limit import (
+    RateLimited,
+    check_rotate_attempt,
+    client_ip,
+)
+from src.clients.registry import ClientRecord, get_registry
+from src.plans.plans import Plan, get_plan_spec
+from src.storage.backend import ClientStorage
+
+
+router = APIRouter(tags=["clients"])
+
+
+class RegisterClientRequest(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=64)
+    config: dict = Field(default_factory=dict)
+    # Business plan allows up to 365 days; plan-specific clipping enforced later.
+    horizon: int = Field(14, ge=1, le=365)
+    notes: Optional[str] = Field(None, max_length=2000)
+    plan: str = Field("free", min_length=1, max_length=16, description="free | start | business")
+
+    @field_validator("config")
+    @classmethod
+    def _config_depth_bounded(cls, v: dict) -> dict:
+        _assert_json_depth(v, max_depth=10)
+        return v
+
+
+class UpdateClientRequest(BaseModel):
+    plan:    Optional[str] = Field(None, description="free | start | business")
+    # The autoregressive predict loop supports arbitrary horizons; plan clip
+    # keeps each tier to its own ceiling (Free 7, Start 90, Business 365).
+    horizon: Optional[int] = Field(None, ge=1, le=365)
+    notes:   Optional[str] = None
+
+
+# Audit R4-2 — fields safe to expose in /clients responses. Excludes:
+#   • api_key_hash — bcrypt-12 hash; leakage enables offline brute
+#   • email_canonical — internal canonical form, may differ from
+#     display (gmail dots / +alias stripped); operators can read it
+#     via /internal/audit/verify if needed, no API surface
+#   • oauth_subject — provider's stable user-id, identity-linkage PII
+_CLIENT_SAFE_FIELDS = frozenset({
+    "client_id", "config", "storage_path",
+    "created_at", "last_trained_at", "last_mlflow_run_id",
+    "last_wmape", "last_mase",
+    "status", "model_version", "horizon", "notes",
+    "plan", "training_runs_this_month", "training_runs_window_start",
+    "trained_sku_count",
+    "email", "email_verified_at", "oauth_provider",
+})
+
+
+def _client_to_safe_dict(rec) -> dict:
+    """Project a ClientRecord to a dict containing only fields safe to
+    expose in API responses (audit R4-2). Existing frontends only read
+    fields from this set; api_key_hash / oauth_subject / email_canonical
+    were never user-facing — they were just incidentally serialised by
+    `rec.__dict__`."""
+    return {k: v for k, v in rec.__dict__.items() if k in _CLIENT_SAFE_FIELDS}
+
+
+@router.post("/clients", status_code=201)
+async def register_client(
+    req: RegisterClientRequest,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Admin-only client registration. Returns a freshly-generated `api_key`
+    in the response body — this is the ONLY time it's shown. The server
+    only ever stores its bcrypt hash. If the user loses this key they
+    must rotate via POST /clients/{id}/api-key/rotate.
+    """
+    auth.require_role("admin")
+    try:
+        plan = Plan(req.plan)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown plan: {req.plan!r}. Expected one of {[p.value for p in Plan]}",
+        )
+
+    registry = get_registry()
+    if registry.get(req.client_id) is not None:
+        raise HTTPException(409, detail=f"client_id {req.client_id!r} already exists")
+
+    api_key  = generate_api_key()
+    key_hash = hash_api_key(api_key)
+
+    storage  = ClientStorage(req.client_id)
+    record   = ClientRecord(
+        client_id=req.client_id,
+        config=req.config,
+        storage_path=storage.path(""),
+        horizon=req.horizon,
+        notes=req.notes,
+        plan=plan.value,
+        api_key_hash=key_hash,
+    )
+    registry.register(record)
+    return {
+        "client_id":    req.client_id,
+        "storage_path": record.storage_path,
+        "plan":         plan.value,
+        "model_name":   get_plan_spec(plan).model_display_name,
+        # ⚠ Plain-text api_key — shown once. Hash is what we persist.
+        "api_key":      api_key,
+        "warning":      "Сохраните api_key прямо сейчас. Повторно показан не будет.",
+    }
+
+
+@router.post("/clients/{client_id}/api-key/rotate")
+async def rotate_api_key(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Issue a fresh api_key for `client_id`, invalidating the previous one.
+
+    Authorisation:
+      • Admin can rotate any client's key.
+      • A client can rotate their own key (require_client_access).
+
+    Effect: any device/script holding the old key gets 401 on next
+    /auth/token. JWTs issued before the rotation remain valid until
+    their exp (1h by default).
+    """
+    require_client_access(client_id, auth)
+
+    # Audit R3-24 — per-client rate-limit so a compromised key or a
+    # misbehaving script can't spam rotations (each call burns bcrypt
+    # cost-12 + an audit_log row). Admin can still rotate any client's
+    # key but is also subject to the cap (defence-in-depth against an
+    # admin-token leak loop).
+    try:
+        check_rotate_attempt(client_id)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
+
+    registry = get_registry()
+    record   = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    new_key  = generate_api_key()
+    new_hash = hash_api_key(new_key)
+    registry.update(client_id, api_key_hash=new_hash)
+
+    record_event(
+        event_type=EVT_PASSWORD_CHANGE, event_subtype="api_key_rotate",
+        client_id=client_id, actor_email=record.email_canonical or record.email,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="api_key", target_id=client_id,
+        metadata={"actor_role": ",".join(auth.roles or [])},
+    )
+
+    return {
+        "client_id": client_id,
+        "api_key":   new_key,
+        "warning":   "Сохраните новый api_key. Старый теперь недействителен.",
+    }
+
+
+@router.get("/clients")
+async def list_clients(auth: AuthContext = Depends(get_current_client)):
+    auth.require_role("admin")
+    return [_client_to_safe_dict(c) for c in get_registry().list_clients()]
+
+
+@router.get("/clients/{client_id}")
+async def get_client(client_id: str, auth: AuthContext = Depends(get_current_client)):
+    require_client_access(client_id, auth)
+    rec = get_registry().get(client_id)
+    if not rec:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+    return _client_to_safe_dict(rec)
+
+
+@router.put("/clients/{client_id}")
+async def update_client(
+    client_id: str,
+    req: UpdateClientRequest,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """
+    Admin-only update of a client's plan / horizon / notes.
+    Changing the plan takes effect immediately — subsequent requests go
+    through the new limits. Existing quota counters are kept as-is.
+    """
+    auth.require_role("admin")
+
+    updates: dict = {}
+    if req.plan is not None:
+        try:
+            updates["plan"] = Plan(req.plan).value
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown plan: {req.plan!r}",
+            )
+    if req.horizon is not None:
+        updates["horizon"] = req.horizon
+    if req.notes is not None:
+        updates["notes"] = req.notes
+
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields to update")
+
+    registry = get_registry()
+    existing = registry.get(client_id)
+    if existing is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    registry.update(client_id, **updates)
+    updated = registry.get(client_id)
+    # Invalidate any cached model for this client — plan change might
+    # affect horizon cap baked into the model cache.
+    invalidate_service_cache(client_id)
+
+    # Snapshot of changed fields with old/new values (notes truncated to
+    # avoid bloating the audit table with multi-paragraph operator notes).
+    changes = {}
+    for k, new_v in updates.items():
+        old_v = getattr(existing, k, None)
+        if k == "notes" and isinstance(old_v, str):
+            old_v = old_v[:120]
+        if k == "notes" and isinstance(new_v, str):
+            new_v = new_v[:120]
+        changes[k] = {"old": old_v, "new": new_v}
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_update",
+        client_id=client_id, actor_email=auth.client_id,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+        metadata={"changes": changes},
+    )
+    return updated.__dict__

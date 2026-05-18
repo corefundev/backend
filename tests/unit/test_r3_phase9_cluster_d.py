@@ -69,12 +69,33 @@ def test_check_rotate_attempt_raises_above_cap(monkeypatch):
 
 
 def test_rotate_route_wires_rate_limit():
-    """The /api-key/rotate handler must call check_rotate_attempt."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find("async def rotate_api_key")
-    assert start > 0, "rotate_api_key handler missing"
-    end = text.find('@app.get("/clients",', start)
-    block = text[start:end]
+    """The /api-key/rotate handler must call check_rotate_attempt.
+
+    R5-M1 slice 6 (2026-05-18) — the handler moved to
+    routers/clients.py. Try both locations; the R3-24 invariant is
+    about wiring, not file path.
+    """
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "clients.py",
+    )
+    block = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        start = text.find("async def rotate_api_key")
+        if start < 0:
+            continue
+        end_app    = text.find('@app.',    start + 1)
+        end_router = text.find('@router.', start + 1)
+        ends = [e for e in (end_app, end_router) if e > 0]
+        end = min(ends) if ends else -1
+        block = text[start:end] if end > 0 else text[start:]
+        break
+    assert block is not None, (
+        "rotate_api_key handler not found in main.py or routers/clients.py"
+    )
     assert "check_rotate_attempt" in block, (
         "rotate_api_key must call check_rotate_attempt (audit R3-24)"
     )

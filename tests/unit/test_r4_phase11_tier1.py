@@ -64,12 +64,44 @@ def test_client_to_safe_dict_excludes_sensitive_fields():
         assert k in safe, f"safe-dict missing public field {k!r}"
 
 
+def _clients_module_text() -> str:
+    """Return the source text of whichever file owns the clients
+    handlers. R5-M1 slice 6 (2026-05-18) moved the routes from
+    main.py to routers/clients.py — these source-level tests must
+    follow the move."""
+    candidates = (
+        _BACKEND / "src" / "api" / "routers" / "clients.py",
+        _BACKEND / "src" / "api" / "main.py",
+    )
+    for f in candidates:
+        if not f.is_file():
+            continue
+        text = f.read_text()
+        if "async def list_clients" in text:
+            return text
+    raise AssertionError(
+        "list_clients handler not found in main.py or routers/clients.py"
+    )
+
+
+def _clients_handler_block(text: str, signature: str) -> str:
+    """Slice out one handler. Stops at the next @app. or @router.
+    decorator (the file may use either)."""
+    start = text.find(signature)
+    assert start > 0, f"handler {signature!r} not found"
+    end_app    = text.find('\n@app.',    start + 1)
+    end_router = text.find('\n@router.', start + 1)
+    ends = [e for e in (end_app, end_router) if e > 0]
+    end = min(ends) if ends else -1
+    return text[start:end] if end > 0 else text[start:]
+
+
 def test_client_safe_fields_whitelist_is_explicit():
     """The whitelist must be a frozenset (immutable) and must contain
     no sensitive field names — guards against a future commit that
     accidentally adds api_key_hash etc back. Source-level (no import,
     survives py3.9 dev box)."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
+    text = _clients_module_text()
     start = text.find("_CLIENT_SAFE_FIELDS = frozenset({")
     assert start > 0, "_CLIENT_SAFE_FIELDS frozenset missing"
     end = text.find("})", start)
@@ -86,12 +118,7 @@ def test_client_safe_fields_whitelist_is_explicit():
 def test_list_clients_handler_uses_safe_dict():
     """Source-level: the /clients (list_clients) handler must project
     each record through _client_to_safe_dict — not rec.__dict__."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    # Find handler block.
-    start = text.find('async def list_clients')
-    assert start > 0
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    block = _clients_handler_block(_clients_module_text(), "async def list_clients")
     assert "_client_to_safe_dict" in block, (
         "list_clients must use _client_to_safe_dict (R4-2)"
     )
@@ -104,11 +131,7 @@ def test_list_clients_handler_uses_safe_dict():
 def test_get_client_handler_uses_safe_dict():
     """Source-level: GET /clients/{id} handler must project through
     _client_to_safe_dict."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    start = text.find('async def get_client(client_id')
-    assert start > 0
-    end = text.find('\n@app.', start + 1)
-    block = text[start:end]
+    block = _clients_handler_block(_clients_module_text(), "async def get_client(client_id")
     assert "_client_to_safe_dict" in block, (
         "get_client must use _client_to_safe_dict (R4-2)"
     )

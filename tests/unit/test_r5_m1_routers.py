@@ -119,6 +119,49 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_clients_domain_lives_in_router():
+    """The `clients` domain (R5-M1 slice 6) — 5 routes — lives in
+    `src/api/routers/clients.py`. Also pins:
+      * `_client_to_safe_dict` + `_CLIENT_SAFE_FIELDS` (audit R4-2)
+        moved alongside the routes, not left behind in main.py.
+      * api-key rotation path keeps the R3-24 rate-limit + audit.
+    """
+    cl_router = _ROUTERS_DIR / "clients.py"
+    assert cl_router.is_file(), (
+        "src/api/routers/clients.py must exist after R5-M1 slice 6"
+    )
+    text = cl_router.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('post', '/clients'),
+        ('post', '/clients/{client_id}/api-key/rotate'),
+        ('get',  '/clients'),
+        ('get',  '/clients/{client_id}'),
+        ('put',  '/clients/{client_id}'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"clients.py must own {method.upper()} {path}"
+        )
+    # R4-2 safe-fields projection moved alongside (not left in main.py).
+    assert "_CLIENT_SAFE_FIELDS" in text and "_client_to_safe_dict" in text
+    # R3-24 rate-limit on rotate.
+    assert "check_rotate_attempt" in text
+    # M6 hoist symbols used from the public surface.
+    assert "from src.audit import" in text
+    assert "from src.auth.signup_rate_limit import" in text
+
+    main_text = _MAIN.read_text()
+    for path in ("/clients", "/clients/{client_id}", "/clients/{client_id}/api-key/rotate"):
+        for method in ('get', 'post', 'put', 'delete', 'patch'):
+            assert f'@app.{method}("{path}"' not in main_text, (
+                f"main.py still has @app.{method.upper()} for {path}"
+            )
+    assert "_CLIENT_SAFE_FIELDS" not in main_text, (
+        "_CLIENT_SAFE_FIELDS must move out of main.py with the routes"
+    )
+    assert "clients_router" in main_text
+
+
 def test_config_domain_lives_in_router():
     """The `config` domain (R5-M1 slice 5) — 5 routes — lives in
     `src/api/routers/config.py`. Slice-5 also requires the
