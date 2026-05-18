@@ -1,27 +1,23 @@
 """
 In-process LRU cache for per-client `ForecastingService` instances.
 
-Extracted from `src/api/main.py` as the prep step for R5-M1 slice 5
-(config domain split). Routers that need to invalidate the cache
-on config-change / training-completion can now import a tiny public
-surface here, without circular-import gymnastics on main.py.
+R5-M1 slice-5 prep (commit 80d1d86) — state extraction.
+R5-M1 slice-8 prep (this commit) — load orchestration extraction.
 
 Public API
 ──────────
-* `invalidate(client_id)` — drop the cached service for one client.
-  Idempotent; safe under concurrent /predict load.
-* `cached_client_ids()` — snapshot of currently-cached client ids
-  (used by GET /internal/state for ops visibility).
+* `invalidate(client_id)` — drop the cached service. Idempotent.
+* `cached_client_ids()` — snapshot of cached client ids (for
+  GET /internal/state).
+* `get_or_load(client_id, *, load_factory)` — fetch the cached
+  service; on miss, call `load_factory(client_id)` under the
+  per-client lock and cache the result.
 
-State (module-level OrderedDicts + a lock) lives here; the
-load-on-cache-miss orchestration (`_get_service`, `_client_lock`,
-`_cache_service`) intentionally stays in main.py because it pulls
-on `ForecastingService`, `ClientStorage`, `_get_cfg`, and
-`CONFIG_PATH` — wiring those into here would bloat the cache
-module into a generic service-factory. They mutate the same
-OrderedDicts via the names imported below; mutation works because
-`from .service_cache import _services` binds a reference to the
-same OrderedDict object.
+The `load_factory` callable is passed in (dependency injection) so
+this module stays clean of the ML stack (`ForecastingService`,
+`ClientStorage`, `_get_cfg`) — those live in `src.api.main` (or
+wherever the caller decides) and the cache module only handles
+LRU + locking.
 
 Audit context (R2-7, 2026-05-15)
 ────────────────────────────────
@@ -37,16 +33,19 @@ at that point so no concurrent reader is holding stale state.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections import OrderedDict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     # Forward type-only import — avoids dragging the ML stack into
     # the cache module at import time.
     from src.services.forecasting_service import ForecastingService
 
+
+logger = logging.getLogger(__name__)
 
 MODEL_CACHE_MAX: int = max(1, int(os.environ.get("MODEL_CACHE_MAX", "256")))
 
@@ -74,3 +73,81 @@ def cached_client_ids() -> list[str]:
     returned list is consistent (not torn mid-eviction)."""
     with _services_lock:
         return list(_services.keys())
+
+
+def _client_lock(client_id: str) -> threading.Lock:
+    """Return (creating if needed) the per-client lock. Bumps LRU
+    recency on every access; evicts oldest when over cap. A lock
+    being evicted mid-flight is fine: the holder still has its
+    reference; only FUTURE acquirers will get a fresh one."""
+    with _services_lock:
+        lk = _per_client_locks.get(client_id)
+        if lk is None:
+            lk = threading.Lock()
+            _per_client_locks[client_id] = lk
+        else:
+            _per_client_locks.move_to_end(client_id)
+        while len(_per_client_locks) > MODEL_CACHE_MAX:
+            _per_client_locks.popitem(last=False)
+        return lk
+
+
+def _cache_service(client_id: str, service: "ForecastingService") -> None:
+    """Insert + bump-to-front + evict-LRU. Caller holds the per-client lock."""
+    with _services_lock:
+        _services[client_id] = service
+        _services.move_to_end(client_id)
+        while len(_services) > MODEL_CACHE_MAX:
+            evicted_id, _ = _services.popitem(last=False)
+            logger.info(
+                "model cache LRU eviction: client=%s (cap=%d)",
+                evicted_id, MODEL_CACHE_MAX,
+            )
+
+
+def get_or_load(
+    client_id: str,
+    *,
+    load_factory: Callable[[str], "ForecastingService"],
+) -> "ForecastingService":
+    """Fetch the cached service; on miss, build via `load_factory`
+    under the per-client lock to prevent the thundering-herd cold
+    load.
+
+    R5-M1 slice 8 prep (2026-05-18) — DI version of the orchestration
+    previously inlined in main.py as `_get_service`. The factory is
+    a callback so this module stays free of ML-stack imports.
+
+    `load_factory` receives `client_id` and must return a fully-
+    initialised `ForecastingService` (or raise HTTPException for the
+    "no trained model" / "primary and fallback unavailable" cases —
+    those propagate up to the route handler unchanged).
+    """
+    # Fast path — already cached, no lock needed (dict get is atomic in
+    # CPython). On cache hit, bump LRU recency under the services lock
+    # so the LRU eviction policy reflects actual usage.
+    cached = _services.get(client_id)
+    if cached is not None:
+        with _services_lock:
+            # Re-check under lock since another thread could have
+            # evicted between our get and the move_to_end call.
+            if client_id in _services:
+                _services.move_to_end(client_id)
+                return _services[client_id]
+
+    with _client_lock(client_id):
+        # Re-check under per-client lock — another thread may have
+        # just populated.
+        cached = _services.get(client_id)
+        if cached is not None:
+            with _services_lock:
+                if client_id in _services:
+                    _services.move_to_end(client_id)
+                    return _services[client_id]
+
+        # Cold-load via the caller-supplied factory. Any HTTPException
+        # raised here (404 no model / 503 primary+fallback unavailable)
+        # propagates to the route handler.
+        service = load_factory(client_id)
+        _cache_service(client_id, service)
+        return service

@@ -112,76 +112,39 @@ REQUEST_COUNT   = Counter("forecast_requests_total",   "Total requests",       [
 REQUEST_LATENCY = Histogram("forecast_latency_seconds", "Predict latency",     ["client_id"])
 FALLBACK_COUNT  = Counter("fallback_model_used_total",  "Fallback model uses", ["client_id"])
 
-def _client_lock(client_id: str) -> _threading.Lock:
-    with _services_lock:
-        lk = _per_client_locks.get(client_id)
-        if lk is None:
-            lk = _threading.Lock()
-            _per_client_locks[client_id] = lk
-        else:
-            _per_client_locks.move_to_end(client_id)
-        # Evict LRU lock when over cap. Mirror the services-dict cap so
-        # the two structures stay roughly in sync. A lock being evicted
-        # mid-flight is fine: the holder still has its reference; only
-        # FUTURE acquirers will get a fresh one.
-        while len(_per_client_locks) > _MODEL_CACHE_MAX:
-            _per_client_locks.popitem(last=False)
-        return lk
-
-
-def _cache_service(client_id: str, service: "ForecastingService") -> None:
-    """Insert + bump-to-front + evict-LRU. Caller holds the per-client lock."""
-    with _services_lock:
-        _services[client_id] = service
-        _services.move_to_end(client_id)
-        while len(_services) > _MODEL_CACHE_MAX:
-            evicted_id, _ = _services.popitem(last=False)
-            logger.info(
-                "model cache LRU eviction: client=%s (cap=%d)",
-                evicted_id, _MODEL_CACHE_MAX,
-            )
+def _load_service_for_client(client_id: str) -> ForecastingService:
+    """Cold-load factory for `service_cache.get_or_load`. R5-M1 slice
+    8 prep (2026-05-18) — the orchestration (LRU + locks) lives in
+    src/api/service_cache.py; this stays here because it pulls
+    `ForecastingService`, `ClientStorage`, `_get_cfg`, and
+    `CONFIG_PATH`. Raises HTTPException (404 / 503) for the
+    no-model / primary-and-fallback-unavailable cases — those
+    propagate through the cache up to the route handler unchanged.
+    """
+    config  = _get_cfg(CONFIG_PATH)
+    storage = ClientStorage(client_id)
+    service = ForecastingService(config)
+    if not storage.model_exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No trained model for client '{client_id}'. Run training first.",
+        )
+    try:
+        service.load_primary(storage)
+    except Exception as e:
+        logger.error(f"Primary load failed for {client_id}: {e}")
+        if not storage.fallback_exists():
+            raise HTTPException(status_code=503, detail="Primary unavailable, no fallback")
+        service.load_fallback_from_storage(storage)
+    return service
 
 
 def _get_service(client_id: str) -> ForecastingService:
-    # Fast path — already cached, no lock needed (dict get is atomic in
-    # CPython). On cache hit, bump LRU recency under the services lock
-    # so the LRU eviction policy reflects actual usage.
-    cached = _services.get(client_id)
-    if cached is not None:
-        with _services_lock:
-            # Re-check under lock since another thread could have
-            # evicted between our get and the move_to_end call. If
-            # evicted, fall through to the slow path below.
-            if client_id in _services:
-                _services.move_to_end(client_id)
-                return _services[client_id]
-
-    with _client_lock(client_id):
-        # Re-check under per-client lock — another thread may have just populated.
-        cached = _services.get(client_id)
-        if cached is not None:
-            with _services_lock:
-                if client_id in _services:
-                    _services.move_to_end(client_id)
-                    return _services[client_id]
-
-        config  = _get_cfg(CONFIG_PATH)
-        storage = ClientStorage(client_id)
-        service = ForecastingService(config)
-        if not storage.model_exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"No trained model for client '{client_id}'. Run training first.",
-            )
-        try:
-            service.load_primary(storage)
-        except Exception as e:
-            logger.error(f"Primary load failed for {client_id}: {e}")
-            if not storage.fallback_exists():
-                raise HTTPException(status_code=503, detail="Primary unavailable, no fallback")
-            service.load_fallback_from_storage(storage)
-        _cache_service(client_id, service)
-        return service
+    """Backwards-compatible wrapper — routes still call _get_service
+    via the slice-8 prep. Inference routes will be migrated to call
+    `service_cache.get_or_load` directly in slice 8."""
+    from src.api.service_cache import get_or_load
+    return get_or_load(client_id, load_factory=_load_service_for_client)
 
 
 def _emit_secret_rotation_event_if_changed() -> None:
@@ -435,19 +398,17 @@ app.include_router(config_router)
 app.include_router(clients_router)
 app.include_router(training_router)
 
-# R5-M1 slice-5 prep — service-cache state lives in src/api/service_cache.py
-# so router files can call `invalidate(client_id)` without circular-import
-# gymnastics on main.py. The load-on-miss orchestration (_get_service,
-# _client_lock, _cache_service) stays here because it pulls on
-# ForecastingService / ClientStorage / CONFIG_PATH. Both modules mutate the
-# same OrderedDict objects — `from ... import _services` binds a reference,
-# not a copy, so pop/setitem propagate.
-import threading as _threading
+# R5-M1 service-cache split:
+#   slice-5 prep — module-level state (OrderedDicts + lock) moved into
+#                  src/api/service_cache.py (commit 80d1d86)
+#   slice-8 prep — load orchestration (`get_or_load(..., load_factory=...)`)
+#                  + per-client locking also moved there. main.py keeps only
+#                  `_load_service_for_client` (the factory) because that's
+#                  where the ML stack imports live.
+# Routers call `service_cache.invalidate(client_id)` after config /
+# training changes, and `service_cache.get_or_load(client_id,
+# load_factory=...)` for inference. No circular imports.
 from src.api.service_cache import (
-    MODEL_CACHE_MAX as _MODEL_CACHE_MAX,
-    _services,
-    _services_lock,
-    _per_client_locks,
     invalidate as _invalidate_service_cache,
     cached_client_ids as _cached_client_ids,
 )
