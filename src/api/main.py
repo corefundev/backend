@@ -44,30 +44,23 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.responses import Response
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-
-from src.auth.jwt_auth import (
-    AuthContext, get_current_client, require_client_access,
-)
-from src.clients.registry import get_registry
-from src.models.fallback import ForecastingService
+from fastapi import FastAPI, Request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# R5-M1 slice 9 — auth domain moved to routers/auth.py; what stays in
-# main.py is lifespan, middleware, Prometheus reload event hook,
-# /reload (ops), and router registrations. Audit symbols still needed
-# here: record_event (lifespan secret-rotation hook), verify_chain
-# (internal/audit/verify route), EVT_SECRET_ROTATION (lifespan).
-from src.audit import (
-    record_event,
-    verify_chain,
-    EVT_SECRET_ROTATION,
-)
+# R5-M1 slice 10 (complete) — every route now lives in
+# src/api/routers/*.py or src/api/uploads.py. main.py keeps only:
+#   * Vault bootstrap (must run before any other module reads env)
+#   * lifespan() — secret-rotation detection, telegram long-polling,
+#     production-config safety check, structured logging + tracing
+#   * CORS middleware
+#   * trace-id middleware
+#   * include_router() registrations
+# Audit symbols (record_event, EVT_SECRET_ROTATION) used ONLY by the
+# lifespan secret-rotation hook.
+from src.audit import record_event, EVT_SECRET_ROTATION
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "configs/config.yaml")
 
@@ -75,18 +68,6 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", "configs/config.yaml")
 # routers can import them without circular gymnastics on main.py.
 # generate_latest at /metrics still serves them — single global registry.
 
-# R5-M1 slice 8 — cold-load factory lives in src/api/loaders.py
-# (used by routers/inference.py /predict + main.py /reload). Local
-# `_get_service` is the same one-liner that goes through
-# service_cache.get_or_load, kept here for the `/reload` handler.
-from src.api.loaders import load_service_for_client as _load_service_for_client
-
-
-def _get_service(client_id: str) -> ForecastingService:
-    """Thin wrapper for `/reload` handler — invalidate then re-warm
-    via the same cache + factory pair used by /predict."""
-    from src.api.service_cache import get_or_load
-    return get_or_load(client_id, load_factory=_load_service_for_client)
 
 
 def _emit_secret_rotation_event_if_changed() -> None:
@@ -334,6 +315,7 @@ from src.api.routers.clients import router as clients_router
 from src.api.routers.training import router as training_router
 from src.api.routers.inference import router as inference_router
 from src.api.routers.auth import router as auth_router
+from src.api.routers.ops import router as ops_router
 app.include_router(legal_router)
 app.include_router(audit_router)
 app.include_router(notifications_router)
@@ -343,149 +325,4 @@ app.include_router(clients_router)
 app.include_router(training_router)
 app.include_router(inference_router)
 app.include_router(auth_router)
-
-# R5-M1 service-cache split:
-#   slice-5 prep — module-level state (OrderedDicts + lock) moved into
-#                  src/api/service_cache.py (commit 80d1d86)
-#   slice-8 prep — load orchestration (`get_or_load(..., load_factory=...)`)
-#                  + per-client locking also moved there. main.py keeps only
-#                  `_load_service_for_client` (the factory) because that's
-#                  where the ML stack imports live.
-# Routers call `service_cache.invalidate(client_id)` after config /
-# training changes, and `service_cache.get_or_load(client_id,
-# load_factory=...)` for inference. No circular imports.
-from src.api.service_cache import (
-    invalidate as _invalidate_service_cache,
-    cached_client_ids as _cached_client_ids,
-)
-
-@app.get("/health", tags=["ops"])
-async def health():
-    """
-    Legacy alias for /healthz — kept for backward compat.
-
-    Never leak internal state from this endpoint: it's reachable
-    without auth. The old payload included `models_cached` (a list
-    of client_ids whose models were currently in memory), which let
-    an unauthenticated caller enumerate tenants. That's now gone —
-    if you need it for ops debugging, use the authenticated
-    `/internal/state` endpoint instead.
-    """
-    return {"status": "ok"}
-
-
-@app.get("/healthz", tags=["ops"])
-async def healthz():
-    """
-    Liveness probe (kubelet / nginx).
-    Always returns 200 as long as the process is alive — must not touch
-    external services. If this endpoint hangs, the orchestrator restarts
-    the container.
-    """
-    return {"status": "ok"}
-
-
-@app.get("/internal/audit/verify", tags=["ops"])
-async def internal_audit_verify(
-    limit: int = 10_000,
-    auth: AuthContext = Depends(get_current_client),
-):
-    """
-    Admin-only: walk the audit_log HMAC chain and report whether it's
-    intact. Returns the first broken row id if any, plus a diagnostic
-    string. See `src.audit.log.verify_chain` for the algorithm.
-
-    Use cases:
-      • Post-incident: after a DB credential rotation, run this to
-        confirm nobody silently rewrote audit during the window.
-      • Routine: schedule a daily cron (`gh workflow run audit-verify`)
-        + Telegram alert on `ok=false`.
-
-    Requires `admin` role. The `limit` query param caps how many signed
-    rows the walk inspects (default 10k, covers ~100 days of normal
-    audit activity).
-    """
-    auth.require_role("admin")
-    result = verify_chain(limit=limit)
-    return {
-        "ok":            result.ok,
-        "rows_checked":  result.rows_checked,
-        "first_bad_id":  result.first_bad_id,
-        "reason":        result.reason,
-        "detail":        result.detail,
-    }
-
-
-@app.get("/internal/state", tags=["ops"])
-async def internal_state(auth: AuthContext = Depends(get_current_client)):
-    """
-    Authenticated diagnostic — what state is the API currently in?
-
-    Returns the list of clients whose models are in memory (was
-    formerly leaked via /health) plus a few non-sensitive runtime
-    knobs. Requires JWT or API-key auth so it can't be hit by an
-    unauthenticated scanner.
-
-    Not used by the frontend; intended for ops debugging via curl
-    with a valid token.
-    """
-    return {
-        "status": "ok",
-        "models_cached": _cached_client_ids(),
-        "storage_backend": os.getenv("STORAGE_BACKEND", "local"),
-        "auth_method": auth.auth_method,
-        "client_id": auth.client_id,
-    }
-
-
-@app.get("/readyz", tags=["ops"])
-async def readyz():
-    """
-    Readiness probe — returns 503 if any hard dependency is unreachable.
-    Used by load balancers to stop sending traffic to a failing replica
-    without killing it (avoids spurious restarts during transient blips).
-    """
-    checks: dict[str, dict] = {}
-    overall_ok = True
-
-    # Redis
-    try:
-        from src.pipeline.task_queue import get_redis_connection
-        conn = get_redis_connection()
-        conn.ping()
-        checks["redis"] = {"ok": True}
-    except Exception as e:
-        checks["redis"] = {"ok": False, "error": type(e).__name__}
-        overall_ok = False
-
-    # Postgres (registry)
-    try:
-        registry = get_registry()
-        registry.list_clients()   # touches the DB
-        checks["postgres"] = {"ok": True}
-    except Exception as e:
-        checks["postgres"] = {"ok": False, "error": type(e).__name__}
-        # Postgres is soft-required — the file fallback still lets the API
-        # serve predictions. Don't fail readyz on it in file-mode.
-        if os.environ.get("DATABASE_URL"):
-            overall_ok = False
-
-    status_code = 200 if overall_ok else 503
-    return Response(
-        content=str({"ready": overall_ok, "checks": checks}).replace("'", '"'),
-        status_code=status_code,
-        media_type="application/json",
-    )
-
-@app.get("/metrics", tags=["ops"])
-async def prometheus_metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
-@app.post("/clients/{client_id}/reload", tags=["ops"])
-async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):
-    """Invalidate model cache — forces reload from storage on next request."""
-    require_client_access(client_id, auth)
-    _invalidate_service_cache(client_id)
-    _get_service(client_id)
-    return {"client_id": client_id, "status": "reloaded"}
+app.include_router(ops_router)

@@ -119,6 +119,37 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_ops_domain_lives_in_router():
+    """The `ops` domain (R5-M1 slice 10 — FINAL slice) — 7 routes —
+    lives in `src/api/routers/ops.py`. After this slice, main.py
+    contains zero `@app.<method>` route decorators."""
+    o = _ROUTERS_DIR / "ops.py"
+    assert o.is_file(), "src/api/routers/ops.py must exist after R5-M1 slice 10"
+    text = o.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('get',  '/health'),
+        ('get',  '/healthz'),
+        ('get',  '/internal/audit/verify'),
+        ('get',  '/internal/state'),
+        ('get',  '/readyz'),
+        ('get',  '/metrics'),
+        ('post', '/clients/{client_id}/reload'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"ops.py must own {method.upper()} {path}"
+        )
+
+    # POST-SPLIT INVARIANT: main.py has NO route decorators.
+    main_text = _MAIN.read_text()
+    leftover = re.findall(r'^@app\.(get|post|put|delete|patch)', main_text, re.M)
+    assert not leftover, (
+        f"M1 complete: main.py must contain ZERO @app.<method> decorators. "
+        f"Found: {leftover}"
+    )
+    assert "ops_router" in main_text
+
+
 def test_auth_domain_lives_in_router():
     """The `auth` domain (R5-M1 slice 9) — 9 routes + 9 schemas —
     lives in `src/api/routers/auth.py`. Largest slice; preserves
