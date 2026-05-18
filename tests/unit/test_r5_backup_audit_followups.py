@@ -24,7 +24,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 def _alert_block(name: str) -> str:
     """Return the YAML block for `- alert: <name>` up to the next
     alert heading (or end of file)."""
-    text = (_BACKEND / "docker" / "alerts.yml").read_text()
+    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
     start = text.find(f"- alert: {name}")
     assert start > 0, f"alert {name!r} must exist"
     next_alert = text.find("- alert:", start + 1)

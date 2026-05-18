@@ -111,7 +111,7 @@ def test_replica_lag_alert_has_absent_defence():
     """PgReplicaLagHigh now has `or absent(...)` so phantom-metric
     state surfaces instead of silently passing (R5-12 lesson —
     same pattern as RqWorkerSilent)."""
-    text = (_BACKEND / "docker" / "alerts.yml").read_text()
+    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
     alert_idx = text.find("- alert: PgReplicaLagHigh")
     assert alert_idx > 0
     next_alert = text.find("- alert:", alert_idx + 1)

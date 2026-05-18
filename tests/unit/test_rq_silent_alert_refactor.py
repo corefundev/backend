@@ -57,7 +57,7 @@ def test_rq_worker_silent_alert_uses_real_metric_names():
     mdawar/rq-exporter:v3.1.0 emission (rq_workers,
     rq_workers_success_total, rq_jobs{status='queued'}) — NOT the
     aggregate names from R2-8 that never existed."""
-    text = (_BACKEND / "docker" / "alerts.yml").read_text()
+    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
     alert_idx = text.find("- alert: RqWorkerSilent")
     next_alert = text.find("- alert:", alert_idx + 1)
     end = next_alert if next_alert > 0 else len(text)
@@ -102,7 +102,7 @@ def test_rq_worker_silent_alert_uses_real_metric_names():
 def test_rq_worker_silent_alert_description_references_incident():
     """The description must mention the DNS-cache-stale failure mode
     so the next on-call has the diagnostic recipe at hand."""
-    text = (_BACKEND / "docker" / "alerts.yml").read_text()
+    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
     alert_idx = text.find("- alert: RqWorkerSilent")
     next_alert = text.find("- alert:", alert_idx + 1)
     block = text[alert_idx:next_alert] if next_alert > 0 else text[alert_idx:]

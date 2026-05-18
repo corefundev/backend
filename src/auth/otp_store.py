@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -255,100 +256,157 @@ class PostgresOtpStore(OtpStore):
 # ── JSON-file fallback (dev / no-Postgres) ──────────────────────────────
 
 class LocalFileOtpStore(OtpStore):
-    """JSON file storage for tests + dev without Postgres."""
+    """JSON file storage for tests + dev without Postgres.
+
+    R6-3 (2026-05-18) — `_load`/`_save` are now lock-guarded and
+    atomic. Previously `_save` did `path.write_text(...)` (open with
+    O_TRUNC, then write), which exposes a window where a concurrent
+    reader sees an empty/half-written file and crashes with
+    JSONDecodeError. test_concurrency::test_concurrent_otp_attempts
+    exhibited this regularly via PytestUnhandledThreadExceptionWarning;
+    the test passed by chance because its assertion was on end-state.
+    In prod we use the Postgres-backed store, so this never lit up
+    user-facing — but a future multi-process local dev (uvicorn
+    --workers 2) with file backend WOULD lose OTP attempts.
+
+    Fix shape (POSIX-standard atomic write):
+      1. Take an in-process RLock around the read-modify-write
+         cycle (covers single-process concurrency).
+      2. Write to `<path>.tmp.<pid>`, fsync, then `os.replace()`
+         atomically — readers either see the full old file or the
+         full new file, never a torn write.
+    """
+
+    # Module-level lock keyed on the file path so multiple
+    # LocalFileOtpStore instances pointing to the same file
+    # serialise their writes. Re-entrant so the public methods can
+    # call _load/_save in the same critical section.
+    _path_locks: "dict[str, threading.RLock]" = {}
+    _path_locks_guard = threading.Lock()
 
     def __init__(self, path: str = "otp_codes.json"):
-        self._path = Path(path)
-        if not self._path.exists():
-            self._path.write_text('{"next_id": 1, "rows": []}')
+        self._path = Path(path).resolve()
+        with self._path_locks_guard:
+            if str(self._path) not in self._path_locks:
+                self._path_locks[str(self._path)] = threading.RLock()
+            self._lock = self._path_locks[str(self._path)]
+        with self._lock:
+            if not self._path.exists():
+                self._atomic_write('{"next_id": 1, "rows": []}')
+
+    def _atomic_write(self, payload: str) -> None:
+        """Write `payload` to `self._path` atomically via tempfile +
+        os.replace. Called under `self._lock`."""
+        tmp = self._path.with_suffix(self._path.suffix + f".tmp.{os.getpid()}")
+        with open(tmp, "w") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._path)
 
     def _load(self) -> dict:
-        return json.loads(self._path.read_text())
+        with self._lock:
+            return json.loads(self._path.read_text())
 
     def _save(self, data: dict) -> None:
-        self._path.write_text(json.dumps(data, indent=2, default=str))
+        with self._lock:
+            self._atomic_write(json.dumps(data, indent=2, default=str))
+
+    # R6-3 — every public method below wraps the read-modify-write
+    # cycle in `self._lock` so concurrent callers can't load → diverge
+    # → save-back-overwriting. Without this, `create()` could hand
+    # out the same next_id to two threads (each loads, both increment,
+    # last writer wins, IDs collide). Lock is re-entrant.
 
     def create(self, email: str, purpose: str, code_hash: str) -> OtpCode:
-        data = self._load()
-        otp_id = data["next_id"]
-        data["next_id"] += 1
-        now = datetime.now(timezone.utc)
-        rec = OtpCode(
-            id=otp_id,
-            email=email.lower(),
-            purpose=purpose,
-            code_hash=code_hash,
-            attempts=0,
-            expires_at=(now + otp_ttl()).isoformat(),
-            used_at=None,
-            created_at=now.isoformat(),
-        )
-        data["rows"].append(asdict(rec))
-        self._save(data)
-        return rec
+        with self._lock:
+            data = self._load()
+            otp_id = data["next_id"]
+            data["next_id"] += 1
+            now = datetime.now(timezone.utc)
+            rec = OtpCode(
+                id=otp_id,
+                email=email.lower(),
+                purpose=purpose,
+                code_hash=code_hash,
+                attempts=0,
+                expires_at=(now + otp_ttl()).isoformat(),
+                used_at=None,
+                created_at=now.isoformat(),
+            )
+            data["rows"].append(asdict(rec))
+            self._save(data)
+            return rec
 
     def find_active(self, email: str, purpose: str) -> Optional[OtpCode]:
-        data = self._load()
-        candidates = [
-            OtpCode(**r) for r in data["rows"]
-            if r["email"].lower() == email.lower()
-            and r["purpose"] == purpose
-        ]
-        candidates = [c for c in candidates if c.is_active()]
-        return max(candidates, key=lambda c: c.created_at) if candidates else None
+        with self._lock:
+            data = self._load()
+            candidates = [
+                OtpCode(**r) for r in data["rows"]
+                if r["email"].lower() == email.lower()
+                and r["purpose"] == purpose
+            ]
+            candidates = [c for c in candidates if c.is_active()]
+            return max(candidates, key=lambda c: c.created_at) if candidates else None
 
     def mark_used(self, otp_id: int) -> None:
-        data = self._load()
-        for r in data["rows"]:
-            if r["id"] == otp_id:
-                r["used_at"] = datetime.now(timezone.utc).isoformat()
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            for r in data["rows"]:
+                if r["id"] == otp_id:
+                    r["used_at"] = datetime.now(timezone.utc).isoformat()
+            self._save(data)
 
     def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]:
         """File-backed analogue of PostgresOtpStore.claim_active.
 
-        Atomicity is single-process here (the file load/save is mutexed
-        by GIL within a CPython process); cross-process safety is N/A
-        for the dev fallback. Same return-shape contract as the Postgres
-        version: returns the OTP row as it WAS pre-mark, or None.
+        R6-3 (2026-05-18) — single-process atomicity via the same RLock
+        protecting load+save. Multi-process safety is still N/A for the
+        file backend (would need fcntl.flock); the Postgres-backed
+        store via SELECT…FOR UPDATE is the prod path. Same return-shape
+        contract as the Postgres version: returns the OTP row as it
+        WAS pre-mark, or None.
         """
-        data = self._load()
-        candidates = [
-            OtpCode(**r) for r in data["rows"]
-            if r["email"].lower() == email.lower()
-            and r["purpose"] == purpose
-        ]
-        candidates = [c for c in candidates if c.is_active()]
-        if not candidates:
-            return None
-        winner = max(candidates, key=lambda c: c.created_at)
-        # Mark used in-place before returning the snapshot.
-        for r in data["rows"]:
-            if r["id"] == winner.id:
-                r["used_at"] = datetime.now(timezone.utc).isoformat()
-        self._save(data)
-        return winner
+        with self._lock:
+            data = self._load()
+            candidates = [
+                OtpCode(**r) for r in data["rows"]
+                if r["email"].lower() == email.lower()
+                and r["purpose"] == purpose
+            ]
+            candidates = [c for c in candidates if c.is_active()]
+            if not candidates:
+                return None
+            winner = max(candidates, key=lambda c: c.created_at)
+            # Mark used in-place before returning the snapshot.
+            for r in data["rows"]:
+                if r["id"] == winner.id:
+                    r["used_at"] = datetime.now(timezone.utc).isoformat()
+            self._save(data)
+            return winner
 
     def increment_attempts(self, otp_id: int) -> int:
-        data = self._load()
-        new_val = 0
-        for r in data["rows"]:
-            if r["id"] == otp_id:
-                r["attempts"] = r.get("attempts", 0) + 1
-                new_val = r["attempts"]
-        self._save(data)
-        return new_val
+        with self._lock:
+            data = self._load()
+            new_val = 0
+            for r in data["rows"]:
+                if r["id"] == otp_id:
+                    r["attempts"] = r.get("attempts", 0) + 1
+                    new_val = r["attempts"]
+            self._save(data)
+            return new_val
 
     def purge_old(self, older_than_hours: int = 24) -> int:
-        data = self._load()
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
-        before = len(data["rows"])
-        data["rows"] = [
-            r for r in data["rows"]
-            if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) > cutoff
-        ]
-        self._save(data)
-        return before - len(data["rows"])
+        with self._lock:
+            data = self._load()
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+            before = len(data["rows"])
+            data["rows"] = [
+                r for r in data["rows"]
+                if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) > cutoff
+            ]
+            self._save(data)
+            return before - len(data["rows"])
 
 
 # ── Factory ──────────────────────────────────────────────────────────────
