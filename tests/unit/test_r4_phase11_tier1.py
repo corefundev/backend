@@ -35,7 +35,16 @@ def test_client_to_safe_dict_excludes_sensitive_fields():
         pytest.skip("src.api.main uses py3.10+ X | None union syntax")
     try:
         from src.clients.registry import ClientRecord
-        from src.api.main import _client_to_safe_dict, _CLIENT_SAFE_FIELDS
+        # R5-M1 slice 6 (2026-05-18) — these symbols moved from
+        # src.api.main to src.api.routers.clients. Fall back to the
+        # legacy location so this test still works mid-rollout if a
+        # parent branch hasn't merged the split yet.
+        try:
+            from src.api.routers.clients import (
+                _client_to_safe_dict, _CLIENT_SAFE_FIELDS,
+            )
+        except ImportError:
+            from src.api.main import _client_to_safe_dict, _CLIENT_SAFE_FIELDS
     except (TypeError, ImportError) as e:
         if "operand type(s) for |" in str(e) or "X | None" in str(e):
             pytest.skip(f"main.py import requires py3.10+ runtime: {e}")
