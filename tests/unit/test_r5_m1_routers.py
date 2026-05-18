@@ -119,6 +119,49 @@ def test_legal_router_registered_in_main():
     )
 
 
+def test_training_domain_lives_in_router():
+    """The `training` domain (R5-M1 slice 7) — 3 routes — lives in
+    `src/api/routers/training.py`. Also pins:
+      * R5-4 quota refund-on-enqueue-fail preserved verbatim.
+      * R3-1 job-ownership 404 (not 403) preserved.
+      * R4-7 cross-tenant upload_id → 404 (not 403) preserved.
+    """
+    tr_router = _ROUTERS_DIR / "training.py"
+    assert tr_router.is_file(), (
+        "src/api/routers/training.py must exist after R5-M1 slice 7"
+    )
+    text = tr_router.read_text()
+    assert "router = APIRouter" in text
+    for method, path in (
+        ('post', '/clients/{client_id}/train'),
+        ('get',  '/jobs/{job_id}'),
+        ('get',  '/clients/{client_id}/training-runs'),
+    ):
+        assert f'@router.{method}("{path}"' in text, (
+            f"training.py must own {method.upper()} {path}"
+        )
+    # R5-4 refund pattern
+    assert "R5-4" in text and "refund" in text.lower()
+    # R3-1 job ownership
+    assert "R3-1" in text and 'detail="job not found"' in text
+    # R4-7 anti-enumeration
+    assert "R4-7" in text and "404" in text
+    # service-cache invalidation goes through public API
+    assert "from src.api.service_cache import invalidate" in text
+
+    main_text = _MAIN.read_text()
+    for path in (
+        "/clients/{client_id}/train",
+        "/jobs/{job_id}",
+        "/clients/{client_id}/training-runs",
+    ):
+        for method in ('get', 'post', 'put', 'delete', 'patch'):
+            assert f'@app.{method}("{path}"' not in main_text, (
+                f"main.py still has @app.{method.upper()} for {path}"
+            )
+    assert "training_router" in main_text
+
+
 def test_clients_domain_lives_in_router():
     """The `clients` domain (R5-M1 slice 6) — 5 routes — lives in
     `src/api/routers/clients.py`. Also pins:

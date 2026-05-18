@@ -110,9 +110,26 @@ def test_quota_module_delegates_to_atomic_method():
 def test_api_main_wraps_atomic_bump_with_429():
     """The /clients/{id}/train endpoint must catch QuotaExceeded around
     record_training_started so a race-lost commit surfaces as a clean
-    429 (matching the fast-check fail-fast path) — not a 500."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    # Locate the bump-quota block.
+    429 (matching the fast-check fail-fast path) — not a 500.
+
+    R5-M1 slice 7 (2026-05-18) — trigger_training moved to
+    routers/training.py. Try both locations.
+    """
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "training.py",
+    )
+    text = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        t = f.read_text()
+        if "record = record_training_started" in t:
+            text = t
+            break
+    assert text is not None, (
+        "record_training_started call not found in main.py or routers/training.py"
+    )
     idx = text.find("record = record_training_started(registry, record)")
     assert idx > 0
     # Window around the call must include both try and except QuotaExceeded.

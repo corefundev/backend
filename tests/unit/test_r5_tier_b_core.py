@@ -140,14 +140,34 @@ def test_trigger_training_refunds_quota_on_enqueue_fail():
     """The enqueue_training call must be wrapped in try/except that
     decrements training_runs_this_month on failure — otherwise a
     Redis hiccup permanently consumes a FREE-plan user's
-    monthly run quota."""
-    text = (_BACKEND / "src" / "api" / "main.py").read_text()
-    # Locate the trigger_training function.
+    monthly run quota.
+
+    R5-M1 slice 7 (2026-05-18) — trigger_training moved to
+    routers/training.py.
+    """
+    candidates = (
+        _BACKEND / "src" / "api" / "main.py",
+        _BACKEND / "src" / "api" / "routers" / "training.py",
+    )
+    text = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        t = f.read_text()
+        if "async def trigger_training(" in t or "def trigger_training(" in t:
+            text = t
+            break
+    assert text is not None, (
+        "trigger_training handler not found in main.py or routers/training.py"
+    )
     idx = text.find("def trigger_training(")
     if idx < 0:
         idx = text.find("async def trigger_training(")
     assert idx > 0
-    end = text.find("\n@app.", idx + 1)
+    end_app    = text.find("\n@app.",    idx + 1)
+    end_router = text.find("\n@router.", idx + 1)
+    ends = [e for e in (end_app, end_router) if e > 0]
+    end = min(ends) if ends else -1
     block = text[idx:end] if end > 0 else text[idx:idx + 8000]
 
     assert "R5-4" in block, (
