@@ -19,10 +19,20 @@ services:
       MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow/mlflow.db
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
       MLFLOW_S3_ENDPOINT_URL: ""
+    # --allowed-hosts: MLflow 3.x rejects requests with Host header not
+    # in this list as a DNS-rebinding mitigation (default = localhost +
+    # private IPs only). The worker calls mlflow:5000 via docker
+    # service-name, so we must allow "mlflow" explicitly. Without this
+    # flag, every worker→mlflow call returns HTTP 403 "Invalid Host
+    # header — possible DNS rebinding attack detected" and the run is
+    # silently dropped (training pipeline only warns, doesn't error).
+    # Discovered 2026-05-19 during R7 reboot-drill: mlflow_run_id was
+    # empty for the finished run eb7673a7610544e8afd6f54d3662a4ec.
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
+      --allowed-hosts mlflow,localhost,127.0.0.1
       --backend-store-uri sqlite:////mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
     depends_on: !reset []
