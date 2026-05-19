@@ -280,6 +280,35 @@ groups:
           summary:     "Postgres backup is stale or missing (>25h)"
           description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
 
+      # R7-9 (2026-05-20) — off-region mirror staleness. Primary backup
+      # lives in Beget S3 (same provider as VPS); the mirror copy is in
+      # Selectel `uz-2` (Uzbekistan — different country, different
+      # operator, different jurisdiction). If the mirror is stale but
+      # primary is fresh, data is still safe but the cross-region DR
+      # posture is degraded — page a HUMAN to investigate without
+      # waking them up at 3am.
+      #
+      # severity=warning (not critical) because:
+      #   • primary backup is fresh → data is not lost
+      #   • mirror is a defense-in-depth posture, not a hot path
+      #   • most likely cause is transient Selectel network issue,
+      #     resolves itself on next nightly run
+      #
+      # 49h threshold = 2 days of missed mirror runs. If primary kept
+      # working through that window, mirror is genuinely broken
+      # (creds rotated, bucket misconfigured, Selectel outage).
+      - alert: BackupMirrorStale
+        expr: |
+          (time() - sku_backup_mirror_last_success_timestamp_seconds > 49 * 3600)
+            or absent(sku_backup_mirror_last_success_timestamp_seconds)
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Off-region backup mirror is stale (>49h)"
+          description: "Selectel `uz-2` backup mirror hasn't received a fresh dump in 49h. Primary Beget backup is unaffected (data is safe); this is a DR-posture degradation. Inspect: `docker exec docker-backup-1 sh -c 'mc alias set mir <S3_MIRROR_ENDPOINT_URL> ... && mc ls mir/<S3_MIRROR_BUCKET>/'`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."
+
       # base_backup.sh runs weekly (Sun 03:30 UTC) — pushes
       # sku_base_backup_last_success_timestamp_seconds. Without a fresh
       # base, PITR's restore window starts shrinking: WAL archived
@@ -299,6 +328,22 @@ groups:
         annotations:
           summary:     "Postgres weekly base backup stale or missing (>9d)"
           description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
+
+      # R7-9 (2026-05-20) — off-region mirror of weekly base_backup.
+      # Same fail-safe shape as BackupMirrorStale: warning, not
+      # critical (primary base_backup still covers PITR). 16d
+      # threshold = 2 missed mirror weekly runs.
+      - alert: BaseBackupMirrorStale
+        expr: |
+          (time() - sku_base_backup_mirror_last_success_timestamp_seconds > 16 * 86400)
+            or absent(sku_base_backup_mirror_last_success_timestamp_seconds)
+        for:   2h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Off-region weekly base backup mirror is stale (>16d)"
+          description: "Selectel `uz-2` weekly base_backup mirror hasn't received a fresh push in 16d (2 missed cycles). Primary Beget base_backup is unaffected. PITR is still functional from the primary; this is a DR-posture degradation only."
 
       # Pre-warmup at 8d — surfaces a missed run BEFORE we hit the 9d
       # critical threshold. Audit M7 (2026-05-13) caught that without

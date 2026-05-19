@@ -66,6 +66,45 @@ LOCAL_SHA=$(sha256sum "$WORK_DIR/base.tar.gz" | awk '{print $1}')
 REMOTE_ETAG=$(mc stat --json "bak/${S3_BACKUP_BUCKET}/base/${DATE}/base.tar.gz" | grep -o '"etag":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
 echo "  base.tar.gz sha=$LOCAL_SHA  remote_etag=$REMOTE_ETAG"
 
+PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
+
+# ── R7-9 (2026-05-20) — off-region MIRROR push ────────────────────
+# Mirror the base_backup files to a second S3 in a different
+# geographic region. Same fail-safe policy as backup.sh: mirror
+# failure is non-fatal (primary already on S3).
+if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
+   [ -n "${S3_MIRROR_ENDPOINT_URL:-}" ] && \
+   [ -n "${S3_MIRROR_ACCESS_KEY_ID:-}" ] && \
+   [ -n "${S3_MIRROR_SECRET_ACCESS_KEY:-}" ]; then
+    MIRROR_ENDPOINT="$S3_MIRROR_ENDPOINT_URL"
+    case "$MIRROR_ENDPOINT" in
+        http://*|https://*) ;;
+        *) MIRROR_ENDPOINT="https://$MIRROR_ENDPOINT" ;;
+    esac
+    echo "[$(date -u +%FT%TZ)] base_backup: mirror push to $S3_MIRROR_BUCKET (off-region)…"
+    if mc alias set mir "$MIRROR_ENDPOINT" \
+                       "$S3_MIRROR_ACCESS_KEY_ID" \
+                       "$S3_MIRROR_SECRET_ACCESS_KEY" >/dev/null 2>&1 && \
+       mc cp "$WORK_DIR/base.tar.gz"   "mir/${S3_MIRROR_BUCKET}/base/${DATE}/base.tar.gz" && \
+       mc cp "$WORK_DIR/pg_wal.tar.gz" "mir/${S3_MIRROR_BUCKET}/base/${DATE}/pg_wal.tar.gz"; then
+        echo "[$(date -u +%FT%TZ)] base_backup: mirror push complete"
+        MIRROR_NOW=$(date -u +%s)
+        if curl -fsS --max-time 5 -X PUT \
+                --data-binary "# TYPE sku_base_backup_mirror_last_success_timestamp_seconds gauge
+sku_base_backup_mirror_last_success_timestamp_seconds $MIRROR_NOW
+" "$PUSHGATEWAY_URL/metrics/job/base_backup_mirror/instance/sku-forecasting" \
+                >/dev/null 2>&1; then
+            echo "[$(date -u +%FT%TZ)] base_backup: mirror metric pushed"
+        else
+            echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror metric push failed (non-fatal)" >&2
+        fi
+    else
+        echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror push failed — non-fatal, primary safe" >&2
+    fi
+else
+    echo "[$(date -u +%FT%TZ)] base_backup: S3_MIRROR_* not configured — skipping mirror"
+fi
+
 rm -rf "$WORK_DIR"
 echo "[$(date -u +%FT%TZ)] base_backup: complete"
 
@@ -78,7 +117,6 @@ echo "[$(date -u +%FT%TZ)] base_backup: complete"
 # backoff. Same rationale as backup.sh: transient docker-network blip
 # during push silently drops the metric, surfacing as a stale alert
 # many hours later. Worst-case adds 50s to the weekly base backup.
-PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
 NOW=$(date -u +%s)
 push_ok=0
 for delay in 0 5 15; do

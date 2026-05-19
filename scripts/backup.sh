@@ -79,6 +79,54 @@ REMOTE_SHA="$(mc stat --json "bak/$S3_BACKUP_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(
     | grep -o '"etag":"[^"]*"' | head -1 | awk -F'"' '{print $4}')"
 echo "local_sha=$LOCAL_SHA  remote_etag=$REMOTE_SHA"
 
+PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
+
+# ── R7-9 (2026-05-20) — off-region MIRROR push ────────────────────
+# Push the same encrypted dump to a SECOND S3 provider in a
+# different geographic region (Selectel Uzbekistan `uz-2`). This
+# closes the single-provider gap: primary backup lives in Beget
+# (same provider as the VPS) — a Beget DC failure would lose
+# both VPS AND backup. The mirror in a different country with a
+# different operator survives that scenario.
+#
+# Mirror push is BEST-EFFORT — failure does NOT fail the backup
+# (primary already on S3 = data safe). A separate pushgateway
+# metric `sku_backup_mirror_last_success_timestamp_seconds`
+# drives the warning-severity BackupMirrorStale alert.
+if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
+   [ -n "${S3_MIRROR_ENDPOINT_URL:-}" ] && \
+   [ -n "${S3_MIRROR_ACCESS_KEY_ID:-}" ] && \
+   [ -n "${S3_MIRROR_SECRET_ACCESS_KEY:-}" ]; then
+    MIRROR_ENDPOINT="$S3_MIRROR_ENDPOINT_URL"
+    case "$MIRROR_ENDPOINT" in
+        http://*|https://*) ;;
+        *) MIRROR_ENDPOINT="https://$MIRROR_ENDPOINT" ;;
+    esac
+    echo "[$(date -u +%FT%TZ)] mirror push to $S3_MIRROR_BUCKET (off-region)…"
+    if mc alias set mir "$MIRROR_ENDPOINT" \
+                       "$S3_MIRROR_ACCESS_KEY_ID" \
+                       "$S3_MIRROR_SECRET_ACCESS_KEY" > /dev/null 2>&1 && \
+       mc cp "$OUT.enc" \
+             "mir/$S3_MIRROR_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$OUT.enc")"; then
+        echo "[$(date -u +%FT%TZ)] mirror push complete"
+        MIRROR_NOW=$(date -u +%s)
+        # Push mirror timestamp (best-effort, no retry — alert covers it).
+        if curl -fsS --max-time 5 -X PUT \
+                --data-binary "# TYPE sku_backup_mirror_last_success_timestamp_seconds gauge
+sku_backup_mirror_last_success_timestamp_seconds $MIRROR_NOW
+" "$PUSHGATEWAY_URL/metrics/job/backup_mirror/instance/sku-forecasting" \
+                >/dev/null 2>&1; then
+            echo "[$(date -u +%FT%TZ)] pushed sku_backup_mirror_last_success_timestamp_seconds=$MIRROR_NOW"
+        else
+            echo "[$(date -u +%FT%TZ)] WARNING: mirror metric push failed (non-fatal)" >&2
+        fi
+    else
+        echo "[$(date -u +%FT%TZ)] WARNING: mirror push failed — non-fatal, primary backup is safe" >&2
+    fi
+else
+    echo "[$(date -u +%FT%TZ)] S3_MIRROR_* not configured — skipping mirror push"
+fi
+
 rm -f "$OUT.enc"
 echo "[$(date -u +%FT%TZ)] backup complete"
 
@@ -96,7 +144,6 @@ echo "[$(date -u +%FT%TZ)] backup complete"
 # even though the dump itself was on S3 and fine. Each attempt is
 # bounded at 5s; total worst-case adds 5+15+30=50s to the backup
 # run, which is well within the cron cadence.
-PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
 NOW=$(date -u +%s)
 push_ok=0
 for delay in 0 5 15; do

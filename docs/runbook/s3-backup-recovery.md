@@ -1,5 +1,43 @@
 # Restore Postgres from S3 backup
 
+## Two sources available (R7-9, 2026-05-20+)
+
+Primary and mirror backups exist in geographically separated providers:
+
+| Source | Provider | Region | Bucket | Endpoint |
+|--------|----------|--------|--------|----------|
+| **Primary** | Beget S3 | RU (Moscow) | `762089886d76-zone-backup` | `s3.ru1.storage.beget.cloud` |
+| **Mirror** (R7-9) | Selectel | UZ (Uzbekistan, `uz-2`) | `sku-backup-mirror` | `s3.uz-2.srvstorage.uz` |
+
+**Use primary by default.** Use mirror only when:
+* Beget is unreachable (DC outage, billing suspended, network)
+* Primary bucket itself was compromised / lifecycle-deleted
+* Cross-region restore for staging in another country
+
+Both copies are identically encrypted with `BACKUP_PASSPHRASE`
+from Lockbox — same passphrase decrypts either.
+
+## Restore from MIRROR (Selectel UZ)
+
+```bash
+# Pull mirror creds from Lockbox bootstrap before running restore.sh:
+ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+    'docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh sh -c "
+        S3_ENDPOINT_URL=\"https://\$S3_MIRROR_ENDPOINT_URL\" \
+        AWS_ACCESS_KEY_ID=\"\$S3_MIRROR_ACCESS_KEY_ID\" \
+        AWS_SECRET_ACCESS_KEY=\"\$S3_MIRROR_SECRET_ACCESS_KEY\" \
+        /scripts/restore.sh \
+            s3://\$S3_MIRROR_BUCKET/backups/2026-05-19/sku_forecasting_<ts>.dump.enc
+    "'
+# restore.sh reads the S3_ENDPOINT_URL + AWS_* fallback chain when
+# S3_BACKUP_* aren't set — perfect for mirror-restore without touching
+# the primary cred set.
+```
+
+## Restore from PRIMARY (default)
+
+
+
 ## Symptoms
 
 - Postgres data lost / corrupt (table dropped, replication broken
