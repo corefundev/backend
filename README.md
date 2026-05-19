@@ -130,24 +130,37 @@ curl http://localhost:8000/health
 ## Безопасность: три уровня
 
 ```
-Level 1: .env файл на диске          → STORAGE_BACKEND=s3, AWS_KEY=... (dev only)
-Level 2: Vault + минимальный .env    → VAULT_ADDR + VAULT_TOKEN в .env
-Level 3: Zero .env (production)      → VAULT_ROLE_ID + одноразовый VAULT_SECRET_ID от CI/CD
-                                        Vault Agent инжектирует в os.environ через tmpfs
+Level 1: .env файл на диске          → AWS_KEY=... (dev only)
+Level 2: Bootstrap из secrets manager → секреты приезжают в os.environ
+                                         только в momentum старта процесса
+Level 3 (current prod):
+         Yandex Lockbox + service-account-key  → secrets in RAM only,
+                                                  zero secrets on disk
+                                                  after bootstrap finishes
 ```
 
-Настройка Level 3:
+Настройка Level 3 (Yandex Lockbox, наш текущий путь — см. `deploy/DEPLOY.md` §4.3):
 ```bash
-# 1. Настроить Vault
-export VAULT_ADDR=http://localhost:8200 VAULT_TOKEN=root
-bash vault/setup_vault.sh
+# 1. В YC: создать Lockbox secret + viewer SA-ключ, положить
+#    SA-ключ на VPS как secrets/yc-sa-key.json.
 
-# 2. При каждом деплое — одноразовый secret_id
-VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/sku-forecasting/secret-id)
+# 2. В docker-compose.lockbox.yml перечислить:
+#      YC_SA_KEY_FILE=/run/secrets/yc-sa-key.json
+#      YC_LOCKBOX_SECRET_ID=<secret-id>
 
-# 3. Запуск — secret_id уничтожается после использования
-VAULT_ROLE_ID=<role_id> VAULT_SECRET_ID=$VAULT_SECRET_ID docker compose up -d
+# 3. Bootstrap — автоматический:
+#    - Python:  src/auth/vault_agent.bootstrap_secrets() (имя историческое,
+#               функционально это Lockbox client)
+#    - Non-Python: scripts/lockbox_bootstrap.sh  (используется backup,
+#                  alertmanager — см. project_lockbox_bootstrap.md)
+
+docker compose up -d
 ```
+
+**HashiCorp Vault — не используется.** В early phase (2026-04) был
+подключён Vault, переход на YC Lockbox прошёл 2026-05-06. Vault-конфиг
+удалён из репо в 2026-05-20 cleanup-коммите. Архивный reference на
+self-hosted Vault — в `deploy/DEPLOY.md` §4.2.
 
 ---
 

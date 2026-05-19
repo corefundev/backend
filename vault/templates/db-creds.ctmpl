@@ -1,3 +1,0 @@
-{{- with secret "database/creds/sku-forecasting-role" -}}
-DATABASE_URL=postgresql://{{ .Data.username }}:{{ .Data.password }}@postgres:5432/sku_db
-{{- end }}

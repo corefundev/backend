@@ -198,25 +198,13 @@ services:
       retries: 3
       start_period: 20s
 
-  # ── Vault Agent sidecar (Level 3) ────────────────────────
-  # Раскомментировать после настройки AppRole (vault/setup_vault.sh)
-  # Рендерит секреты в tmpfs том vault_secrets, доступный api и worker
-  #
-  # vault-agent:
-  #   <<: *common
-  #   image: hashicorp/vault:1.16
-  #   volumes:
-  #     - ../vault/agent.hcl:/vault/config/agent.hcl:ro
-  #     - ../vault/templates:/vault/templates:ro
-  #     - vault_secrets:/vault/secrets    # tmpfs: секреты в RAM
-  #   environment:
-  #     VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
-  #   command: agent -config=/vault/config/agent.hcl
-  #   depends_on: [vault]
-  #
-  # Добавить в api и worker (когда vault-agent включён):
-  #   volumes:
-  #     - vault_secrets:/vault/secrets:ro
+  # ── Secrets bootstrap ────────────────────────────────────
+  # Project uses Yandex Lockbox for secrets (not HashiCorp Vault).
+  # Python services: `src/auth/vault_agent.bootstrap_secrets()`.
+  # Non-Python (backup, alertmanager): scripts/lockbox_bootstrap.sh.
+  # Wire-up lives in docker/docker-compose.lockbox.yml.
+  # Vault sidecar was archived in 2026-05-20 cleanup commit;
+  # see deploy/DEPLOY.md §4.3 for the live procedure.
 
 networks:
   sku_net:

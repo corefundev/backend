@@ -1,29 +1,33 @@
 """
 src/auth/vault_agent.py
 
-Настоящий Level 3: Zero-.env — секреты НЕ лежат на диске вообще.
+**Имя файла историческое.** В early phase (2026-04) модуль писался
+под HashiCorp Vault; 2026-05-06 проект мигрировал на **Yandex
+Lockbox**, а имя файла сохранили чтобы не ломать ~30 callers по
+коду. По функции это **Lockbox client**.
 
-Три источника конфигурации (в порядке приоритета):
+`bootstrap_secrets()`:
 
-  1. /vault/secrets/app.env   ← Vault Agent sidecar рендерит в tmpfs (RAM)
-                                 Используется в production Docker/K8s
-                                 НА ДИСКЕ НИЧЕГО НЕ ОСТАЁТСЯ
+  1. Читает SA-key из `YC_SA_KEY_FILE` (по умолчанию
+     `/run/secrets/yc-sa-key.json`).
+  2. Подписывает JWT-PS256 → обменивает на IAM token через
+     `iam.api.cloud.yandex.net`.
+  3. Тянет payload из Lockbox secret (`YC_LOCKBOX_SECRET_ID`).
+  4. Подкладывает entries в `os.environ` — preserve-env-wins
+     (тесты и dev могут override через монypatch / .env).
 
-  2. Переменные окружения     ← Docker передаёт через --env-file или -e
-                                 role_id: запечён в образ при docker build
-                                 secret_id: CI/CD инжектирует при деплое (TTL 10 мин)
-                                 vault_addr: задаётся в docker-compose как константа
-                                 (не секрет — это просто адрес сервера)
+Параллельный путь для non-Python контейнеров — это
+`scripts/lockbox_bootstrap.sh` (тот же JWT-PS256 → IAM → Lockbox
+chain без Python; используется в backup, alertmanager — см.
+`project_lockbox_bootstrap.md` в agent memory).
 
-  3. .env файл (dev only)     ← Только для локальной разработки
-                                 НИКОГДА не используется в production
+HashiCorp Vault конфиг (vault/, docker-compose.vault.yml,
+scripts/vault_*.sh) удалён из репо в 2026-05-20 cleanup-коммите.
+Архивный reference на self-hosted Vault — `deploy/DEPLOY.md` §4.2.
 
-Разница между VAULT_ADDR и секретами:
-  VAULT_ADDR  — адрес сервера, НЕ секрет. Как адрес БД. Можно в docker-compose.
-  VAULT_TOKEN — секрет. В Level 3 не нужен: заменён на AppRole.
-  role_id     — полусекрет (не меняется, можно запечь в образ).
-  secret_id   — настоящий секрет: одноразовый, TTL 10 мин, от CI/CD.
-  JWT_SECRET  — секрет: только из Vault, никогда в .env.
+Dev fallback: при отсутствии SA-ключа функция log'ает warning и
+возвращает False — секреты ожидаются из `.env` (локальная
+разработка) или из тестовых фикстур (CI).
 """
 from __future__ import annotations
 
