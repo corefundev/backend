@@ -1,5 +1,57 @@
 # Postgres primary → replica takeover
 
+## Drill results — 2026-05-19 (R7-10)
+
+Measured via `scripts/dr_drill_replication.sh` on staging.testcore.ru
+with two throwaway `postgres:16-alpine` containers on a dedicated
+docker network. Workload: ~20 inserts/sec for 30s, primary killed
+at t=15s, replica promoted immediately.
+
+| Metric | Value |
+|--------|-------|
+| **RPO** (rows lost) | **0 rows** (idealized — see caveat below) |
+| **RTO** (kill → writes accepted on replica) | **0.57 sec** |
+| Pure pg_ctl promote duration | 0.39 sec |
+| Bootstrap (pg_basebackup) | ~8 sec |
+
+**Caveats for prod extrapolation:**
+
+These numbers come from two postgres containers on the SAME host
++ docker bridge network. They measure the postgres-internal failover
+path only.
+
+In real prod, total RTO is dominated by the OPERATOR + CONFIG path,
+not the database:
+
+| Step | Estimate |
+|------|----------|
+| Alert fires (PostgresDown after 5min stability window) | 5 min |
+| Operator wakes up + opens runbook | 1–10 min |
+| `scripts/promote_replica.sh` (matches drill: ~1 sec) | 1 sec |
+| Lockbox `DATABASE_URL` switch via `yc lockbox payload add` | 30 sec |
+| `docker compose restart api worker scan-worker process-worker` | 30 sec |
+| Smoke test (curl /readyz green) | 30 sec |
+| **Total realistic RTO** | **7–17 min** |
+
+**Lesson:** the postgres part is fast; everything else is human.
+Two ways to shrink the human window:
+1. Patroni/repmgr for automated failover (existing follow-up,
+   `project_replica_vps.md`) — eliminates the 1–10 min operator
+   step.
+2. Pre-staged Lockbox secret + scripted compose-restart — closes
+   the 30s + 30s + 30s manual gap into ~10 sec.
+
+The `RPO=0` result reflects the async streaming slot keeping up
+with a 20Hz workload. Real prod sustains 100s of writes/sec; lag
+can creep into the seconds. The slot-based replication guarantees
+no WAL loss on the primary side, BUT writes committed after the
+last `pg_last_wal_replay_lsn()` on replica ARE lost.
+
+**To reproduce:** run `bash scripts/dr_drill_replication.sh` on
+any Docker host (staging.testcore.ru recommended — not local
+laptop). Throwaway containers, ~45 sec total runtime, auto-cleanup
+via EXIT trap.
+
 ## Symptoms
 
 - `PostgresDown` alert firing for >5 minutes.
