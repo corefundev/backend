@@ -96,7 +96,7 @@ jobs:
       # image digest keylessly via GitHub OIDC. Previously only
       # release.yml (tagged releases) ran cosign; CD-built images on
       # main were unsigned — which is what prod actually runs.
-      - uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
