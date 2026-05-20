@@ -28,13 +28,12 @@ import logging
 import os
 import socket
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Callable, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
