@@ -51,6 +51,33 @@ jobs:
             --extend-ignore=E203,W503,E501,E221,E251,E272,E402,E301,E302,E303,E305,E306,E731,E401,E131,E127,E128,E261,E222,E225,E231,E741,F541 \
             --exclude=__pycache__,.venv
 
+  # ── 1b. Lint (NFOR — no-fail-open-return) ────────────────
+  # Custom AST linter that detects the exception-swallow → fail-open
+  # pattern that was R8-12's root cause (MLflow exception logged as
+  # WARNING and function returned a non-error value, leaving
+  # `mlflow_run_id = NULL` invisibly in the DB).
+  #
+  # Pre-existing call sites are catalogued in the baseline file; new
+  # violations fail CI. Removing baseline entries is the target state
+  # — R9-B item #14 starts that work.
+  lint-nfor:
+    name: Lint (no-fail-open-return)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run NFOR linter against src/
+        run: |
+          python tools/lint/no_fail_open_return.py src/ \
+            --baseline tools/lint/.no_fail_open_return.baseline
+      - name: Run NFOR unit tests
+        run: |
+          pip install pytest
+          python -m pytest tests/lint/ -v
+
   # ── 2. Type check ──────────────────────────────────────────
   # Mypy is now a hard gate — the legacy 41-error backlog was cleared
   # in the type-cleanup commit (OAuth provider Protocols, chaos.py

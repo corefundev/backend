@@ -1,0 +1,74 @@
+# NFOR — no-fail-open-return baseline
+#
+# Each line:  <path>:<lineno><TAB or two-spaces><reason>
+#
+# Adding to this list REQUIRES a written reason. The linter rejects any
+# entry without one. Reasons should reference a triage ticket or audit
+# finding so the allowlist stays auditable.
+#
+# Removing an entry is the *target state* for that line — the codebase
+# becomes fail-closed when this file is empty.
+#
+# Initial baseline captured 2026-05-21 at R9-B kickoff. Established 51
+# pre-existing sites; R9-B item #14 closes the high-risk subset
+# (task_queue.py + train.py:301), the rest are triaged in R10.
+
+# ── R9-B item #2 — R8-12 MLflow architecture fix removes this site ──────
+src/pipeline/train.py:301  R9-T2-001 / T4-001 / T7-001 — R8-12 MLflow log_artifact swallow; closes when item #2 lands
+
+# ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
+src/pipeline/task_queue.py:737  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:742  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:750  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:770  R9-T4-001 — training fallback registry; closes in item #14
+
+# ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
+# Each of these should either get narrowed to a specific exception type,
+# convert the swallow into a persisted error, or document the fail-open
+# branch as deliberate (and then move out of "broad except" to a typed one).
+src/pipeline/task_queue.py:199  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try
+src/pipeline/task_queue.py:213  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer
+src/pipeline/distributed_training.py:144  pre-R9 baseline; triage in R10 — Ray cluster start
+src/pipeline/train.py:89  pre-R9 baseline; triage in R10 — registry lookup in train pipeline
+src/pipeline/train.py:122  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline
+src/pipeline/streaming.py:197  pre-R9 baseline; triage in R10 — Kafka consumer poll
+src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
+src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
+src/auth/vault_agent.py:263  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A
+src/auth/vault_agent.py:300  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B
+src/auth/vault_agent.py:312  pre-R9 baseline; triage in R10 — Lockbox bootstrap path C
+src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
+src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
+src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
+src/features/engineering.py:76  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:84  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:92  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/models/online_learning.py:196  pre-R9 baseline; triage in R10 — incremental update fallback
+src/models/shap_storage.py:122  pre-R9 baseline; triage in R10 — SHAP flush best-effort
+src/models/registry_gates.py:63  pre-R9 baseline; triage in R10 — MLflow registry promote
+src/models/registry_gates.py:160  pre-R9 baseline; triage in R10 — MLflow registry stage lookup
+src/storage/upload_pipeline.py:175  pre-R9 baseline; triage in R10 — scan-stage error capture
+src/storage/upload_pipeline.py:204  pre-R9 baseline; triage in R10 — scan-stage final
+src/storage/upload_pipeline.py:291  pre-R9 baseline; triage in R10 — process-stage error capture
+src/storage/upload_pipeline.py:304  pre-R9 baseline; triage in R10 — process-stage final
+src/storage/upload_pipeline.py:310  R9-T7-010 — uploads error_message never set; triage in R10
+src/storage/upload_pipeline.py:371  pre-R9 baseline; triage in R10 — cancel_upload best-effort
+src/storage/sandbox.py:228  pre-R9 baseline; triage in R10 — sandbox spawn error path
+src/storage/sandbox.py:240  pre-R9 baseline; triage in R10 — sandbox spawn cleanup
+src/audit/log.py:224  R9-T4-004 — audit replica fallback; close as part of T6-006 audit HMAC fail-closed
+src/audit/log.py:385  pre-R9 baseline; triage in R10 — list_for_client read fallback
+src/audit/log.py:425  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback
+src/audit/log.py:495  pre-R9 baseline; triage in R10 — verify_chain read fallback
+src/api/routers/auth.py:369  pre-R9 baseline; triage in R10 — signup OAuth race retry
+src/api/routers/config.py:201  pre-R9 baseline; triage in R10 — config-reset write fallback
+src/api/routers/ops.py:135  pre-R9 baseline; triage in R10 — /readyz best-effort check
+src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
+src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics)
+src/api/routers/training.py:145  pre-R9 baseline; triage in R10 — trigger_training pre-check
+src/api/routers/training.py:154  pre-R9 baseline; triage in R10 — trigger_training pre-check
+src/api/routers/training.py:234  pre-R9 baseline; triage in R10 — trigger_training mid-flow
+src/api/routers/training.py:274  pre-R9 baseline; triage in R10 — trigger_training enqueue
+src/api/routers/training.py:287  pre-R9 baseline; triage in R10 — trigger_training fallback
+src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
+src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
+src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
