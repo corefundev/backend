@@ -29,6 +29,7 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import partial
 from typing import Callable, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -180,7 +181,7 @@ def fetch_cbr_fx(
             continue
         df = _safe_fetch(
             feed_name=f"cbr_{ccy.lower()}",
-            fetcher=lambda c=code, s=start, e=end: _fetch_cbr_xml(c, s, e),
+            fetcher=partial(_fetch_cbr_xml, code, start, end),
             cache_dir=cache_dir,
             cache_ttl_hours=cache_ttl_hours,
         )
