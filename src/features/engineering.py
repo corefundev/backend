@@ -84,6 +84,14 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Holiday features failed: {e}")
 
+    # RU external regressors (CNY/USD/EUR/BYN/KZT — ЦБ РФ daily fix)
+    if cfg_f.get("external_regressors_ru", {}).get("enabled", False):
+        try:
+            from src.features.external_regressors_ru import build_ru_regressor_features
+            df = build_ru_regressor_features(df, config, date_col)
+        except Exception as e:
+            logger.warning(f"RU regressor features failed: {e}")
+
     # ── SKU encoding ──────────────────────────────────────────
     df["sku_encoded"] = pd.factorize(df[sku_col])[0]
 
@@ -149,9 +157,45 @@ def _build_promo_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_stock_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Same-day stock is observed at start-of-day (before sales), so it's
+    # not future-leakage to use it directly for is_oos / streak features.
+    # All multi-day windows still use .shift(1) for consistency with the
+    # rest of the feature set.
+    df = df.copy()
     df["is_oos"]      = (df["stock"] == 0).astype(int)
     df["stock_lag_1"] = df["stock"].shift(1)
-    df["oos_rolling_7"] = df["is_oos"].shift(1).rolling(7, min_periods=1).mean()
+    df["oos_rolling_7"]  = df["is_oos"].shift(1).rolling(7, min_periods=1).mean()
+    df["oos_rolling_30"] = df["is_oos"].shift(1).rolling(30, min_periods=1).mean()
+
+    # Stock dynamics — uses shifted stock to be strictly past-only.
+    df["stock_rolling_mean_7"] = df["stock"].shift(1).rolling(7, min_periods=1).mean()
+    df["stock_rolling_min_7"]  = df["stock"].shift(1).rolling(7, min_periods=1).min()
+    df["stock_change_1"]       = df["stock"].shift(1).diff().fillna(0)
+
+    # Run-length features — capture "this SKU has been OOS for N days"
+    # and "it has been M days since stock was last replenished". Both
+    # are highly predictive for sparse SKUs where the sales-zero signal
+    # is dominated by stockouts rather than demand.
+    is_oos = df["is_oos"].to_numpy()
+    streak = np.zeros(len(is_oos), dtype=int)
+    cnt = 0
+    for i, v in enumerate(is_oos):
+        cnt = cnt + 1 if v == 1 else 0
+        streak[i] = cnt
+    df["stockout_streak"] = streak
+
+    # days_since_restock = days since last day with stock > 0. Capped at
+    # a sentinel of 999 when the SKU has never had stock yet (cold start).
+    days_since = np.zeros(len(is_oos), dtype=int)
+    last_in_stock = -1
+    for i, v in enumerate(is_oos):
+        if v == 0:
+            last_in_stock = i
+            days_since[i] = 0
+        else:
+            days_since[i] = (i - last_in_stock) if last_in_stock >= 0 else 999
+    df["days_since_restock"] = days_since
+
     return df
 
 

@@ -36,6 +36,17 @@ features:
     enabled: true
     country: RU                  # RU, US, DE, CN, etc.
 
+  # Russian-market external regressors (CNY/USD/EUR/BYN/KZT daily FX,
+  # fetched from ЦБ РФ XML_dynamic endpoint and cached on disk).
+  # Default OFF so existing client trainings don't shift underfoot;
+  # client config can flip enabled=true to opt in. Frontend will expose
+  # per-currency checkboxes — defaults are all-on inside this list.
+  external_regressors_ru:
+    enabled: false
+    currencies: [CNY, USD, EUR, BYN, KZT]
+    cache_dir: artifacts/regressors_ru
+    cache_ttl_hours: 24
+
 model:
   type: mimo                     # "lgbm" (single-step) or "mimo" (direct multi-step)
   horizon: 14

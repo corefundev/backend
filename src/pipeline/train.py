@@ -70,6 +70,7 @@ def run_training_pipeline(
     # System config.yaml is never modified.
     user_set_hpo = False
     user_set_objective = False
+    user_set_regressors_ru = False
     try:
         from src.clients.registry import get_registry
         registry = get_registry()
@@ -80,6 +81,9 @@ def run_training_pipeline(
         client_cfg = (record.config if record else None) or {}
         user_set_hpo = "hpo" in client_cfg
         user_set_objective = "objective" in (client_cfg.get("model") or {})
+        user_set_regressors_ru = (
+            "external_regressors_ru" in (client_cfg.get("features") or {})
+        )
         config   = mgr.get_effective(client_id, registry)
         logger.info(f"Config for client={client_id}: applied per-client overrides")
     except Exception as e:
@@ -101,10 +105,19 @@ def run_training_pipeline(
         if not user_set_objective:
             config.setdefault("model", {})
             config["model"]["objective"] = spec.default_objective
+        # Plan-tier default: RU external regressors auto-on for Start +
+        # Business (FE will surface a per-currency selector). Free stays
+        # off — keeps free-tier trainings fast and avoids ЦБ РФ load
+        # from low-value runs. Explicit client-config wins.
+        if not user_set_regressors_ru:
+            tier_enables_regressors = (record.plan if record else "free") in {"start", "business"}
+            config.setdefault("features", {}).setdefault("external_regressors_ru", {})
+            config["features"]["external_regressors_ru"]["enabled"] = tier_enables_regressors
         logger.info(
             f"Plan-tier defaults: plan={record.plan if record else 'free'} "
             f"hpo_n_trials={config['hpo'].get('n_trials', 0)} "
-            f"objective={config['model'].get('objective', 'mse')}"
+            f"objective={config['model'].get('objective', 'mse')} "
+            f"regressors_ru={config.get('features',{}).get('external_regressors_ru',{}).get('enabled', False)}"
         )
     except Exception as e:    # noqa: BLE001
         logger.warning(f"Could not apply plan defaults: {e}")

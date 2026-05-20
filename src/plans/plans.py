@@ -111,6 +111,8 @@ _START_CONFIG_KEYS = frozenset({
     "features.price",
     "features.promo",
     "features.stock",
+    "features.external_regressors_ru.enabled",
+    "features.external_regressors_ru.currencies",
     # Business-regulator slider values, not ML hyperparams:
     "features.rolling_windows",    # affects trend sensitivity
     "features.lags",               # affects recency weight
