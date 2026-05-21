@@ -146,6 +146,11 @@ services:
       # host:port post-Lockbox-inject. Rollback: remove these three
       # lines, recreate, traffic returns to postgres:5432 directly.
       DB_HOST_OVERRIDE: "pgbouncer:6432"
+      # R10-S6 activation — bearer token for the /metrics gate. Resolves
+      # to empty (gate stays inert) until METRICS_TOKEN is set in
+      # /srv/backend/.env, provisioned in lockstep with the prometheus
+      # token file.
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     volumes:
       - artifacts:/data/artifacts
     depends_on:
@@ -830,6 +835,13 @@ services:
       # /etc/prometheus/ (we don't use the image's default consoles/).
       - ./prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
+      # R10-S6 activation — bearer-token file for scraping the api
+      # /metrics endpoint. The host file (mode 644; parent dir
+      # /srv/backend/secrets is 700) is created BEFORE this mount goes
+      # live, so the bind never auto-creates a directory. prometheus.yml
+      # points its `sku-forecasting-api` job at /run/metrics_token in a
+      # follow-up commit, once this mount is in the container spec.
+      - /srv/backend/secrets/metrics_token:/run/metrics_token:ro
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
