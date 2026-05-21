@@ -74,6 +74,7 @@ x-lockbox-blanks: &lockbox-blanks
   API_KEY:                         ""
   ADMIN_API_KEY:                   ""
   MODEL_SIGNING_KEY:               ""
+  METRICS_TOKEN:                   ""  # R10-S6 — bearer token for the /metrics scrape gate
   AUDIT_LOG_HMAC_KEY:              ""  # 32-byte hex; tamper-evidence chain over audit_log (H4)
   BACKUP_PASSPHRASE:               ""
   GRAFANA_PASSWORD:                ""
@@ -200,5 +201,20 @@ services:
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "POSTGRES_PASSWORD"
       POSTGRES_PASSWORD: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # prometheus (custom image — Dockerfile.prometheus) bootstraps
+  # METRICS_TOKEN from Lockbox so the `sku-forecasting-api` scrape job
+  # can present a bearer token to the /metrics gate (R10-S6). The token
+  # is written to /run/metrics_token by scripts/prometheus_entrypoint.sh
+  # — it never lands in /srv/backend/.env. Allowlist gates the injection:
+  # prometheus only ever sees METRICS_TOKEN, not the other 80+ secrets.
+  prometheus:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "METRICS_TOKEN"
+      METRICS_TOKEN: ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro

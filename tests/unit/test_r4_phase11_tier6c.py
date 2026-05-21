@@ -103,18 +103,28 @@ def test_no_latest_tag_in_active_compose():
 
 def test_prometheus_pin_corrects_r2_29_phantom_tag():
     """R2-29 declared prom/prometheus:v2.59.1, which never existed
-    on Docker Hub; prod silently stayed on v2.51.2. R4-20 must
-    bump the compose ref to a tag that actually resolves AND pin
-    its digest."""
-    text = (_BACKEND / "docker" / "docker-compose.yml").read_text()
-    # The phantom tag must be gone.
-    assert "prom/prometheus:v2.59.1" not in text, (
-        "the non-existent v2.59.1 tag must be removed from compose"
+    on Docker Hub; prod silently stayed on v2.51.2. R4-20 bumped to a
+    tag that actually resolves AND pinned its digest.
+
+    R10-S6 moved prometheus to a custom Lockbox-aware image: the
+    compose service now uses `build:` (docker/Dockerfile.prometheus),
+    and the upstream pin lives in that Dockerfile's `FROM`. The
+    no-phantom-tag + real-tag-with-digest contract still holds — it
+    just moved location."""
+    compose = (_BACKEND / "docker" / "docker-compose.yml").read_text()
+    dockerfile = (_BACKEND / "docker" / "Dockerfile.prometheus").read_text()
+    # The phantom tag must be gone everywhere.
+    assert "prom/prometheus:v2.59.1" not in compose, (
+        "the non-existent v2.59.1 tag must not appear in compose"
     )
-    # The real bumped tag with digest pin must be present.
-    assert "prom/prometheus:v2.55.1@sha256:" in text, (
-        "compose must pin prometheus to v2.55.1 (or any tag that "
-        "actually exists) with @sha256: digest (R4-20)"
+    assert "prom/prometheus:v2.59.1" not in dockerfile, (
+        "the non-existent v2.59.1 tag must not appear in Dockerfile.prometheus"
+    )
+    # The real bumped tag with digest pin must be present — now in the
+    # custom Dockerfile's FROM, since the compose service builds it.
+    assert "prom/prometheus:v2.55.1@sha256:" in dockerfile, (
+        "Dockerfile.prometheus must pin upstream prometheus to v2.55.1 "
+        "(a tag that actually exists) with @sha256: digest (R4-20 / R10-S6)"
     )
 
 

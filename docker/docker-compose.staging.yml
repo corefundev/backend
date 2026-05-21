@@ -53,6 +53,13 @@ services:
       - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
+      # R10-S6 — the custom prometheus image runs lockbox_bootstrap.sh,
+      # which needs the YC SA key. `!override` above drops the mount
+      # docker-compose.lockbox.yml adds, so it must be re-listed here.
+      # (staging Lockbox has no METRICS_TOKEN → bootstrap injects nothing
+      # → entrypoint writes an empty token file; staging /metrics gate
+      # stays inert, which is fine for a test env.)
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
   # Heavy services we don't need on staging — disable via a non-default
   # profile so `up -d` (no --profile) skips them.

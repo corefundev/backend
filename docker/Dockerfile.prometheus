@@ -1,0 +1,51 @@
+# Custom prometheus image — bakes Lockbox-bootstrap deps so the container
+# fetches METRICS_TOKEN from Yandex Lockbox at startup and writes it to
+# the credentials file the `sku-forecasting-api` scrape job authenticates
+# with (R10-S6). The token never touches /srv/backend/.env.
+#
+# Why a custom image vs upstream prom/prometheus:
+#   The upstream image is busybox-based — no curl/jq/openssl, so
+#   scripts/lockbox_bootstrap.sh (PS256 JWT -> IAM -> Lockbox payload)
+#   cannot run there. We rebase on alpine, install the few extra
+#   packages, and copy the prometheus binary from upstream.
+#
+# Upstream pinned to v2.55.1 + digest (the R4-20 / R2-29 version-history
+# rationale that lived on the compose `image:` line is preserved here).
+#
+# Same Lockbox-fetch pattern as backup / alertmanager / postgres-exporter.
+
+FROM prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3 AS upstream
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+RUN apk add --no-cache \
+        curl \
+        jq \
+        openssl \
+        coreutils \
+        ca-certificates
+
+# Prometheus + promtool binaries from upstream (statically linked Go).
+COPY --from=upstream /bin/prometheus /bin/prometheus
+COPY --from=upstream /bin/promtool   /bin/promtool
+
+# Lockbox secret-loader (shared with backup / alertmanager / postgres-exporter).
+COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
+
+# Wrapper: optional Lockbox bootstrap, write METRICS_TOKEN to the
+# credentials file, exec prometheus.
+COPY scripts/prometheus_entrypoint.sh /usr/local/bin/prometheus_entrypoint.sh
+
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/prometheus_entrypoint.sh \
+ && mkdir -p /prometheus \
+ && chown -R nobody:nobody /prometheus \
+ # /run must be writable by `nobody` so the entrypoint can create
+ # /run/metrics_token (the scrape-auth credentials_file).
+ && chown nobody:nobody /run
+
+EXPOSE 9090
+WORKDIR /prometheus
+USER nobody
+
+ENTRYPOINT ["/usr/local/bin/prometheus_entrypoint.sh"]
