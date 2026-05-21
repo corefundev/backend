@@ -146,11 +146,9 @@ services:
       # host:port post-Lockbox-inject. Rollback: remove these three
       # lines, recreate, traffic returns to postgres:5432 directly.
       DB_HOST_OVERRIDE: "pgbouncer:6432"
-      # R10-S6 activation — bearer token for the /metrics gate. Resolves
-      # to empty (gate stays inert) until METRICS_TOKEN is set in
-      # /srv/backend/.env, provisioned in lockstep with the prometheus
-      # token file.
-      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # R10-S6 — METRICS_TOKEN is delivered by Lockbox bootstrap
+      # (docker-compose.lockbox.yml blanks it; bootstrap_secrets injects
+      # it at startup). NOT set here — secrets never go in compose env.
     volumes:
       - artifacts:/data/artifacts
     depends_on:
@@ -813,13 +811,15 @@ services:
       start_period: 5s
 
   prometheus:
-    # R4-20 — R2-29 declared v2.59.1 but that tag never existed on
-    # Docker Hub, so `compose pull` silently failed and prod stayed
-    # on v2.51.2 since 2024-Q1 (CD never recreated the container).
-    # Bump to v2.55.1 (latest 2.x stable on Docker Hub, includes all
-    # security patches accrued since v2.51) AND digest-pin so the
-    # observed identity matches what's documented in the file.
-    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+    # R10-S6 — custom image (alpine + lockbox_bootstrap.sh): the
+    # container fetches METRICS_TOKEN from YC Lockbox at startup and
+    # writes it to /run/metrics_token for the api /metrics scrape job.
+    # The token never touches /srv/backend/.env. Upstream prometheus is
+    # pinned to v2.55.1 + digest inside docker/Dockerfile.prometheus
+    # (the R4-20 / R2-29 version-history rationale is preserved there).
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.prometheus
     mem_limit: 512m    # R5-M9
     cpus: 1.0        # R5-M9
     ports:
@@ -835,13 +835,10 @@ services:
       # /etc/prometheus/ (we don't use the image's default consoles/).
       - ./prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
-      # R10-S6 activation — bearer-token file for scraping the api
-      # /metrics endpoint. The host file (mode 644; parent dir
-      # /srv/backend/secrets is 700) is created BEFORE this mount goes
-      # live, so the bind never auto-creates a directory. prometheus.yml
-      # points its `sku-forecasting-api` job at /run/metrics_token in a
-      # follow-up commit, once this mount is in the container spec.
-      - /srv/backend/secrets/metrics_token:/run/metrics_token:ro
+      # R10-S6 — the /metrics scrape-auth token is NOT a bind-mounted
+      # host file: docker-compose.lockbox.yml mounts the YC SA key and
+      # the custom entrypoint fetches METRICS_TOKEN from Lockbox, writing
+      # /run/metrics_token inside the container. No secret on the host FS.
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
