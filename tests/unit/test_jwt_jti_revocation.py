@@ -127,7 +127,8 @@ def test_legacy_token_without_jti_still_decodes(fresh_revocation):
     # is opt-in by the presence of the claim.
     from datetime import datetime, timedelta, timezone
     from src.auth.jwt_auth import (
-        _get_jwt_secret, JWT_ALGORITHM, decode_access_token,
+        _get_jwt_secret, JWT_ALGORITHM, JWT_AUDIENCE, JWT_ISSUER,
+        decode_access_token,
     )
     now = datetime.now(timezone.utc)
     legacy_payload = {
@@ -136,6 +137,10 @@ def test_legacy_token_without_jti_still_decodes(fresh_revocation):
         "roles": ["forecast"],
         "iat": now,
         "exp": now + timedelta(minutes=30),
+        # R10-S7 — aud/iss are mandatory now; this test isolates the
+        # missing-jti case, so the token still carries valid aud/iss.
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
         # no `jti`
     }
     token = pyjwt.encode(legacy_payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)

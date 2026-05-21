@@ -109,18 +109,19 @@ def test_email_provider_console_case_insensitive(clean_env):
         _get_check()()
 
 
-def test_missing_model_signing_key_only_warns(clean_env, caplog):
-    # Audit R2-5: MODEL_SIGNING_KEY missing in prod is a SOFT warning,
-    # not a hard-fail. storage/backend falls back to JWT_SECRET_KEY
-    # for model signing; existing S3 model objects were signed under
-    # that fallback. A hard-fail without coordinated model re-signing
-    # would brick every model load. The warning surfaces the gap so
-    # ops can plan a rotation during a maintenance window.
+def test_missing_model_signing_key_hard_fails(clean_env):
+    # R10-S8 (supersedes R2-5): MODEL_SIGNING_KEY missing in prod is now
+    # a HARD FAIL. A model-pickle tamper-protection property must not
+    # depend on the implicit JWT_SECRET_KEY fallback in
+    # storage/backend._signing_key(). Prod Lockbox carries the key
+    # (verified 2026-05-21) so the gate does not brick the deploy; it
+    # pins the key against a silent Lockbox edit. The gate requires the
+    # key to be PRESENT, not a specific value — it never re-signs
+    # models, so the old R2-5 re-signing concern does not apply.
     _valid_prod(clean_env)
     clean_env.setenv("MODEL_SIGNING_KEY", "")
-    with caplog.at_level(logging.WARNING):
-        _get_check()()  # no raise
-    assert any("MODEL_SIGNING_KEY" in r.message for r in caplog.records)
+    with pytest.raises(RuntimeError, match="MODEL_SIGNING_KEY"):
+        _get_check()()
 
 
 # ── Soft warnings — must NOT raise, must log ─────────────────────────────
