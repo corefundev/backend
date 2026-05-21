@@ -101,12 +101,17 @@ async def internal_state(auth: AuthContext = Depends(get_current_client)):
 
     Returns the list of clients whose models are in memory (was
     formerly leaked via /health) plus a few non-sensitive runtime
-    knobs. Requires JWT or API-key auth so it can't be hit by an
-    unauthenticated scanner.
+    knobs.
 
-    Not used by the frontend; intended for ops debugging via curl
-    with a valid token.
+    R10-S5 — admin-only. `cached_client_ids()` is a tenant-enumeration
+    vector: without a role check ANY authenticated paying customer could
+    list the client_ids of every active tenant. Mirrors the role gate on
+    /internal/audit/verify.
+
+    Not used by the frontend; intended for ops debugging via curl with
+    an admin token.
     """
+    auth.require_role("admin")
     return {
         "status": "ok",
         "models_cached": cached_client_ids(),

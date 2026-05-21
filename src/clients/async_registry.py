@@ -173,6 +173,15 @@ class AsyncClientRegistry:
     async def update(self, client_id: str, **fields) -> None:
         if not fields:
             return
+        # R10-S2 — same column-name SQL-injection guard as the sync
+        # PostgresClientRegistry.update(). The allowlist is owned by
+        # registry.py so the two implementations can never drift.
+        from src.clients.registry import CLIENT_UPDATABLE_COLUMNS
+        bad = set(fields) - CLIENT_UPDATABLE_COLUMNS
+        if bad:
+            raise ValueError(
+                f"registry.update: non-allowlisted column(s): {sorted(bad)}"
+            )
         set_clauses = []
         values      = []
         for i, (k, v) in enumerate(fields.items(), 2):

@@ -61,14 +61,14 @@ src/audit/log.py:425  pre-R9 baseline; triage in R10 — recent_failed_logins re
 src/audit/log.py:495  pre-R9 baseline; triage in R10 — verify_chain read fallback
 src/api/routers/auth.py:369  pre-R9 baseline; triage in R10 — signup OAuth race retry
 src/api/routers/config.py:201  pre-R9 baseline; triage in R10 — config-reset write fallback
-src/api/routers/ops.py:135  pre-R9 baseline; triage in R10 — /readyz best-effort check
+src/api/routers/ops.py:140  pre-R9 baseline; triage in R10 — /readyz best-effort check (lines +5 after R10-S5 docstring)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
 src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics)
-src/api/routers/training.py:145  pre-R9 baseline; triage in R10 — trigger_training pre-check
-src/api/routers/training.py:154  pre-R9 baseline; triage in R10 — trigger_training pre-check
-src/api/routers/training.py:234  pre-R9 baseline; triage in R10 — trigger_training mid-flow
-src/api/routers/training.py:274  pre-R9 baseline; triage in R10 — trigger_training enqueue
-src/api/routers/training.py:287  pre-R9 baseline; triage in R10 — trigger_training fallback
+src/api/routers/training.py:159  pre-R9 baseline; triage in R10 — trigger_training pre-check (lines +14 after R10-S1 gate)
+src/api/routers/training.py:168  pre-R9 baseline; triage in R10 — trigger_training pre-check (lines +14 after R10-S1 gate)
+src/api/routers/training.py:248  pre-R9 baseline; triage in R10 — trigger_training mid-flow (lines +14 after R10-S1 gate)
+src/api/routers/training.py:288  pre-R9 baseline; triage in R10 — trigger_training enqueue (lines +14 after R10-S1 gate)
+src/api/routers/training.py:301  pre-R9 baseline; triage in R10 — trigger_training fallback (lines +14 after R10-S1 gate)
 src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
 src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
