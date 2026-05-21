@@ -197,24 +197,21 @@ def decode_access_token(token: str) -> dict:
     try:
         import jwt as pyjwt
         _ensure_secrets_loaded()
-        # Backward-compat aud/iss handling (audit R2-17). Tokens issued
-        # before this commit have no `aud`/`iss`; we accept them. New
-        # tokens (Phase 6+) carry both; we verify the values. The
-        # `unverified` peek is safe — the next decode does the full
-        # signature check; we just look at which claims exist.
-        unverified = pyjwt.decode(
-            token, options={"verify_signature": False, "verify_exp": False},
-        )
-        has_aud = "aud" in unverified
-        has_iss = "iss" in unverified
+        # R10-S7 — aud/iss are ALWAYS verified. `create_access_token`
+        # has stamped both `iss` and `aud` on every token since audit
+        # R2-17; with a 60-minute JWT lifetime no un-expired token can
+        # lack them. The former backward-compat branch peeked at the
+        # unverified token and verified aud/iss ONLY if present — so a
+        # token WITHOUT those claims passed with no aud/iss check at
+        # all. That is an unbounded cross-service / cross-environment
+        # token-reuse bypass the moment JWT_SECRET_KEY is shared. A
+        # missing aud/iss now raises MissingRequiredClaimError →
+        # caught below → 401.
         payload = pyjwt.decode(
             token, JWT_SECRET, algorithms=[JWT_ALGORITHM],
-            audience=JWT_AUDIENCE if has_aud else None,
-            issuer=JWT_ISSUER if has_iss else None,
-            options={
-                "verify_aud": has_aud,
-                "verify_iss": has_iss,
-            },
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+            options={"verify_aud": True, "verify_iss": True},
         )
     except Exception as e:
         # NEVER reflect the PyJWT exception back to the client — its
