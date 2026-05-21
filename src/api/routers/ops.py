@@ -18,9 +18,10 @@ that information).
 """
 from __future__ import annotations
 
+import hmac
 import os
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.api.loaders import load_service_for_client
@@ -161,8 +162,33 @@ async def readyz():
     )
 
 
+def _require_metrics_token(request: Request) -> None:
+    """
+    R10-S6 — application-level bearer-token gate for /metrics.
+
+    nginx restricts /metrics to ADMIN_CIDR externally, but Prometheus
+    scrapes `api:8000/metrics` DIRECTLY over the docker network — so
+    every container on that network can read the endpoint, and the
+    metrics carry per-`client_id` labels (a tenant-enumeration leak).
+
+    The gate is rollout-safe: it is INERT when `METRICS_TOKEN` is unset
+    (behaviour identical to before — nginx ADMIN_CIDR stays the only
+    control), so this code ships with no breakage window. Once
+    METRICS_TOKEN is provisioned for both the api and the Prometheus
+    scrape job, the endpoint requires `Authorization: Bearer <token>`.
+    """
+    expected = (os.environ.get("METRICS_TOKEN") or "").strip()
+    if not expected:
+        return
+    header = request.headers.get("authorization", "")
+    presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    if not presented or not hmac.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="metrics: invalid or missing token")
+
+
 @router.get("/metrics")
-async def prometheus_metrics():
+async def prometheus_metrics(request: Request):
+    _require_metrics_token(request)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
