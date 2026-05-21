@@ -126,6 +126,26 @@ class ClientRegistry:
     ) -> Optional[dict]: ...
 
 
+# ── R10-S2: column allowlist for update() ────────────────────────────
+# update() builds its SET clause by interpolating **fields KEYS straight
+# into the SQL string as column names. Values are parameterised (%s);
+# column names cannot be — so an attacker-influenced key is a textbook
+# SQL-injection sink. Every current caller passes hardcoded kwargs, but
+# the method contract must not depend on caller discipline. This frozen
+# set is the sku_clients schema (migrations/005) minus the PK client_id
+# and the immutable created_at; any key outside it is rejected before
+# the query is built. Mirrors PostgresTrainingRunsRegistry._UPDATABLE_COLUMNS.
+CLIENT_UPDATABLE_COLUMNS: frozenset = frozenset({
+    "config", "storage_path",
+    "last_trained_at", "last_mlflow_run_id", "last_wmape", "last_mase",
+    "status", "model_version", "horizon", "notes",
+    "plan", "training_runs_this_month", "training_runs_window_start",
+    "trained_sku_count",
+    "api_key_hash", "email", "email_canonical", "email_verified_at",
+    "oauth_provider", "oauth_subject",
+})
+
+
 class PostgresClientRegistry(ClientRegistry):
     """
     PostgreSQL-backed registry.
@@ -270,6 +290,14 @@ class PostgresClientRegistry(ClientRegistry):
     def update(self, client_id: str, **fields) -> None:
         if not fields:
             return
+        # R10-S2 — reject any key that is not a known sku_clients column
+        # BEFORE it reaches the f-string SET clause below. Closes the
+        # column-name SQL-injection sink at the method contract level.
+        bad = set(fields) - CLIENT_UPDATABLE_COLUMNS
+        if bad:
+            raise ValueError(
+                f"registry.update: non-allowlisted column(s): {sorted(bad)}"
+            )
         # psycopg2 can't adapt dict/list directly into JSONB columns —
         # it raises "can't adapt type 'dict'". Wrap structured values
         # with extras.Json() so the JSONB columns (config, oauth_meta…)
