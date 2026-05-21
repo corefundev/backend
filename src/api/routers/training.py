@@ -107,6 +107,20 @@ async def trigger_training(
         when `upload_id` is supplied.
     """
     require_client_access(client_id, auth)
+
+    # R10-S1 — when no upload_id is supplied, req.data_path is consumed
+    # verbatim as the training source (a local path or s3:// URI),
+    # bypassing upload-registry ownership entirely: a non-admin caller
+    # could point it at another tenant's S3 prefix or a worker-local
+    # file. The data_path field is documented as admin / legacy direct-
+    # path training only — the normal customer flow always carries an
+    # upload_id (FE upload pipeline). Enforce that contract here.
+    if req.upload_id is None and not auth.has_role("admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="upload_id is required — raw data_path training is admin-only",
+        )
+
     registry = get_registry()
     record   = registry.get(client_id)
     if record is None:
