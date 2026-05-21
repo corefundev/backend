@@ -266,4 +266,8 @@ async def update_client(
         target_type="client", target_id=client_id,
         metadata={"changes": changes},
     )
-    return updated.__dict__
+    # R10-S4 — project through the safe-field allowlist. The raw
+    # `updated.__dict__` leaks api_key_hash / email_canonical /
+    # oauth_subject — fields every other client endpoint already
+    # filters via _client_to_safe_dict. This response must not regress.
+    return _client_to_safe_dict(updated)
