@@ -100,23 +100,22 @@ def assert_production_config_safe() -> None:
             "exhaust postgres slots on traffic spikes."
         )
 
-    # Audit R2-5 (2026-05-15): MODEL_SIGNING_KEY enforcement is a
-    # SOFT WARNING for now, not a hard-fail. Rationale:
-    # `src/storage/backend.py:_signing_key()` falls back to
-    # JWT_SECRET_KEY when MODEL_SIGNING_KEY is empty — existing prod
-    # models in S3 were signed under that fallback. Forcing a separate
-    # MODEL_SIGNING_KEY without coordinated model re-signing would
-    # silently invalidate every cached model on next load. The right
-    # rollout is:
-    #   1. Set MODEL_SIGNING_KEY to the SAME value as JWT_SECRET_KEY in
-    #      Lockbox (matches current sign-keys-with-JWT_SECRET fallback).
-    #   2. Once that's stable, generate a new MODEL_SIGNING_KEY,
-    #      re-sign all S3 model objects, then swap the env value.
-    # Until both steps are done, the warning makes the operational
-    # gap visible without breaking model load.
+    # R10-S8 (2026-05-21) — MODEL_SIGNING_KEY is now a HARD FAIL in prod.
+    # storage/backend.py HMAC-signs every model pickle and refuses to
+    # load an unsigned blob whenever a signing key is configured; with
+    # MODEL_SIGNING_KEY empty it falls back to JWT_SECRET_KEY. A tamper-
+    # protection property must not depend on an implicit fallback.
+    # Prod Lockbox carries MODEL_SIGNING_KEY (verified 2026-05-21,
+    # len=64) so this gate does not brick the deploy; it pins the key
+    # so a future Lockbox edit cannot silently drop pickle tamper-
+    # evidence. NOTE: this requires the key to be PRESENT, not a
+    # specific value — it never re-signs models, so the R2-5 concern
+    # (changing the value invalidates cached models) does not apply.
     if not (os.environ.get("MODEL_SIGNING_KEY") or "").strip():
-        # Falls through to soft_warnings below (not hard_fails).
-        pass
+        hard_fails.append(
+            "MODEL_SIGNING_KEY is empty (model pickles would lose "
+            "dedicated HMAC tamper-protection — set it in prod Lockbox)"
+        )
 
     if hard_fails:
         raise RuntimeError(
@@ -148,16 +147,8 @@ def assert_production_config_safe() -> None:
             "— jwt_auth._load_secret will refuse at first read. "
             "Generate a stronger value: openssl rand -hex 32"
         )
-    # R2-5 soft warning: signed-pickle protection silently falls back
-    # to JWT_SECRET_KEY when MODEL_SIGNING_KEY is empty. Once you have
-    # a maintenance window for model re-signing, set MODEL_SIGNING_KEY
-    # explicitly to break the coupling.
-    if not (os.environ.get("MODEL_SIGNING_KEY") or "").strip():
-        soft_warnings.append(
-            "MODEL_SIGNING_KEY is empty (model pickles fall back to "
-            "JWT_SECRET_KEY signing; rotate to a dedicated key for "
-            "defense-in-depth — see audit R2-5)"
-        )
+    # (R10-S8: the former MODEL_SIGNING_KEY soft warning was promoted
+    # to a hard fail above — if we reach here the key is present.)
 
     for w in soft_warnings:
         logger.warning("production-config check: %s", w)
