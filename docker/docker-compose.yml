@@ -1187,7 +1187,6 @@ volumes:
   tempo_data:
   postgres_data:
   minio_data:
-  mlflow_data:
   airflow_logs:
   prometheus_data:
   grafana_data:
