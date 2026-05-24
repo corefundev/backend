@@ -28,6 +28,16 @@ RUN apt-get update \
         ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# `boto3` is the S3 client for `--serve-artifacts` + S3 artifact destinations.
+# The official mlflow image ships skinny — no boto3. Without this, the
+# very first artifact upload via `mlflow-artifacts:/` returns 500 with
+# `ModuleNotFoundError: No module named 'boto3'` and mlflow_run_id stays
+# NULL — the exact R8-12 failure mode in a different shape. Pin to a
+# bounded major so transitive botocore upgrades don't surprise us; the
+# range covers all current 1.x releases (1.34+ supports S3 SigV4 with
+# custom endpoints — what Selectel requires).
+RUN pip install --no-cache-dir 'boto3>=1.34,<2'
+
 # Lockbox secret-loader (shared with backup / alertmanager / postgres-
 # exporter / pgbouncer / prometheus).
 COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
