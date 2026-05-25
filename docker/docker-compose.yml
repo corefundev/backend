@@ -569,14 +569,23 @@ services:
     cpus: 1.0
     ports:
       - "5000:5000"
-    # NB R8-12 / R10 Phase 0 — `--backend-store-uri` is NOT here.
-    # compose interpolates ${POSTGRES_PASSWORD} from /srv/backend/.env
-    # at config-load, but by R3-13 design .env only carries the seed
-    # placeholder `sku` — the real value lives in Lockbox and is
-    # injected per-container at runtime by lockbox_bootstrap.sh.
-    # mlflow_entrypoint.sh fetches it via LOCKBOX_ALLOWED_KEYS, builds
-    # postgresql://sku:$POSTGRES_PASSWORD@postgres:5432/sku_forecasting,
-    # and appends it to these args. See scripts/mlflow_entrypoint.sh.
+    # NB R8-12 / R10 Phase 0 — `--backend-store-uri` AND `--artifacts-
+    # destination` are NOT here, both are built in the entrypoint at
+    # runtime from Lockbox-injected values:
+    #   * `--backend-store-uri`: compose interpolates ${POSTGRES_PASSWORD}
+    #     from /srv/backend/.env at config-load, but by R3-13 design
+    #     .env only carries the seed placeholder `sku` — the real value
+    #     lives in Lockbox and is injected per-container at runtime by
+    #     lockbox_bootstrap.sh.
+    #   * `--artifacts-destination`: hardcoding `s3://sku-mlflow/mlflow/`
+    #     here makes staging silently write to the prod bucket if
+    #     Selectel IAM is permissive (bug observed 2026-05-26 during
+    #     Phase 0-A — staging Lockbox returned staging creds, but those
+    #     creds also had write-access to the prod bucket so the proxy
+    #     upload succeeded into the wrong place). Composing in the
+    #     entrypoint from S3_MLFLOW_BUCKET keeps each env in its own
+    #     bucket even if IAM stays permissive.
+    # See scripts/mlflow_entrypoint.sh for both compositions.
     # R8-3 — `--allowed-hosts` is REQUIRED on mlflow 3.x (DNS-rebinding
     # mitigation); without it, every worker→mlflow:5000 call returns 403.
     command: >
@@ -587,7 +596,6 @@ services:
       --allowed-hosts mlflow,mlflow:5000,localhost,127.0.0.1
       --default-artifact-root mlflow-artifacts:/
       --serve-artifacts
-      --artifacts-destination s3://sku-mlflow/mlflow/
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
