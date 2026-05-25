@@ -210,7 +210,22 @@ jobs:
           # Push only configs / scripts / migrations — image carries src.
           # Excludes: secrets/yc-sa-key.json (kept stable on host), .env
           # (host-managed), build / cache / venv junk.
-          rsync -azh \
+          #
+          # --delete-after: every file removed from git in `docker/`,
+          # `scripts/`, `migrations/`, `configs/` must disappear from
+          # /srv/backend/ on the next deploy. Without this, a revert PR
+          # (e.g. R8-12 v1 → v2 cycle 2026-05-25) leaves the deleted
+          # files dangling on prod indefinitely as dead config (R10-Misc).
+          # `--delete-after` (not bare --delete) defers all deletions
+          # until the transfer succeeds, so a mid-transfer ssh drop
+          # can't leave the host in a worse state than before.
+          # `--delete` is filter-symmetric: files matched by --exclude
+          # (secrets/**, .env) are preserved regardless of source state.
+          # `--exclude='.DS_Store'` + `*.bak` keeps macOS / editor
+          # noise out of the transfer entirely, so they can never
+          # accumulate on prod even on the first sync.
+          rsync -azh --delete-after \
+              --exclude='.DS_Store' --exclude='*.bak' \
               --include='docker/' --include='docker/**' \
               --include='scripts/' --include='scripts/**' \
               --include='migrations/' --include='migrations/**' \
@@ -330,7 +345,12 @@ jobs:
           USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          rsync -azh \
+          # See staging block above for the `--delete-after` rationale
+          # (R10-Misc, 2026-05-25). Identical invocation — keep both
+          # in lockstep; a divergence would mean prod gets a different
+          # cleanup discipline than staging, defeating the gate.
+          rsync -azh --delete-after \
+              --exclude='.DS_Store' --exclude='*.bak' \
               --include='docker/' --include='docker/**' \
               --include='scripts/' --include='scripts/**' \
               --include='migrations/' --include='migrations/**' \
