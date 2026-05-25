@@ -67,6 +67,11 @@ x-lockbox-blanks: &lockbox-blanks
   S3_BACKUP_BUCKET:                ""
   S3_BACKUP_ENDPOINT_URL:          ""
   S3_BACKUP_REGION:                ""
+  S3_MLFLOW_BUCKET:                ""  # R8-12 — dedicated mlflow S3
+  S3_MLFLOW_ENDPOINT_URL:          ""  # R8-12
+  S3_MLFLOW_ACCESS_KEY_ID:         ""  # R8-12
+  S3_MLFLOW_SECRET_ACCESS_KEY:     ""  # R8-12
+  S3_MLFLOW_REGION:                ""  # R8-12
   S3_BUCKET:                       ""
   S3_ENDPOINT_URL:                 ""
   AWS_DEFAULT_REGION:              ""
@@ -216,5 +221,38 @@ services:
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "METRICS_TOKEN"
       METRICS_TOKEN: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
+  # mlflow (custom image — Dockerfile.mlflow) bootstraps the 5
+  # S3_MLFLOW_* keys from Lockbox at startup. The mlflow_entrypoint.sh
+  # then renames them to AWS_* + MLFLOW_S3_ENDPOINT_URL IN-PROCESS so
+  # the mlflow server's S3 client picks them up — the api/worker AWS_*
+  # (different bucket — main client-data) remain untouched. Allowlist
+  # gates the injection: mlflow sees ONLY 6 keys, not the other 88.
+  # POSTGRES_PASSWORD is in the allowlist because mlflow_entrypoint.sh
+  # builds --backend-store-uri from the LIVE Lockbox value at runtime
+  # (compose ${POSTGRES_PASSWORD} interpolates from .env which carries
+  # the R3-13 seed `sku` placeholder, not the real value — the api/
+  # worker pattern is the same: real secret in Lockbox, .env stays
+  # placeholder-only).
+  # Closes R8-12 — replaces the broken local-FS artifact path + the
+  # never-deployed MinIO endpoint.
+  mlflow:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "S3_MLFLOW_BUCKET S3_MLFLOW_ENDPOINT_URL S3_MLFLOW_ACCESS_KEY_ID S3_MLFLOW_SECRET_ACCESS_KEY S3_MLFLOW_REGION POSTGRES_PASSWORD"
+      S3_MLFLOW_BUCKET: ""
+      S3_MLFLOW_ENDPOINT_URL: ""
+      S3_MLFLOW_ACCESS_KEY_ID: ""
+      S3_MLFLOW_SECRET_ACCESS_KEY: ""
+      S3_MLFLOW_REGION: ""
+      # Empty placeholder so compose doesn't `${POSTGRES_PASSWORD}`
+      # interpolate the .env seed into the container env at config-
+      # load — mlflow_entrypoint.sh fills this from Lockbox at runtime.
+      # If non-empty, lockbox_bootstrap.sh's "don't clobber explicit
+      # overrides" guard (lines 121-126) would SKIP injection.
+      POSTGRES_PASSWORD: ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
