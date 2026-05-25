@@ -68,18 +68,13 @@ def test_pushgateway_mounts_persistent_volume():
 def test_pushgateway_data_volume_declared():
     """The named volume `pushgateway_data` must be declared in the
     top-level `volumes:` block; otherwise compose refuses to start."""
-    # Parse the compose file properly instead of regex-pairing lines.
-    # The original regex `((?:  \w[\w_-]*:\n?.*\n?)+)` paired adjacent
-    # lines and was line-count-parity-dependent: removing one volume
-    # (or inserting a comment) could shift parity so a `# …` comment
-    # line stopped the match before `pushgateway_data:` — false fail
-    # (hit during R8-12 / R10-Phase0 when an unrelated orphan volume
-    # was cleaned up in the same block). YAML parsing is comment-tolerant
-    # and order-independent.
-    import yaml
     text = (_BACKEND / "docker" / "docker-compose.yml").read_text()
-    config = yaml.safe_load(text)
-    volumes = config.get("volumes") or {}
-    assert "pushgateway_data" in volumes, (
+    # Find the top-level volumes: block — must be at column 0.
+    import re
+    vol_match = re.search(r"^volumes:\n((?:  \w[\w_-]*:\n?.*\n?)+)",
+                          text, re.M)
+    assert vol_match, "top-level volumes: block must exist"
+    vol_block = vol_match.group(0)
+    assert "pushgateway_data:" in vol_block, (
         "pushgateway_data named volume must be declared (R5-16)"
     )

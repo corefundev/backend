@@ -555,37 +555,31 @@ services:
     # ExitCode=0 (Docker masks the OOM after the kill if reaped fast).
     # 2g + --workers 1 keeps the math comfortably under: ~600MB peak
     # observed.
-    # R8-12 / R10 Phase 0 — custom Lockbox-aware image (Debian-slim base
-    # + lockbox_bootstrap.sh): the entrypoint fetches S3_MLFLOW_* from
-    # Yandex Lockbox at startup and serves artifacts via the proxy
-    # (mlflow-artifacts:// scheme), so the worker HTTP-PUTs to mlflow:5000
-    # instead of needing S3 creds itself. Upstream mlflow pinned to
-    # v3.11.1 + digest inside docker/Dockerfile.mlflow (R4-20 preserved).
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.mlflow
+    # R4-20 digest-pinned 2026-05-17
+    image: ghcr.io/mlflow/mlflow:v3.11.1@sha256:6cb0a22c0d4d722a793c2e93d89ba28b10b6b27d4c1e60ab2533a8e081ffca2d
     logging: *log-rotation
     mem_limit: 2g
     cpus: 1.0
     ports:
       - "5000:5000"
+    environment:
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://sku-forecasting/mlflow/
+      AWS_ACCESS_KEY_ID: ${MINIO_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-minioadmin}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
     # Audit R3-13 — `command:` is interpolated at compose-load, so
     # ${POSTGRES_PASSWORD} resolves to the same value as the postgres
     # service environment (validated by the :? in that block).
-    # R8-3 — `--allowed-hosts` is REQUIRED on mlflow 3.x (DNS-rebinding
-    # mitigation); without it, every worker→mlflow:5000 call returns 403.
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
       --workers 1
-      --allowed-hosts mlflow,mlflow:5000,localhost,127.0.0.1
       --backend-store-uri postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
-      --default-artifact-root mlflow-artifacts:/
-      --serve-artifacts
-      --artifacts-destination s3://sku-mlflow/mlflow/
+      --default-artifact-root s3://sku-forecasting/mlflow/
     depends_on:
       postgres: { condition: service_healthy }
+      minio:    { condition: service_healthy }
     restart: unless-stopped
     # MLflow 2.x exposes /health on the server port.
     healthcheck:
@@ -1187,6 +1181,7 @@ volumes:
   tempo_data:
   postgres_data:
   minio_data:
+  mlflow_data:
   airflow_logs:
   prometheus_data:
   grafana_data:

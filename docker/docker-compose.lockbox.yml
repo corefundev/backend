@@ -67,11 +67,6 @@ x-lockbox-blanks: &lockbox-blanks
   S3_BACKUP_BUCKET:                ""
   S3_BACKUP_ENDPOINT_URL:          ""
   S3_BACKUP_REGION:                ""
-  S3_MLFLOW_BUCKET:                ""  # R8-12 — dedicated mlflow S3
-  S3_MLFLOW_ENDPOINT_URL:          ""  # R8-12
-  S3_MLFLOW_ACCESS_KEY_ID:         ""  # R8-12
-  S3_MLFLOW_SECRET_ACCESS_KEY:     ""  # R8-12
-  S3_MLFLOW_REGION:                ""  # R8-12
   S3_BUCKET:                       ""
   S3_ENDPOINT_URL:                 ""
   AWS_DEFAULT_REGION:              ""
@@ -221,26 +216,5 @@ services:
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "METRICS_TOKEN"
       METRICS_TOKEN: ""
-    volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
-
-  # mlflow (custom image — Dockerfile.mlflow) bootstraps the 5
-  # S3_MLFLOW_* keys from Lockbox at startup. The mlflow_entrypoint.sh
-  # then renames them to AWS_* + MLFLOW_S3_ENDPOINT_URL IN-PROCESS so
-  # the mlflow server's S3 client picks them up — the api/worker AWS_*
-  # (different bucket — main client-data) remain untouched. Allowlist
-  # gates the injection: mlflow sees ONLY its 5 keys, not the other 89.
-  # Closes R8-12 — replaces the broken local-FS artifact path + the
-  # never-deployed MinIO endpoint.
-  mlflow:
-    environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
-      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
-      LOCKBOX_ALLOWED_KEYS: "S3_MLFLOW_BUCKET S3_MLFLOW_ENDPOINT_URL S3_MLFLOW_ACCESS_KEY_ID S3_MLFLOW_SECRET_ACCESS_KEY S3_MLFLOW_REGION"
-      S3_MLFLOW_BUCKET: ""
-      S3_MLFLOW_ENDPOINT_URL: ""
-      S3_MLFLOW_ACCESS_KEY_ID: ""
-      S3_MLFLOW_SECRET_ACCESS_KEY: ""
-      S3_MLFLOW_REGION: ""
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
