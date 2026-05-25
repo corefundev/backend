@@ -79,9 +79,31 @@ fi
 PG_DSN="postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting"
 echo "mlflow_entrypoint: --backend-store-uri set from Lockbox POSTGRES_PASSWORD (len=${#POSTGRES_PASSWORD})" >&2
 
-# Append the URI as the last two args. compose `command:` MUST NOT
-# include its own --backend-store-uri (would create a duplicate-arg
-# CLI error). The compose definition keeps everything else (host,
-# port, workers, allowed-hosts, --serve-artifacts, --artifacts-
-# destination, --default-artifact-root) — only the DB DSN moves here.
-exec "$@" --backend-store-uri "$PG_DSN"
+# Build --artifacts-destination at runtime from S3_MLFLOW_BUCKET. Pre-fix
+# this was hardcoded as `s3://sku-mlflow/mlflow/` in compose `command:`,
+# which made staging-mlflow proxy uploads to the PROD bucket
+# (staging Lockbox returned staging creds, but those creds also had
+# write access to the prod bucket via a Selectel-side IAM misconfig
+# — separate Selectel-panel cleanup item — so the proxy upload SILENTLY
+# succeeded into the wrong bucket; mlflow reported 200 to the client).
+# Bug observed 2026-05-26 during Phase 0-A. With ARTIFACTS_DEST composed
+# from the per-Lockbox bucket name, prod ↔ staging stay in their own
+# buckets even if IAM remains permissive.
+ARTIFACTS_DEST=""
+if [ -n "${S3_MLFLOW_BUCKET:-}" ]; then
+    ARTIFACTS_DEST="s3://${S3_MLFLOW_BUCKET}/mlflow/"
+    echo "mlflow_entrypoint: --artifacts-destination set from Lockbox S3_MLFLOW_BUCKET (${S3_MLFLOW_BUCKET})" >&2
+else
+    echo "mlflow_entrypoint: WARN S3_MLFLOW_BUCKET unset — artifacts will use whatever compose passes (or local FS fallback)." >&2
+fi
+
+# Append the URIs as the last args. compose `command:` MUST NOT include
+# its own --backend-store-uri or --artifacts-destination (would create
+# duplicate-arg CLI errors). The compose definition keeps host, port,
+# workers, allowed-hosts, --serve-artifacts, --default-artifact-root —
+# only the DB DSN + S3 destination move here.
+if [ -n "$ARTIFACTS_DEST" ]; then
+    exec "$@" --backend-store-uri "$PG_DSN" --artifacts-destination "$ARTIFACTS_DEST"
+else
+    exec "$@" --backend-store-uri "$PG_DSN"
+fi
