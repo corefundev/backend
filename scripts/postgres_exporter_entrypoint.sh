@@ -7,10 +7,13 @@
 #
 # In Lockbox-mode (prod):
 #   YC_SA_KEY_FILE + YC_LOCKBOX_SECRET_ID set, LOCKBOX_ALLOWED_KEYS
-#   gates the export to just DATABASE_URL.
+#   gates the export to either:
+#     (legacy)  just DATABASE_URL
+#     (R10 0-B) POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER
+#               — DSN composed at runtime, see below.
 #
 # In dev (no Lockbox):
-#   set DATABASE_URL directly via env, this script falls through.
+#   set DATABASE_URL directly via env, OR set all the components.
 
 set -eu
 
@@ -19,10 +22,27 @@ if [ -n "${YC_SA_KEY_FILE:-}" ] && [ -z "${PGEXP_BOOTED:-}" ]; then
     exec /usr/local/bin/lockbox_bootstrap.sh "$0" "$@"
 fi
 
+# R10 Phase 0-B — if DATABASE_URL is not provided directly but
+# component env vars ARE (POSTGRES_PASSWORD + DB_HOST + DB_PORT +
+# DB_NAME + DB_USER), compose the DSN here. Keeps postgres-exporter
+# in sync with vault_agent.py's `_compose_database_urls_from_components`
+# on the Python side — POSTGRES_PASSWORD becomes the single source of
+# truth so a future PR can drop the composed-with-pwd DATABASE_URL
+# from Lockbox without breaking the exporter.
+if [ -z "${DATABASE_URL:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
+    _db_user="${DB_USER:-sku}"
+    _db_host="${DB_HOST:-postgres}"
+    _db_port="${DB_PORT:-5432}"
+    _db_name="${DB_NAME:-sku_forecasting}"
+    DATABASE_URL="postgresql://${_db_user}:${POSTGRES_PASSWORD}@${_db_host}:${_db_port}/${_db_name}"
+    export DATABASE_URL
+    echo "postgres_exporter_entrypoint: DATABASE_URL composed from components (user=${_db_user} host=${_db_host} port=${_db_port} db=${_db_name})" >&2
+fi
+
 if [ -z "${DATABASE_URL:-}" ]; then
-    echo "postgres_exporter_entrypoint: DATABASE_URL is empty." >&2
-    echo "  In Lockbox-mode: add this key to '${YC_LOCKBOX_SECRET_ID:-<secret>}'." >&2
-    echo "  In dev-mode:     export DATABASE_URL before starting." >&2
+    echo "postgres_exporter_entrypoint: DATABASE_URL is empty AND no components for fallback compose." >&2
+    echo "  In Lockbox-mode: ensure POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER are in '${YC_LOCKBOX_SECRET_ID:-<secret>}' AND in LOCKBOX_ALLOWED_KEYS." >&2
+    echo "  In dev-mode:     export DATABASE_URL (or all components) before starting." >&2
     exit 2
 fi
 
