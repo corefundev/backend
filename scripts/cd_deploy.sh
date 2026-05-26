@@ -123,75 +123,47 @@ rollback() {
     echo "  rollback complete — prod is back on tag $prev_tag"
 }
 
-# ── R3-13: Lockbox-backed Postgres password injection ──────────────
-# Audit R3-13 prep: refresh /srv/backend/.env with POSTGRES_PASSWORD
-# pulled from Lockbox so the compose `${POSTGRES_PASSWORD:-sku}`
-# reference resolves to the real value instead of the legacy `sku`
-# fallback. Idempotent — re-runs replace any prior line. Gated on
-# Lockbox auth env being present in .env (YC_SA_KEY_FILE +
-# YC_LOCKBOX_SECRET_ID — set at VPS bootstrap, not by CD).
+# ── R3-13 / R10 Phase 0-C: NOTE — no .env mutation from CD ─────────
+# Historically this block contained `inject_lockbox_key()` + a call
+# `inject_lockbox_key POSTGRES_PASSWORD sku` that tried to pull
+# POSTGRES_PASSWORD from Lockbox at deploy time and write it into
+# `/srv/backend/.env`. Removed 2026-05-27 because:
 #
-# Graceful: if the key isn't in Lockbox yet (ops still has to add it),
-# the helper prints empty and we leave /srv/backend/.env unchanged.
-# Once ops populates the Lockbox secret + runs `ALTER USER sku WITH
-# PASSWORD …` on staging+prod postgres, the next deploy auto-injects
-# and a follow-up commit can flip the compose `:-sku` to `:?` strict.
-inject_lockbox_key() {
-    local key="$1"
-    local migration_seed="$2"   # value to write when both Lockbox AND .env are empty
-    [ -x "scripts/lockbox_fetch_key.sh" ] || {
-        echo "  R3-13: lockbox_fetch_key.sh missing — skip ${key}"
-        return 0
-    }
-    # Source .env in a SUBSHELL so Lockbox auth vars are available
-    # without polluting the deploy script's environment.
-    local value
-    value=$(
-        set -a
-        # shellcheck disable=SC1091
-        . /srv/backend/.env 2>/dev/null || true
-        set +a
-        scripts/lockbox_fetch_key.sh "$key" 2>/dev/null || true
-    )
-
-    # Three branches:
-    #   (a) Lockbox returned non-empty → write to .env (the steady-state path)
-    #   (b) Lockbox empty but .env already has the key → leave it alone
-    #       (preserves a manually-seeded value, supports staged rollouts)
-    #   (c) Lockbox empty AND .env empty → seed with `migration_seed`
-    #       so the compose `:?` strict gate passes. This branch is
-    #       transitional: the seed value documents the audit-R3-13
-    #       weak fallback in /srv/backend/.env where ops can SEE it,
-    #       rather than burying it inside a compose YAML default.
-    #       Logs a loud WARN so the gap is visible in deploy output.
-    if [ -n "$value" ]; then
-        sed -i.bak "/^${key}=/d" /srv/backend/.env && rm -f /srv/backend/.env.bak
-        echo "${key}=${value}" >> /srv/backend/.env
-        echo "  R3-13: refreshed ${key} in /srv/backend/.env from Lockbox"
-        return 0
-    fi
-
-    if grep -q "^${key}=" /srv/backend/.env 2>/dev/null; then
-        echo "  R3-13: ${key} already present in /srv/backend/.env, Lockbox empty — leaving as-is"
-        return 0
-    fi
-
-    if [ -n "${migration_seed:-}" ]; then
-        echo "${key}=${migration_seed}" >> /srv/backend/.env
-        echo "::warning::R3-13: ${key} not in Lockbox AND not in /srv/backend/.env. Seeded with migration default '${migration_seed}' so compose :? gate passes. OPS ACTION REQUIRED: generate random pwd, ALTER USER, add to Lockbox staging+prod secret. See project_audit_remediation.md R3-13."
-        return 0
-    fi
-
-    echo "  R3-13: Lockbox empty AND no migration seed provided — skip ${key}"
-}
-
-# `sku` is the historical fallback that postgres has been running with
-# under the compose default. Seeding /srv/backend/.env with it keeps the
-# deploy functional while making the weak credential VISIBLE to anyone
-# running `grep POSTGRES_PASSWORD /srv/backend/.env`. The strict :? gate
-# in compose then ensures no future deploy can land without an EXPLICIT
-# value (Lockbox or otherwise).
-inject_lockbox_key POSTGRES_PASSWORD sku
+#   1. It was a FUNCTIONAL NO-OP on prod since R3-13 first shipped.
+#      Inside cd_deploy.sh's subshell, `. /srv/backend/.env` set
+#      `YC_SA_KEY_FILE=/run/secrets/yc-sa-key.json` — the IN-CONTAINER
+#      bind-mount target. On the host that file doesn't exist, so
+#      lockbox_bootstrap.sh's `[ -r "$YC_SA_KEY_FILE" ]` check always
+#      failed silently (curl 2>/dev/null), the helper returned empty,
+#      and branch (b) "leave .env as-is" always fired. The system
+#      worked because runtime injection covered the need (see #2).
+#
+#   2. Each container that needs the real POSTGRES_PASSWORD already
+#      injects it from Lockbox at startup via either Python
+#      `bootstrap_secrets()` (api/worker/scan-worker/process-worker)
+#      or `lockbox_bootstrap.sh` as the entrypoint
+#      (postgres-exporter / pgbouncer / mlflow / alertmanager /
+#      backup / postgres). Both read THEIR OWN YC_SA_KEY_FILE which
+#      IS the container path — the bind mount works there. So .env
+#      doesn't need the real value at all; the seed `sku` is enough
+#      to satisfy compose's `${POSTGRES_PASSWORD:?required}` strict-
+#      gate at config-load.
+#
+#   3. Having .env carry the real password would VIOLATE
+#      `feedback_no_secrets_in_env`: real secret on disk where any
+#      operator with deploy@ SSH can `cat .env`. Keeping the seed
+#      `sku` (visibly weak) makes "this is a placeholder, not the
+#      real value" obvious to readers.
+#
+# Operator action on FRESH VPS bootstrap: write the seed line ONCE,
+# manually:
+#     echo 'POSTGRES_PASSWORD=sku' >> /srv/backend/.env
+# Any subsequent rotation only touches Lockbox + the running postgres
+# (`ALTER USER`); .env is never touched by CD.
+#
+# (Phase 0-C PR-3 will replace the `sku` literal with a strong
+# `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_<random32>` placeholder so this
+# value is OBVIOUSLY never the real password.)
 
 # R4-1 — drop the legacy `SANDBOX_IMAGE=sku-forecasting-sandbox` line
 # from /srv/backend/.env if present. That value was a local-only tag

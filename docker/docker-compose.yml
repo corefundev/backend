@@ -53,13 +53,17 @@ x-common-env: &common-env
   # PostgreSQL client registry — primary, accepts writes.
   # Audit R3-13 strict — every DSN reads bare ${POSTGRES_PASSWORD} (no
   # `:-sku` fallback). The postgres service block below enforces the
-  # var via `:?` strict so compose fails fast if it's unset. The
-  # deploy path populates /srv/backend/.env via cd_deploy.sh's
-  # inject_lockbox_key BEFORE compose-up — Lockbox value when
-  # populated, `sku` migration seed otherwise (with a loud warn). A
-  # single .env line now rotates the password across api/worker/
-  # pgbouncer/mlflow/airflow/backup. vault_agent rewrites host:port
-  # at runtime; user+password come from this env-driven URL.
+  # var via `:?` strict so compose fails fast if it's unset.
+  # `.env` must carry a non-empty `POSTGRES_PASSWORD=<seed>` line set
+  # ONCE at VPS bootstrap (`echo POSTGRES_PASSWORD=sku >> /srv/backend
+  # /.env`). The seed satisfies compose strict-gate; the real value
+  # is never on disk. cd_deploy.sh does NOT touch .env's value (the
+  # historical `inject_lockbox_key` path was removed 2026-05-27 as a
+  # functional no-op — see cd_deploy.sh's R3-13/R10 Phase 0-C NOTE).
+  # Runtime injection covers the actual need: every service that
+  # needs the live pwd reads it from Lockbox at startup (Python
+  # `bootstrap_secrets()` or `lockbox_bootstrap.sh` entrypoint),
+  # which OVERWRITES the seed value in the running process's env.
   DATABASE_URL: postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
   # Optional read-replica DSN. When set, read-heavy queries (audit-log
   # listings, training-run history) use this instead of DATABASE_URL.
@@ -384,16 +388,23 @@ services:
       # Audit R3-13 — strict `:?` gate (2026-05-16, follow-up to the
       # graceful-fallback shipped in 5b13ea0). Any deploy that reaches
       # compose-up without POSTGRES_PASSWORD set in env fails fast at
-      # compose load time with the explicit message below. The deploy
-      # path (cd_deploy.sh::inject_lockbox_key) writes POSTGRES_PASSWORD
-      # to /srv/backend/.env BEFORE compose-up — pulled from Lockbox
-      # when populated, seeded with the `sku` migration default
-      # otherwise (and emits a `::warning::` so the ops gap is loud).
-      # Compose then ALWAYS sees the var set; the :? gate guards against
-      # a future foot-gun where someone unsets POSTGRES_PASSWORD in
-      # .env and the old `:-sku` would have silently re-introduced
-      # the weak credential.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required — run cd_deploy.sh inject_lockbox_key or add the line manually to /srv/backend/.env}
+      # compose-config time with the explicit message below.
+      #
+      # `.env` carries a non-empty seed value (`POSTGRES_PASSWORD=sku`
+      # today; Phase 0-C PR-3 will swap it for a strong
+      # `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_<random32>` placeholder).
+      # The seed is set ONCE at VPS bootstrap and is NEVER the real
+      # password — it only exists so this strict-gate passes. The real
+      # value lives only in Lockbox + is injected per-container at
+      # runtime (Python `bootstrap_secrets()` for api/worker, shell
+      # `lockbox_bootstrap.sh` entrypoint for everything else).
+      #
+      # The historical `cd_deploy.sh:inject_lockbox_key` mechanism that
+      # tried to refresh .env from Lockbox at deploy time was removed
+      # 2026-05-27 — it was a functional no-op (host-vs-container SA-
+      # path mismatch + redundant with runtime injection). See
+      # cd_deploy.sh's R3-13/R10 Phase 0-C NOTE for the full reasoning.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD seed missing — add `POSTGRES_PASSWORD=sku` to /srv/backend/.env (one-time VPS bootstrap; the value is a SEED, not the real pwd — see docker-compose.yml comment block above)}
       POSTGRES_DB: sku_forecasting
     volumes:
       - postgres_data:/var/lib/postgresql/data
