@@ -122,3 +122,10 @@ def test_compose_replica_password_falls_back_to_main(monkeypatch):
     monkeypatch.setenv("DB_HOST_REPLICA", "r.example.com")
     vault_agent._compose_database_urls_from_components()
     assert "shared-pwd" in os.environ["DATABASE_URL_REPLICA"]
+
+
+# (CI nudge — R10 Phase 0-B baseline drift required force-push;
+#  GitHub Actions appears to have dropped the pull_request:synchronize
+#  events from the force-pushes — adding a real-content delta to trigger
+#  a fresh CI run for the same logical change. This comment is harmless
+#  and will be cleaned up if CI passes.)
