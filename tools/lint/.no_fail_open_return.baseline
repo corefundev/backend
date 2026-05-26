@@ -34,9 +34,9 @@ src/pipeline/train.py:122  pre-R9 baseline; triage in R10 — plan-spec lookup i
 src/pipeline/streaming.py:197  pre-R9 baseline; triage in R10 — Kafka consumer poll
 src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
-src/auth/vault_agent.py:263  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A
-src/auth/vault_agent.py:300  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B
-src/auth/vault_agent.py:312  pre-R9 baseline; triage in R10 — Lockbox bootstrap path C
+src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
+src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
+src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstrap path C (+1 line after R10 Phase 0-B)
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
@@ -72,3 +72,4 @@ src/api/routers/training.py:301  pre-R9 baseline; triage in R10 — trigger_trai
 src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
 src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
+
