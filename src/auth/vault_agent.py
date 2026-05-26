@@ -256,6 +256,7 @@ def bootstrap_secrets() -> bool:
         from src.auth.lockbox_agent import load_from_lockbox
         if load_from_lockbox():
             logger.info("Bootstrap: secrets from Yandex Lockbox")
+            _compose_database_urls_from_components()
             _apply_db_host_override()
             return True
     except ImportError:
@@ -336,6 +337,94 @@ def bootstrap_secrets() -> bool:
         "  Level 1: JWT_SECRET_KEY + API_KEY (dev only)\n"
         "See README.md section 'Безопасность: три уровня'"
     )
+
+
+# ── DSN composition from Lockbox components (R10 Phase 0-B) ──
+def _compose_database_urls_from_components() -> None:
+    """
+    Compose DATABASE_URL and DATABASE_URL_REPLICA at runtime from
+    Lockbox-injected components (POSTGRES_PASSWORD + DB_HOST + DB_PORT
+    + DB_NAME + DB_USER), overriding any composed-with-pwd entries that
+    Lockbox might still hold.
+
+    Why: storing DATABASE_URL in Lockbox as a composed-with-embedded-pwd
+    string AND storing POSTGRES_PASSWORD separately creates two sources
+    of truth for the same secret. The R8-12 v1 SASL trap (2026-05-25)
+    was caused by exactly this: rotating POSTGRES_PASSWORD without
+    DATABASE_URL left the pre-rotation pwd still active via the
+    composed entry, so pgbouncer (whose `userlist.txt` is built from
+    POSTGRES_PASSWORD) and api (whose connection used DATABASE_URL)
+    desynced. Composing the DSN here, after Lockbox bootstrap, makes
+    POSTGRES_PASSWORD the single source of truth.
+
+    Skips gracefully if POSTGRES_PASSWORD is unset — preserves whatever
+    DATABASE_URL Lockbox or compose env already provides. This is the
+    transitional fallback: as long as composed Lockbox entries are
+    still present alongside components, code reading os.environ
+    ["DATABASE_URL"] gets the right value either way; once the
+    composed entries are dropped from Lockbox (separate PR), the
+    component path is the only one.
+
+    Replica DSN is composed only if DB_HOST_REPLICA is set (staging has
+    no replica). POSTGRES_PASSWORD_REPLICA falls back to
+    POSTGRES_PASSWORD if not separately set (current topology — same
+    user on the streaming replica).
+
+    URL-encodes user/password with quote(safe='') so a password
+    containing reserved chars (e.g. `:`, `@`, `/`) doesn't corrupt the
+    DSN — current pwds are `[A-Za-z0-9_-]{32}` so this is defensive,
+    not load-bearing.
+    """
+    pwd = os.environ.get("POSTGRES_PASSWORD", "").strip()
+    if not pwd:
+        return  # nothing to compose — leave existing DATABASE_URL alone
+
+    from urllib.parse import quote
+
+    # Main DSN
+    user = os.environ.get("DB_USER",  "sku").strip()
+    host = os.environ.get("DB_HOST",  "postgres").strip()
+    port = os.environ.get("DB_PORT",  "5432").strip()
+    name = os.environ.get("DB_NAME",  "sku_forecasting").strip()
+    composed_main = (
+        f"postgresql://{quote(user, safe='')}:{quote(pwd, safe='')}@"
+        f"{host}:{port}/{name}"
+    )
+    existing_main = os.environ.get("DATABASE_URL", "").strip()
+    if composed_main != existing_main:
+        os.environ["DATABASE_URL"] = composed_main
+        logger.info(
+            "DATABASE_URL composed from Lockbox components "
+            "(user=%s host=%s port=%s db=%s)",
+            user, host, port, name,
+        )
+
+    # Replica DSN — only if DB_HOST_REPLICA is set (staging has no
+    # replica; for dev/test without Lockbox replica entries, leave
+    # DATABASE_URL_REPLICA as whatever was injected — usually empty).
+    replica_host = os.environ.get("DB_HOST_REPLICA", "").strip()
+    if not replica_host:
+        return
+    replica_user = os.environ.get("DB_USER_REPLICA",         user).strip()
+    replica_port = os.environ.get("DB_PORT_REPLICA",         port).strip()
+    replica_name = os.environ.get("DB_NAME_REPLICA",         name).strip()
+    replica_pwd  = os.environ.get("POSTGRES_PASSWORD_REPLICA", pwd).strip()
+    sslmode      = os.environ.get("DB_SSLMODE_REPLICA",      "").strip()
+    sslmode_suffix = f"?sslmode={sslmode}" if sslmode else ""
+    composed_replica = (
+        f"postgresql://{quote(replica_user, safe='')}:"
+        f"{quote(replica_pwd, safe='')}@"
+        f"{replica_host}:{replica_port}/{replica_name}{sslmode_suffix}"
+    )
+    existing_replica = os.environ.get("DATABASE_URL_REPLICA", "").strip()
+    if composed_replica != existing_replica:
+        os.environ["DATABASE_URL_REPLICA"] = composed_replica
+        logger.info(
+            "DATABASE_URL_REPLICA composed from Lockbox components "
+            "(user=%s host=%s port=%s db=%s sslmode=%s)",
+            replica_user, replica_host, replica_port, replica_name,
+            sslmode or "<unset>",
+        )
 
 
 # ── DB host override (PgBouncer cutover, #186) ───────────────
