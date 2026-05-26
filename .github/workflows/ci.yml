@@ -76,7 +76,33 @@ jobs:
       - name: Run NFOR unit tests
         run: |
           pip install pytest
-          python -m pytest tests/lint/ -v
+          python -m pytest tests/lint/test_no_fail_open_return.py -v
+
+  # ── 1c. Lint (COMPOSE_PWD_INTERP — Phase 0-C PR-1) ─────────
+  # Forbids ${POSTGRES_PASSWORD} interpolation inside docker-compose
+  # `command:` / `entrypoint:` blocks. Triggered the R8-12 v1 SASL
+  # trap 2026-05-25 (mlflow command had postgresql://sku:${POSTGRES_
+  # PASSWORD}@…, which compose substituted from .env's seed `sku`,
+  # auth-failed at startup). Reference fix: scripts/mlflow_entrypoint.sh
+  # builds the DSN at runtime from the Lockbox-injected value. Same
+  # NFOR-style baseline mechanism — entries require a written reason.
+  lint-compose-pwd-interpolation:
+    name: Lint (compose ${POSTGRES_PASSWORD} interpolation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run COMPOSE_PWD_INTERP linter against docker/
+        run: |
+          python tools/lint/compose_pwd_interpolation.py docker/ \
+            --baseline tools/lint/.compose_pwd_interpolation.baseline
+      - name: Run COMPOSE_PWD_INTERP unit tests
+        run: |
+          pip install pytest
+          python -m pytest tests/lint/test_compose_pwd_interpolation.py -v
 
   # ── 2. Type check ──────────────────────────────────────────
   # Mypy is now a hard gate — the legacy 41-error backlog was cleared
