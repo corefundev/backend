@@ -1,0 +1,18 @@
+# COMPOSE_PWD_INTERP — ${POSTGRES_PASSWORD} interpolation inside
+# command:/entrypoint: blocks of docker-compose*.yml.
+#
+# Format (mirrors tools/lint/.no_fail_open_return.baseline):
+#   <file>:<lineno><TAB or two-or-more-spaces><reason>
+#
+# Adding an entry REQUIRES a written reason that references a triage
+# ticket, audit finding, or roadmap item — entries without one are
+# rejected at lint-startup so the allowlist stays auditable.
+#
+# The target state of this file is empty: every entry should either
+# (a) get fixed (move the DSN composition into the service entrypoint
+# script — see scripts/mlflow_entrypoint.sh for the reference shape),
+# or (b) be removed once the upstream fix lands.
+#
+# Initial baseline 2026-05-27: empty. R8-12 v2 (PR #24) and Phase 0-B
+# (PR #28) already moved the last two trap sites (mlflow + postgres-
+# exporter) into their entrypoint scripts.
