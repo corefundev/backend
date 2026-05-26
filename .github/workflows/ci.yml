@@ -75,7 +75,14 @@ jobs:
             --baseline tools/lint/.no_fail_open_return.baseline
       - name: Run NFOR unit tests
         run: |
-          pip install pytest
+          # `pydantic` is needed not for the tests themselves but for
+          # pytest to satisfy the project-wide `filterwarnings = [
+          # "ignore::pydantic.warnings.PydanticDeprecatedSince20", … ]`
+          # in pyproject.toml — without it, pytest emits a noisy
+          # `Failed to import filter module 'pydantic'` warning per
+          # test (~25 lines of log spam per job). Tests pass either
+          # way; this is purely log-cleanliness.
+          pip install pytest pydantic
           python -m pytest tests/lint/test_no_fail_open_return.py -v
 
   # ── 1c. Lint (COMPOSE_PWD_INTERP — Phase 0-C PR-1) ─────────
@@ -101,7 +108,10 @@ jobs:
             --baseline tools/lint/.compose_pwd_interpolation.baseline
       - name: Run COMPOSE_PWD_INTERP unit tests
         run: |
-          pip install pytest
+          # See NFOR job above for why `pydantic` is installed here —
+          # pyproject.toml's `filterwarnings = ignore::pydantic.*`
+          # entry would otherwise log-spam per-test.
+          pip install pytest pydantic
           python -m pytest tests/lint/test_compose_pwd_interpolation.py -v
 
   # ── 2. Type check ──────────────────────────────────────────
