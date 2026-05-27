@@ -89,14 +89,29 @@ if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
        mc cp "$WORK_DIR/pg_wal.tar.gz" "mir/${S3_MIRROR_BUCKET}/base/${DATE}/pg_wal.tar.gz"; then
         echo "[$(date -u +%FT%TZ)] base_backup: mirror push complete"
         MIRROR_NOW=$(date -u +%s)
-        if curl -fsS --max-time 5 -X PUT \
-                --data-binary "# TYPE sku_base_backup_mirror_last_success_timestamp_seconds gauge
+        # R10 audit L1 fix (2026-05-28) — match the 3-attempt retry the
+        # primary base_backup metric uses below. Was single-attempt;
+        # a transient pushgateway blip during mirror-push window
+        # would silently drop the metric and false-fire
+        # BaseBackupMirrorStale ~16 days later.
+        mirror_push_ok=0
+        for mdelay in 0 5 15; do
+            if [ "$mdelay" -gt 0 ]; then
+                sleep "$mdelay"
+            fi
+            if curl -fsS --max-time 5 -X PUT \
+                    --data-binary "# TYPE sku_base_backup_mirror_last_success_timestamp_seconds gauge
 sku_base_backup_mirror_last_success_timestamp_seconds $MIRROR_NOW
 " "$PUSHGATEWAY_URL/metrics/job/base_backup_mirror/instance/sku-forecasting" \
-                >/dev/null 2>&1; then
-            echo "[$(date -u +%FT%TZ)] base_backup: mirror metric pushed"
-        else
-            echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror metric push failed (non-fatal)" >&2
+                    >/dev/null 2>&1; then
+                echo "[$(date -u +%FT%TZ)] base_backup: mirror metric pushed (delay=${mdelay}s)"
+                mirror_push_ok=1
+                break
+            fi
+            echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror metric push attempt (delay=${mdelay}s) failed — retrying" >&2
+        done
+        if [ "$mirror_push_ok" -ne 1 ]; then
+            echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror metric push failed after 3 attempts (non-fatal — primary base_backup safe; BaseBackupMirrorStale will fire on next eval)" >&2
         fi
     else
         echo "[$(date -u +%FT%TZ)] base_backup: WARNING mirror push failed — non-fatal, primary safe" >&2

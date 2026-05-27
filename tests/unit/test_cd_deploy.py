@@ -79,6 +79,109 @@ def test_lockbox_fetch_key_script_absent():
     )
 
 
+def test_cd_deploy_rebuilds_all_custom_image_services():
+    """2026-05-28 — extension of the pgbouncer-only `--build` pattern
+    to ALL custom-image services (backup, alertmanager, prometheus,
+    postgres, postgres-exporter, mlflow).
+
+    Discovered during R10 alerts+backup audit: prod backup image was
+    20 days behind its Dockerfile because CD only did `up -d`
+    (without `--build`) for those services, so Docker reused the
+    cached image even after Dockerfile changed. backup, alertmanager,
+    prometheus, postgres, postgres-exporter, mlflow ALL share this
+    fate without an explicit per-service `--build`.
+
+    Asserted: the deploy script has a `--build` invocation for EACH
+    custom-image service that has a Dockerfile.* in docker/. The
+    loop pattern (`for svc in ... ; do docker compose ... --build "$svc"`)
+    must list every service. New services with a Dockerfile must be
+    added explicitly — there's no glob-expansion against the file
+    tree to keep this audit-friendly."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+
+    # The names that MUST appear after `--build` (or in the rebuild loop).
+    # New Dockerfile.X added → add X here too.
+    REQUIRED_BUILD_TARGETS = (
+        "pgbouncer", "postgres", "postgres-exporter",
+        "prometheus", "alertmanager", "backup", "mlflow",
+    )
+
+    # Find the rebuild block — locate the for-loop with --build inside.
+    # We don't assert exact syntax (the block may evolve), but every
+    # required service must appear close to a `--build` somewhere.
+    for svc in REQUIRED_BUILD_TARGETS:
+        # Two valid patterns: explicit `--build SVC` OR the svc name
+        # appearing in a list near a `--build` directive (the loop
+        # form). Find the substring then verify a --build is within
+        # 200 chars (loop form) or on the same line (explicit form).
+        idx = text.find(f'"{svc}"')
+        if idx < 0:
+            idx = text.find(f" {svc} ")
+        assert idx > 0, (
+            f"cd_deploy.sh has no reference to custom-image service "
+            f"{svc!r}. Required for R10 stale-image fix — every custom "
+            f"image must be rebuilt on CD or it falls behind its "
+            f"Dockerfile silently (as backup did 2026-05-07 → 2026-05-27)."
+        )
+
+    # The for-loop pattern that enumerates services for build+up.
+    assert "for svc in" in text and "--build" in text, (
+        "cd_deploy.sh must use a `for svc in ... ; do docker compose "
+        "... --build \"$svc\"` loop to rebuild each custom-image "
+        "service. Replaces the pgbouncer-only `up -d --build pgbouncer` "
+        "pattern from R3 era."
+    )
+
+
+def test_backup_sh_mirror_metric_has_retry():
+    """L1 audit fix — mirror metric push must use the same 3-attempt
+    retry as the primary metric push. Single-attempt was the original
+    pattern; a transient pushgateway blip silently dropped the
+    metric, then BackupMirrorStale fired 49h later despite the
+    mirror data being safely uploaded to Selectel.
+    """
+    text = (_BACKEND / "scripts" / "backup.sh").read_text()
+    # The mirror push block sits between the `if mc alias set mir` and
+    # the catching `else` branch. Locate it and assert the retry loop.
+    mirror_block_start = text.find("if mc alias set mir")
+    assert mirror_block_start > 0, "mirror push block not found in backup.sh"
+    # Find the end of the mirror-success branch — next top-level `else`
+    # after the `mc cp ...; then` clause.
+    success_branch_end = text.find("        echo \"[$(date -u +%FT%TZ)] mirror push complete\"")
+    assert success_branch_end > mirror_block_start
+
+    # The mirror-success branch must contain a `for mdelay in 0 5 15` retry.
+    # Take a window of ~2000 chars from the success-branch start.
+    window = text[success_branch_end:success_branch_end + 2500]
+    assert "for mdelay in 0 5 15" in window, (
+        "backup.sh mirror push must use the 3-attempt retry pattern "
+        "(`for mdelay in 0 5 15`). Found unpatched single-attempt curl?"
+    )
+    assert "mirror_push_ok=1" in window, (
+        "backup.sh mirror retry loop must track success via "
+        "mirror_push_ok=1 to skip remaining attempts after first success."
+    )
+
+
+def test_base_backup_sh_mirror_metric_has_retry():
+    """Same fix as test_backup_sh_mirror_metric_has_retry, applied to
+    the weekly base_backup.sh. Tested separately because base_backup
+    has its own mirror-push code path (different file paths,
+    different metric)."""
+    text = (_BACKEND / "scripts" / "base_backup.sh").read_text()
+    mirror_block_start = text.find("if mc alias set mir")
+    assert mirror_block_start > 0, "mirror push block not found in base_backup.sh"
+    window = text[mirror_block_start:mirror_block_start + 3500]
+    assert "for mdelay in 0 5 15" in window, (
+        "base_backup.sh mirror push must use the 3-attempt retry pattern."
+    )
+    assert "sku_base_backup_mirror_last_success_timestamp_seconds" in window, (
+        "base_backup.sh mirror metric name must remain "
+        "sku_base_backup_mirror_last_success_timestamp_seconds "
+        "(referenced by BaseBackupMirrorStale alert in alerts.production.yml)."
+    )
+
+
 def test_cd_deploy_reloads_prometheus_after_recreate():
     """2026-05-28 — `prometheus` config-reload step.
 

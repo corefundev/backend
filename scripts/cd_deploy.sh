@@ -220,15 +220,63 @@ chmod 1777 /srv/backend/sandbox-staging 2>/dev/null || true
 echo "  running migrations..."
 docker compose $COMPOSE_ARGS run --rm migrate
 
-# Bring up infra-tier services that don't ship in the GHCR image bundle
-# (pgbouncer, etc). Idempotent: if already running with matching config,
-# `up -d` is a no-op. Runs before app recreate so the app tier sees a
-# ready connection-pool layer when (eventually) repointed at it.
-echo "  ensuring infra services are up (pgbouncer)"
-# --build picks up changes to Dockerfile.pgbouncer / pgbouncer_entrypoint.sh.
-# Without it, an existing :custom tag from a prior deploy would mask
-# any update we just rsync'd, even after image-recreate.
-docker compose $COMPOSE_ARGS up -d --build pgbouncer || true
+# Bring up infra-tier services that don't ship in the GHCR image bundle.
+# Idempotent: if already running with matching config, `up -d` is a no-op.
+# Runs before app recreate so the app tier sees a ready connection-pool
+# layer when (eventually) repointed at it.
+#
+# 2026-05-28 — extended from `pgbouncer` only to ALL custom-image
+# services. Discovered during R10 alerts+backup audit: the backup
+# image was 20 days behind its Dockerfile because CD only did `up -d`
+# (without `--build`) for backup, alertmanager, prometheus, postgres,
+# postgres-exporter, mlflow. Docker reuses the cached image layer
+# unless explicitly told to rebuild. Result: bf24fb1 added an
+# `audit_log_retention.sh` cron entry to Dockerfile.backup on
+# 2026-05-15; the prod container's crontab still didn't carry it
+# 12 days later, so the script never ran and audit_log grew without
+# retention enforcement.
+#
+# Build cache makes this CHEAP in steady-state: BuildKit re-uses
+# layers when no Dockerfile / context file changed, so a no-op build
+# is ~2-5s per service. A real rebuild only happens when a Dockerfile
+# or its dependency (e.g. mounted entrypoint script) changed.
+#
+# `up -d --build` performs build-then-recreate; compose's image-hash
+# comparison only recreates the container if the BUILT image hash
+# differs from the running one. So services with unchanged Dockerfile
+# don't churn (only the build step runs, ~2s, no recreate).
+#
+# Tolerant via `|| true` per-service so one image's build failure
+# doesn't block the rest. If a real build error surfaces, the
+# subsequent app-tier recreate will likely fail too and CD rolls
+# back cleanly.
+echo "  rebuilding + up-d for all custom-image infra services (cache-friendly)"
+#
+# Order matters for the data tier:
+#   1. postgres            — primary DB; recreate causes brief (~30s)
+#                            downtime but only happens when
+#                            Dockerfile.postgres actually changed.
+#                            Steady-state: build cache hit, no recreate.
+#   2. postgres-exporter   — sidecar; recreate fine.
+#   3. pgbouncer           — pool layer; survives postgres recreate via
+#                            auto-reconnect. Recreating after postgres
+#                            means pgbouncer's new image gets fresh
+#                            connection to the (already-restarted)
+#                            postgres.
+#   4. mlflow              — depends on postgres via Lockbox-injected DSN;
+#                            recreate fine.
+#   5. prometheus, alertmanager, backup — observability layer,
+#                            independent recreate.
+#
+# Each is tolerant via `|| echo` per-iteration — one image's build
+# failure doesn't block the rest. A real build error will likely
+# also fail the subsequent app-tier recreate, triggering rollback.
+for svc in postgres postgres-exporter pgbouncer mlflow prometheus alertmanager backup; do
+    echo "    --- $svc ---"
+    docker compose $COMPOSE_ARGS up -d --build "$svc" 2>&1 \
+        | sed "s/^/      [$svc] /" \
+        || echo "    (warning: $svc build/up-d returned non-zero — not blocking)"
+done
 
 # Reconcile S3 lifecycle policy. mc ilm import replaces the entire
 # policy with the JSON the script generates — idempotent, ~2s. Keeps
