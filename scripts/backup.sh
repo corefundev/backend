@@ -110,15 +110,32 @@ if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
              "mir/$S3_MIRROR_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$OUT.enc")"; then
         echo "[$(date -u +%FT%TZ)] mirror push complete"
         MIRROR_NOW=$(date -u +%s)
-        # Push mirror timestamp (best-effort, no retry — alert covers it).
-        if curl -fsS --max-time 5 -X PUT \
-                --data-binary "# TYPE sku_backup_mirror_last_success_timestamp_seconds gauge
+        # Push mirror timestamp with the SAME 3-attempt retry as the
+        # primary metric below. Prior to 2026-05-28 this was a single-
+        # attempt curl — a transient pushgateway hiccup during the
+        # mirror-push window silently dropped the metric, then
+        # `BackupMirrorStale` would falsely fire 49h later despite the
+        # mirror data being safely on Selectel. Asymmetric reliability
+        # vs the primary-metric retry was the R10 audit finding L1.
+        # Same delay pattern as primary: 0/5/15s, max 50s total.
+        mirror_push_ok=0
+        for mdelay in 0 5 15; do
+            if [ "$mdelay" -gt 0 ]; then
+                sleep "$mdelay"
+            fi
+            if curl -fsS --max-time 5 -X PUT \
+                    --data-binary "# TYPE sku_backup_mirror_last_success_timestamp_seconds gauge
 sku_backup_mirror_last_success_timestamp_seconds $MIRROR_NOW
 " "$PUSHGATEWAY_URL/metrics/job/backup_mirror/instance/sku-forecasting" \
-                >/dev/null 2>&1; then
-            echo "[$(date -u +%FT%TZ)] pushed sku_backup_mirror_last_success_timestamp_seconds=$MIRROR_NOW"
-        else
-            echo "[$(date -u +%FT%TZ)] WARNING: mirror metric push failed (non-fatal)" >&2
+                    >/dev/null 2>&1; then
+                echo "[$(date -u +%FT%TZ)] pushed sku_backup_mirror_last_success_timestamp_seconds=$MIRROR_NOW (after ${mdelay}s delay)"
+                mirror_push_ok=1
+                break
+            fi
+            echo "[$(date -u +%FT%TZ)] WARNING: mirror metric push attempt (delay=${mdelay}s) failed — retrying" >&2
+        done
+        if [ "$mirror_push_ok" -ne 1 ]; then
+            echo "[$(date -u +%FT%TZ)] WARNING: mirror metric push failed after 3 attempts (non-fatal — primary backup is safe; BackupMirrorStale will fire on next eval)" >&2
         fi
     else
         echo "[$(date -u +%FT%TZ)] WARNING: mirror push failed — non-fatal, primary backup is safe" >&2
