@@ -94,11 +94,12 @@ services:
     restart: unless-stopped
     environment:
       DATA_SOURCE_NAME: "postgresql://replicator:${REPLICATION_PASSWORD}@postgres-replica:5432/sku_forecasting?sslmode=disable"
-    # R5-13 (2026-05-17) — `pg_replication_lag_seconds` is NOT a
-    # built-in postgres_exporter metric. The alerts.yml::PgReplicaLagHigh
-    # rule has been referring to a phantom metric (silent-alert pattern
-    # same as RqWorkerSilent). Mount a custom queries file and point
-    # the exporter at it so the replication-lag series actually exists.
+    # R5-13 (2026-05-17) — `pg_replication_lag_seconds` is NOT a built-in
+    # postgres_exporter metric. The `PgReplicaLagHigh` rule (in
+    # alerts.production.yml as of 2026-05-27) has been referring to a
+    # phantom metric (silent-alert pattern same as RqWorkerSilent).
+    # Mount a custom queries file and point the exporter at it so the
+    # replication-lag series actually exists.
     command:
       - "--extend.query-path=/etc/postgres_exporter/queries.yaml"
     volumes:

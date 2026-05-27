@@ -50,6 +50,14 @@ services:
       # R6-5 — staging keeps its own prometheus.staging.yml (different
       # scrape targets) but reuses the shared alerts.yml from the
       # prometheus/ directory.
+      #
+      # 2026-05-27 — alert rules for prod-only metrics (postgres-replica
+      # streaming, ssl-pg-tls cert expiry, off-region backup mirror)
+      # were split out into `prometheus/alerts.production.yml`. By NOT
+      # mounting the prometheus/ directory (only the single shared
+      # alerts.yml file), staging automatically excludes the prod-only
+      # rule file. Prod compose binds the whole directory, so prod
+      # picks up both files. See `alerts.production.yml` header.
       - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus

@@ -1,7 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Custom queries for prometheuscommunity/postgres_exporter v0.15.0.
 #
-# R5-13 (2026-05-17) — `alerts.yml::PgReplicaLagHigh` referenced
+# R5-13 (2026-05-17) — `alerts.production.yml::PgReplicaLagHigh` (split
+# out of `alerts.yml` on 2026-05-27 — see that file's header) referenced
 # `pg_replication_lag_seconds` which the default postgres_exporter
 # collector set does NOT emit. The alert was silently broken (same
 # phantom-metric pattern as the just-fixed RqWorkerSilent).

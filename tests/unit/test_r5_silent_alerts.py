@@ -108,12 +108,23 @@ def test_compose_replica_mounts_custom_queries():
 
 
 def test_replica_lag_alert_has_absent_defence():
-    """PgReplicaLagHigh now has `or absent(...)` so phantom-metric
-    state surfaces instead of silently passing (R5-12 lesson —
-    same pattern as RqWorkerSilent)."""
-    text = (_BACKEND / "docker" / "prometheus" / "alerts.yml").read_text()
+    """PgReplicaLagHigh has `or absent(...)` so phantom-metric state
+    surfaces instead of silently passing (R5-12 lesson — same pattern
+    as RqWorkerSilent).
+
+    Lives in `alerts.production.yml` since the 2026-05-27 staging-
+    alert split (see tests/unit/test_alerts_split.py for the design).
+    Before the split this lived in `alerts.yml` — the search path is
+    intentionally pinned to the prod-only file because the `absent()`
+    branch is what made the alert chronically fire on staging."""
+    text = (
+        _BACKEND / "docker" / "prometheus" / "alerts.production.yml"
+    ).read_text()
     alert_idx = text.find("- alert: PgReplicaLagHigh")
-    assert alert_idx > 0
+    assert alert_idx > 0, (
+        "PgReplicaLagHigh not found in alerts.production.yml — was it "
+        "moved back to the shared file? See test_alerts_split.py."
+    )
     next_alert = text.find("- alert:", alert_idx + 1)
     block = text[alert_idx:next_alert] if next_alert > 0 else text[alert_idx:]
     # Locate expr block.
