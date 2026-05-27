@@ -47,8 +47,14 @@ scrape_configs:
   # NOTE: ssl-pg-tls + postgres-replica scrape jobs are intentionally
   # absent on staging. Staging postgres doesn't run with TLS (no replica
   # to encrypt the WAL stream to), so there's no cert to probe. The
-  # corresponding alerts in alerts.yml reference these metrics — they
-  # silently no-op when the metric doesn't exist.
+  # corresponding alert rules now live in alerts.production.yml (split
+  # 2026-05-27 from the shared alerts.yml — see that file's header) and
+  # are NOT loaded on staging because `docker-compose.staging.yml`'s
+  # `!override volumes:` re-lists only alerts.yml and excludes the prod
+  # file. Before the split, those rules sat in alerts.yml and fired
+  # chronically as warnings via their `or absent(metric)` defence —
+  # 3 noisy chronic warnings (PgReplicaLagHigh, BackupMirrorStale,
+  # BaseBackupMirrorStale).
 
   # Pushgateway — receives metrics from batch jobs (backup.sh).
   # honor_labels: true so the `instance` / `job` labels pushed by the

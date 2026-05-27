@@ -114,90 +114,14 @@ groups:
         annotations:
           summary:     "Postgres connections >80% of max_connections"
 
-      # The self-signed cert that backs the primary→replica WAL TLS
-      # is valid 1 year. Fire well before expiry so rotation can be
-      # done in business hours, not at 3am when streaming dies.
-      - alert: PgReplicationCertExpiringSoon
-        expr: |
-          (ssl_cert_not_after{job="ssl-pg-tls"} - time()) / 86400 < 30
-        for:   1h
-        labels:
-          severity: warning
-          team:     forecasting
-        annotations:
-          summary:     "PG replication TLS cert expires in <30 days ({{ $value | printf \"%.0f\" }} days left)"
-          description: "Self-signed cert at /srv/backend/secrets/pg-ssl/server.crt expires soon. Rotate via the Setup PG Replication (Primary) workflow with force_regen_cert=true; runbook in deploy/REPLICATION.md → 'SSL cert rotation'."
-
-      - alert: PgReplicationCertExpired
-        expr: |
-          (ssl_cert_not_after{job="ssl-pg-tls"} - time()) / 86400 < 0
-        for:   5m
-        labels:
-          severity: critical
-          team:     forecasting
-        annotations:
-          summary:     "PG replication TLS cert HAS EXPIRED — replica streaming will break on next reconnect"
-          description: "Rotate immediately. Runbook in deploy/REPLICATION.md."
-
-  - name: replication
-    rules:
-      - alert: PgReplicaLagHigh
-        # If the replica falls more than 60s behind primary, alert.
-        # Lag in seconds = now - last replayed transaction's timestamp.
-        #
-        # R5-13 (2026-05-17) — added `or absent()` defence (the
-        # phantom-metric pattern that bit RqWorkerSilent + Container-
-        # OOMKilled). `pg_replication_lag_seconds` is not a built-in
-        # metric; it comes from the custom queries file mounted into
-        # postgres-exporter (see docker/postgres-exporter-queries.yaml +
-        # docker-compose.replica.yml). If the queries file is not
-        # mounted (early-bootstrapping replica VPS, deploy regression)
-        # the absent() branch fires and ops sees the gap.
-        expr: |
-          pg_replication_lag_seconds{job="postgres-replica"} > 60
-            or absent(pg_replication_lag_seconds{job="postgres-replica"})
-        for:   10m
-        labels:
-          severity: warning
-          team:     forecasting
-        annotations:
-          summary:     "Replica is {{ $value | printf \"%.0f\" }}s behind primary (or exporter silent)"
-          description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
-
-      - alert: PgReplicaWalReceiverDown
-        # Replica disconnected from primary's WAL stream entirely.
-        # pg_replication_is_replica=1 + pg_up=1 should always coincide
-        # with active wal_receiver. If pg_up flips to 0 here, the
-        # exporter itself is down (different alert: ReplicaExporterDown).
-        expr: |
-          pg_up{job="postgres-replica"} == 0
-        for:   2m
-        labels:
-          severity: critical
-          team:     forecasting
-        annotations:
-          summary:     "Replica's postgres-exporter unreachable for 2m"
-          description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."
-
-      - alert: PgReplicaScrapeFailed
-        # `up` is Prometheus' built-in scrape indicator (1 if the
-        # target HTTP endpoint answered, 0 if not). Distinct from
-        # `pg_up` above: if the exporter IP rotates / DNS alias goes
-        # stale / network path breaks, the target is unreachable
-        # entirely and `pg_up` won't even produce a value — so the
-        # PgReplicaWalReceiverDown alert above won't fire. This one
-        # catches that case. Added 2026-05-13 after audit found the
-        # replica IP was a checked-in hardcode (now alias via
-        # extra_hosts → REPLICA_EXPORTER_HOST env).
-        expr: |
-          up{job="postgres-replica"} == 0
-        for:   3m
-        labels:
-          severity: critical
-          team:     forecasting
-        annotations:
-          summary:     "Prometheus can't scrape postgres-replica for 3m"
-          description: "Likely cause: REPLICA_EXPORTER_HOST env on primary doesn't match the current replica IP (rotate via prod .env + recreate prometheus), OR replica firewall dropped our IP, OR the replica VPS is down."
+      # NOTE: PgReplicationCertExpiringSoon + PgReplicationCertExpired
+      # (TLS cert backing primary→replica WAL streaming) and the entire
+      # `replication` group (PgReplicaLagHigh, PgReplicaWalReceiverDown,
+      # PgReplicaScrapeFailed) live in alerts.production.yml — those
+      # metrics are produced only on prod (postgres-replica scrape +
+      # ssl-pg-tls scrape are prod-cluster-only by design). Split out
+      # of this file 2026-05-27; design + decisions in the header of
+      # alerts.production.yml.
 
   - name: slo
     rules:
@@ -280,35 +204,6 @@ groups:
           summary:     "Postgres backup is stale or missing (>25h)"
           description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
 
-      # R7-9 (2026-05-20) — off-region mirror staleness. Primary backup
-      # lives in Beget S3 (same provider as VPS); the mirror copy is in
-      # Selectel `uz-2` (Uzbekistan — different country, different
-      # operator, different jurisdiction). If the mirror is stale but
-      # primary is fresh, data is still safe but the cross-region DR
-      # posture is degraded — page a HUMAN to investigate without
-      # waking them up at 3am.
-      #
-      # severity=warning (not critical) because:
-      #   • primary backup is fresh → data is not lost
-      #   • mirror is a defense-in-depth posture, not a hot path
-      #   • most likely cause is transient Selectel network issue,
-      #     resolves itself on next nightly run
-      #
-      # 49h threshold = 2 days of missed mirror runs. If primary kept
-      # working through that window, mirror is genuinely broken
-      # (creds rotated, bucket misconfigured, Selectel outage).
-      - alert: BackupMirrorStale
-        expr: |
-          (time() - sku_backup_mirror_last_success_timestamp_seconds > 49 * 3600)
-            or absent(sku_backup_mirror_last_success_timestamp_seconds)
-        for:   30m
-        labels:
-          severity: warning
-          team:     forecasting
-        annotations:
-          summary:     "Off-region backup mirror is stale (>49h)"
-          description: "Selectel `uz-2` backup mirror hasn't received a fresh dump in 49h. Primary Beget backup is unaffected (data is safe); this is a DR-posture degradation. Inspect: `docker exec docker-backup-1 sh -c 'mc alias set mir <S3_MIRROR_ENDPOINT_URL> ... && mc ls mir/<S3_MIRROR_BUCKET>/'`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."
-
       # base_backup.sh runs weekly (Sun 03:30 UTC) — pushes
       # sku_base_backup_last_success_timestamp_seconds. Without a fresh
       # base, PITR's restore window starts shrinking: WAL archived
@@ -329,21 +224,11 @@ groups:
           summary:     "Postgres weekly base backup stale or missing (>9d)"
           description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
 
-      # R7-9 (2026-05-20) — off-region mirror of weekly base_backup.
-      # Same fail-safe shape as BackupMirrorStale: warning, not
-      # critical (primary base_backup still covers PITR). 16d
-      # threshold = 2 missed mirror weekly runs.
-      - alert: BaseBackupMirrorStale
-        expr: |
-          (time() - sku_base_backup_mirror_last_success_timestamp_seconds > 16 * 86400)
-            or absent(sku_base_backup_mirror_last_success_timestamp_seconds)
-        for:   2h
-        labels:
-          severity: warning
-          team:     forecasting
-        annotations:
-          summary:     "Off-region weekly base backup mirror is stale (>16d)"
-          description: "Selectel `uz-2` weekly base_backup mirror hasn't received a fresh push in 16d (2 missed cycles). Primary Beget base_backup is unaffected. PITR is still functional from the primary; this is a DR-posture degradation only."
+      # NOTE: BackupMirrorStale + BaseBackupMirrorStale (off-region
+      # Selectel `uz-2` mirror of primary Beget backups, R7-9 2026-05-20)
+      # live in alerts.production.yml — the mirror is prod-only by
+      # design (staging is non-customer-facing, no PII, no DR-grade
+      # posture). Split out of this file 2026-05-27.
 
       # Pre-warmup at 8d — surfaces a missed run BEFORE we hit the 9d
       # critical threshold. Audit M7 (2026-05-13) caught that without

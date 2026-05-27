@@ -17,6 +17,13 @@ alerting:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+  # Prod-only rules (postgres-replica, ssl-pg-tls cert expiry, off-region
+  # backup mirror staleness). Staging mounts the prometheus/ directory via
+  # `docker-compose.staging.yml`'s `!override volumes:` which lists only
+  # `alerts.yml` — so this file is automatically excluded on staging even
+  # though it lives in the same directory. See alerts.production.yml
+  # header for the design rationale.
+  - /etc/prometheus/alerts.production.yml
 
 scrape_configs:
   - job_name: "sku-forecasting-api"
