@@ -46,20 +46,31 @@ services:
   # cluster=staging external_label and drops scrape jobs that only
   # exist on the prod stack (postgres-replica, ssl-pg-tls).
   prometheus:
+    # 2026-05-28 — staging picks the staging variant of prometheus.yml
+    # via `--config.file=` instead of via a single-file bind-mount
+    # overlay. Single-file mounts pin to the container-start inode; a
+    # host-side rsync (tempfile + rename) produces a NEW inode, so the
+    # container keeps reading the original file. That R6-5 inode-trap
+    # surfaced 2026-05-28 during PR #34 prod-verify when force-recreate
+    # was the only way to land the alerts.yml split on staging.
+    #
+    # The fix: directory-bind `./prometheus/` (so file-content updates
+    # propagate via path-resolution-per-syscall) AND put both the
+    # prod and staging variants of prometheus.yml inside that directory
+    # (`prometheus.yml` and `prometheus.staging.yml`). The command-line
+    # `--config.file=` picks which one prometheus loads.
+    #
+    # alerts.production.yml is also visible inside the staging
+    # container (whole dir is mounted), but is NOT loaded because
+    # `prometheus.staging.yml`'s `rule_files:` lists only alerts.yml.
+    # That single line is the exclusion gate — enforced by
+    # `tests/unit/test_alerts_split.py::test_staging_prometheus_yml_loads_only_the_shared_file`.
+    command:
+      - "--config.file=/etc/prometheus/prometheus.staging.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
     volumes: !override
-      # R6-5 — staging keeps its own prometheus.staging.yml (different
-      # scrape targets) but reuses the shared alerts.yml from the
-      # prometheus/ directory.
-      #
-      # 2026-05-27 — alert rules for prod-only metrics (postgres-replica
-      # streaming, ssl-pg-tls cert expiry, off-region backup mirror)
-      # were split out into `prometheus/alerts.production.yml`. By NOT
-      # mounting the prometheus/ directory (only the single shared
-      # alerts.yml file), staging automatically excludes the prod-only
-      # rule file. Prod compose binds the whole directory, so prod
-      # picks up both files. See `alerts.production.yml` header.
-      - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
       # R10-S6 — the custom prometheus image runs lockbox_bootstrap.sh,
       # which needs the YC SA key. `!override` above drops the mount

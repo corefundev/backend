@@ -270,6 +270,33 @@ done
 echo "  reloading nginx to refresh upstream DNS"
 docker exec docker-nginx-1 nginx -s reload || true
 
+# 2026-05-28 — prometheus config-reload after rsync. Directory bind-mount
+# means the new rule files / prometheus.yml are VISIBLE inside the
+# container immediately (path-resolution-per-syscall), but the prometheus
+# process holds its parsed rule-set in memory; it only re-reads on SIGHUP
+# / POST /-/reload / restart. Without this step, any CD that touches
+# `docker/prometheus/*.yml` propagates to the filesystem but is silently
+# ignored by the running prometheus.
+#
+# Discovered during PR #34 prod-verify: `lastConfigTime` was 6 days old
+# while the host files were today. The split alerts.yml / new
+# alerts.production.yml never took effect on prod or staging until a
+# manual reload. The R6-5 inode-trap fix (directory mount on staging,
+# PR #35) is necessary but not sufficient — the reload is also needed.
+#
+# `--web.enable-lifecycle` is set in the prometheus command on both
+# envs (see docker-compose.yml + docker-compose.staging.yml), so the
+# endpoint is available.
+#
+# Tolerant `|| true` so an unhealthy prometheus doesn't block the app
+# deploy. Prometheus health is reported via its own healthcheck +
+# `up{job="prometheus"}` self-scrape; if the reload fails here, those
+# surface it.
+echo "  reloading prometheus to pick up any rule_files / prometheus.yml changes"
+docker exec docker-prometheus-1 wget -q -O- --post-data='' http://127.0.0.1:9090/-/reload \
+    >/dev/null 2>&1 && echo "    prometheus /-/reload OK" \
+    || echo "    prometheus /-/reload failed — not blocking; verify manually"
+
 if [ "$HEALTHY" != "true" ]; then
     rollback "api never became healthy in 90s after recreate" || true
     exit 5
