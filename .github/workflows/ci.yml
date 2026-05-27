@@ -114,6 +114,29 @@ jobs:
           pip install pytest pydantic
           python -m pytest tests/lint/test_compose_pwd_interpolation.py -v
 
+  # ── 1d. Lint (placeholder constant consistency — Phase 0-C PR-3) ─
+  # Asserts the structural placeholder
+  # `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD` appears verbatim in
+  # every file that documents or enforces it (.env.example,
+  # docker-compose.yml, mlflow_entrypoint.sh, cd_deploy.sh, integration
+  # test). Drift between those files would leave operators with stale
+  # docs OR runtime checks looking for the wrong literal. Pure static
+  # check (~10 ms). Also enforces that the legacy `sku` value is no
+  # longer documented as the active placeholder in non-comment context.
+  lint-placeholder-consistency:
+    name: Lint (placeholder constant consistency)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run placeholder-consistency tests
+        run: |
+          pip install pytest pydantic
+          python -m pytest tests/lint/test_placeholder_constant_consistency.py -v
+
   # ── 2. Type check ──────────────────────────────────────────
   # Mypy is now a hard gate — the legacy 41-error backlog was cleared
   # in the type-cleanup commit (OAuth provider Protocols, chaos.py

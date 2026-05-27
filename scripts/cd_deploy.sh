@@ -145,25 +145,25 @@ rollback() {
 #      (postgres-exporter / pgbouncer / mlflow / alertmanager /
 #      backup / postgres). Both read THEIR OWN YC_SA_KEY_FILE which
 #      IS the container path — the bind mount works there. So .env
-#      doesn't need the real value at all; the seed `sku` is enough
-#      to satisfy compose's `${POSTGRES_PASSWORD:?required}` strict-
-#      gate at config-load.
+#      doesn't need the real value at all; the structural placeholder
+#      `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD` is enough to
+#      satisfy compose's `${POSTGRES_PASSWORD:?required}` strict-gate
+#      at config-load (the value just needs to be non-empty).
 #
 #   3. Having .env carry the real password would VIOLATE
 #      `feedback_no_secrets_in_env`: real secret on disk where any
 #      operator with deploy@ SSH can `cat .env`. Keeping the seed
-#      `sku` (visibly weak) makes "this is a placeholder, not the
-#      real value" obvious to readers.
+#      `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD` (R10 Phase 0-C
+#      PR-3 placeholder) makes "this is a placeholder, not the real
+#      value" obvious to ANY reader of .env. The format is enforced
+#      by `tests/integration/test_placeholder_pg_auth_rejected.py`
+#      which asserts postgres SCRAM REJECTS this exact string.
 #
-# Operator action on FRESH VPS bootstrap: write the seed line ONCE,
-# manually:
-#     echo 'POSTGRES_PASSWORD=sku' >> /srv/backend/.env
+# Operator action on FRESH VPS bootstrap: write the placeholder line
+# ONCE, manually:
+#     echo 'POSTGRES_PASSWORD=_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD' >> /srv/backend/.env
 # Any subsequent rotation only touches Lockbox + the running postgres
 # (`ALTER USER`); .env is never touched by CD.
-#
-# (Phase 0-C PR-3 will replace the `sku` literal with a strong
-# `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_<random32>` placeholder so this
-# value is OBVIOUSLY never the real password.)
 
 # R4-1 — drop the legacy `SANDBOX_IMAGE=sku-forecasting-sandbox` line
 # from /srv/backend/.env if present. That value was a local-only tag
