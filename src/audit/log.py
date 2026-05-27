@@ -27,7 +27,40 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from prometheus_client import Counter
+
 logger = logging.getLogger(__name__)
+
+
+# ── Security alerting (R10 phantom-metric fix, 2026-05-27) ─────────
+#
+# The `OtpBruteForce` Prometheus alert (alerts.yml security-events
+# group) references `audit_log_event_failure_total{event_type,
+# actor_email}` to surface coordinated brute-force attempts against
+# a single account. Before this Counter existed the alert was silent
+# — record_event wrote to audit_log DB but never bumped a metric.
+#
+# Cardinality note: `actor_email` is high-cardinality in the general
+# case, but failure events are bounded by:
+#   • the per-row attempt cap (5, enforced via `signup_rate_limit`)
+#   • the audit-log sliding lockout (15 min, blocks the email)
+# So during steady-state operation each unique attacked email
+# produces ~5–20 failure events before being blocked, then no more
+# until the lockout expires. Worst-case cumulative cardinality
+# during an active spray attack is ~1000 emails × 10 attempts =
+# 10K series — large but tractable for a single Counter in
+# Prometheus's TSDB.
+#
+# `event_type` is kept as a separate label so the alert can filter
+# `event_type=~"login|otp_verify"`. `event_subtype` is intentionally
+# NOT a label here — it would multiply cardinality without changing
+# the alert's per-email aggregation semantics.
+AUDIT_LOG_EVENT_FAILURE_TOTAL = Counter(
+    "audit_log_event_failure_total",
+    "Failed audit_log events, bucketed by event_type + actor_email "
+    "(security-alerting series — drives OtpBruteForce).",
+    ["event_type", "actor_email"],
+)
 
 
 # ── Tamper-evidence (audit M migration 010) ────────────────────────
@@ -255,6 +288,34 @@ def record_event(
         event_type, event_subtype, client_id, actor_email,
         target_type, target_id, success,
     )
+
+    # Bump the failure Counter BEFORE the DB write. Two reasons:
+    #   1. The DB write can fail (transient pg outage, network blip);
+    #      audit must still surface the failure metric even when the
+    #      row write loses. The metric is the observability of last
+    #      resort, mirroring the stdout log above.
+    #   2. The OtpBruteForce alert needs this Counter to fire — a
+    #      brute-force attempt that crashes Postgres simultaneously
+    #      should still page on-call.
+    # Counter is bumped only for failures (success=False) and only
+    # when actor_email is known (anonymous failures, e.g. malformed
+    # request body, can't be bucketed per-email and wouldn't drive
+    # the alert anyway).
+    if not success and actor_email:
+        try:
+            AUDIT_LOG_EVENT_FAILURE_TOTAL.labels(
+                event_type=event_type,
+                actor_email=actor_email,
+            ).inc()
+        except Exception:
+            # Metric registration is process-local — if something here
+            # raises (label-value too long, registry corruption), keep
+            # going. The audit row is the authoritative record; the
+            # Counter is supplementary.
+            logger.exception(
+                "audit: AUDIT_LOG_EVENT_FAILURE_TOTAL.inc failed — "
+                "event_type=%s, ignoring", event_type,
+            )
 
     conn = _connect()
     if conn is None:
