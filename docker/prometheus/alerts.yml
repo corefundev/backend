@@ -74,9 +74,16 @@ groups:
   - name: workers
     rules:
       - alert: WorkerQueueBacklog
-        # rq-exporter exposes rq_scheduler_jobs + rq_queue_jobs{status="queued"}
+        # rq-exporter v3.1.0 (mdawar/rq-exporter image we deploy) emits
+        # `rq_jobs{queue=...,status=...}` — NOT `rq_queue_jobs`. The
+        # original expression referenced a phantom metric; alert silent
+        # since deploy. Caught 2026-05-27 in the R10 alert-audit pass,
+        # same phantom-metric class as R5-12 RqWorkerSilent / R5-13
+        # PgReplicaLagHigh. Verified against prod tsdb: rq_jobs series
+        # carry both `queue` (sku-scan, sku-process, ...) and `status`
+        # (queued, started, finished, failed).
         expr: |
-          sum by (queue) (rq_queue_jobs{status="queued"}) > 100
+          sum by (queue) (rq_jobs{status="queued"}) > 100
         for:   20m
         labels:
           severity: warning
@@ -380,18 +387,29 @@ groups:
           description: "BackupStale / BaseBackupStale / future push-metrics depend on this. Restart docker-pushgateway-1 and verify it accepts pushes."
 
       # Loki rejecting log entries — promtail re-tailing old logs after
-      # restart, ingester OOM, network partition. Metric:
-      # `loki_distributor_bytes_dropped_total`.
+      # restart, ingester OOM, network partition.
+      #
+      # Loki 3.0 (released 2024-04) renamed
+      # `loki_distributor_bytes_dropped_total` →
+      # `loki_discarded_bytes_total{reason}` (plus `loki_discarded_
+      # samples_total{reason}` for the line count). The original
+      # expression here referenced the pre-3.0 name; alert silent since
+      # the Loki 2→3 upgrade. Caught 2026-05-27 in the R10 alert-audit
+      # pass. Verified `loki_discarded_bytes_total` is registered on
+      # prod (currently 0 series because no drops have occurred — the
+      # metric is lazily labeled per `reason` and only emits once a
+      # discard event happens, which is the correct semantics for
+      # `rate(...) > 0`).
       - alert: LokiPushFailure
         expr: |
-          rate(loki_distributor_bytes_dropped_total[5m]) > 0
+          rate(loki_discarded_bytes_total[5m]) > 0
         for:   10m
         labels:
           severity: warning
           team:     forecasting
         annotations:
           summary:     "Loki dropping log bytes for 10m"
-          description: "{{ $value | humanize }}B/s being rejected. Check promtail positions persistence (#198 fix) and loki ingester health."
+          description: "{{ $value | humanize }}B/s being rejected (reason={{ $labels.reason }}). Check promtail positions persistence (#198 fix) and loki ingester health."
 
       # Promtail unreachable — image is distroless so no docker healthcheck;
       # prometheus scrape is the only liveness signal we have.
