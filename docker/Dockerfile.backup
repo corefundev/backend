@@ -35,21 +35,31 @@ RUN apk add --no-cache \
 COPY --from=mc-stage /usr/bin/mc /usr/local/bin/mc
 
 # lockbox_bootstrap.sh wraps any command, fetching Lockbox secrets
-# first. backup.sh comes from the bind-mount at runtime (so we can
-# tweak the dump pipeline without rebuilding the image), but
-# lockbox_bootstrap.sh is baked here — it's stable and a critical
-# dep of the container starting cleanly.
+# first. backup.sh / base_backup.sh / audit_log_retention.sh come from
+# the bind-mount at runtime (so we can tweak pipelines without
+# rebuilding the image), but lockbox_bootstrap.sh + cron_wrapper.sh
+# are baked here — they're stable and critical deps of the container
+# starting cleanly.
 COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
-RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh
+COPY scripts/cron_wrapper.sh      /usr/local/bin/cron_wrapper.sh
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh
 
-# Crontab — every cron run does its own Lockbox fetch via the wrapper,
-# so the secrets in the cron environment are always fresh. crond runs
-# jobs with empty env, so without this wrapper the secrets exported in
-# the parent CMD wouldn't be visible to backup.sh.
+# Crontab. Every cron run does:
+#   1. lockbox_bootstrap.sh — fetch fresh secrets (Lockbox JWT/IAM/payload)
+#   2. cron_wrapper.sh <job> — push `sku_<job>_cron_fired_timestamp_seconds`
+#      to pushgateway, then exec the real script
+#   3. real script — backup.sh / base_backup.sh / audit_log_retention.sh
+#
+# The cron_wrapper.sh step isolates the cron-infrastructure-layer
+# signal from the script-success-layer (R10 audit B3, 2026-05-28):
+# manual recovery refreshes the success metric and masks cron drift,
+# but the cron-fired metric only updates when cron actually fires.
+# Stale cron-fired → BaseBackupCronSilent / BackupDailyCronSilent /
+# AuditLogRetentionCronSilent alerts surface the drift.
 RUN printf '%s\n%s\n%s\n' \
-        "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/backup.sh >> /var/log/backup.log 2>&1" \
-        "30 3 * * 0 /usr/local/bin/lockbox_bootstrap.sh /scripts/base_backup.sh >> /var/log/base_backup.log 2>&1" \
-        "0  4 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/audit_log_retention.sh >> /var/log/audit_log_retention.log 2>&1" \
+        "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh backup /scripts/backup.sh >> /var/log/backup.log 2>&1" \
+        "30 3 * * 0 /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh base_backup /scripts/base_backup.sh >> /var/log/base_backup.log 2>&1" \
+        "0  4 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh audit_log_retention /scripts/audit_log_retention.sh >> /var/log/audit_log_retention.log 2>&1" \
         | crontab - \
  && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log
 
