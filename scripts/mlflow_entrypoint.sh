@@ -5,8 +5,9 @@
 #
 #   1. If YC_SA_KEY_FILE is set, fetch S3_MLFLOW_* AND POSTGRES_PASSWORD
 #      from Yandex Lockbox via lockbox_bootstrap.sh — neither secret
-#      has to be written to /srv/backend/.env (which keeps the seed
-#      `sku` placeholder per the R3-13 design — runtime apps fetch the
+#      has to be written to /srv/backend/.env (which keeps the
+#      structural placeholder `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD`
+#      per the R3-13 / R10 Phase 0-C design — runtime apps fetch the
 #      live value from Lockbox, never from disk).
 #   2. Rename S3_MLFLOW_* → MLFLOW_S3_ENDPOINT_URL + AWS_* IN-PROCESS so
 #      the mlflow server's S3 client picks them up. The rename is local
@@ -16,10 +17,11 @@
 #      postgres:5432/sku_forecasting` from the LIVE Lockbox value and
 #      append to mlflow's CLI args. We CANNOT use compose
 #      `${POSTGRES_PASSWORD}` because compose interpolates from .env
-#      at config-load (which has the seed `sku`) — the live Lockbox
-#      value is unreachable to compose by design. Building the URI in
-#      the entrypoint, after Lockbox bootstrap, is the only correct
-#      moment.
+#      at config-load (which has the structural placeholder
+#      `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD`) — the live
+#      Lockbox value is unreachable to compose by design. Building
+#      the URI in the entrypoint, after Lockbox bootstrap, is the
+#      only correct moment.
 #   4. exec mlflow with the (extended) args from the compose `command:`.
 #
 # In dev / non-Lockbox mode, set S3_MLFLOW_* + POSTGRES_PASSWORD
@@ -66,16 +68,21 @@ echo "mlflow_entrypoint: S3 backend = ${MLFLOW_S3_ENDPOINT_URL:-<unset>} region=
 # Build --backend-store-uri from the Lockbox-injected POSTGRES_PASSWORD.
 # Refuse to start with an empty / placeholder password — silent auth
 # failure would re-create R8-12 in a different shape (mlflow looks
-# alive but rejects every run). The seed `sku` value is explicitly
-# rejected so a misconfigured Lockbox allowlist surfaces loudly.
+# alive but rejects every run). The structural placeholder values
+# (legacy `sku` from before R10 Phase 0-C, and the current
+# `_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD`) are explicitly
+# rejected so a misconfigured Lockbox allowlist surfaces loudly
+# instead of bricking the artifact channel quietly.
 if [ -z "${POSTGRES_PASSWORD:-}" ]; then
     echo "mlflow_entrypoint: FATAL POSTGRES_PASSWORD is unset — Lockbox bootstrap or LOCKBOX_ALLOWED_KEYS misconfigured." >&2
     exit 2
 fi
-if [ "$POSTGRES_PASSWORD" = "sku" ]; then
-    echo "mlflow_entrypoint: FATAL POSTGRES_PASSWORD is the R3-13 migration seed 'sku' — Lockbox returned empty (allowlist gap?) or .env leaked into the container." >&2
-    exit 2
-fi
+case "$POSTGRES_PASSWORD" in
+    sku|_LOCKBOX_NOT_INJECTED_*)
+        echo "mlflow_entrypoint: FATAL POSTGRES_PASSWORD is a structural placeholder ('$POSTGRES_PASSWORD') — Lockbox returned empty (allowlist gap?) or .env leaked into the container without runtime injection. Fix LOCKBOX_ALLOWED_KEYS or the bootstrap chain." >&2
+        exit 2
+        ;;
+esac
 PG_DSN="postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting"
 echo "mlflow_entrypoint: --backend-store-uri set from Lockbox POSTGRES_PASSWORD (len=${#POSTGRES_PASSWORD})" >&2
 
