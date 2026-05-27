@@ -113,10 +113,11 @@ def test_prod_prometheus_yml_loads_both_rule_files():
 
 def test_staging_prometheus_yml_loads_only_the_shared_file():
     """The staging prometheus config must NOT list the prod-only rule
-    file — even if the directory bind-mount started exposing it. The
-    `rule_files:` declaration is the second line of defence (the first
-    being the compose `!override volumes:` block)."""
-    staging_cfg_path = _BACKEND / "docker" / "prometheus.staging.yml"
+    file. As of 2026-05-28 this is the PRIMARY exclusion gate: the
+    staging compose now directory-mounts `./prometheus/` (the R6-5
+    inode-trap fix), so alerts.production.yml IS present inside the
+    container — but is not loaded because of this filter."""
+    staging_cfg_path = _PROM_DIR / "prometheus.staging.yml"
     cfg = yaml.safe_load(staging_cfg_path.read_text(encoding="utf-8"))
     rule_files = cfg.get("rule_files", [])
     assert "/etc/prometheus/alerts.yml" in rule_files, rule_files
@@ -128,43 +129,74 @@ def test_staging_prometheus_yml_loads_only_the_shared_file():
     )
 
 
-def test_staging_compose_override_lists_only_the_shared_file():
-    """The compose-side guard: `docker-compose.staging.yml`'s
-    `volumes: !override` for prometheus must mount the shared alerts.yml
-    as a single FILE (not the parent directory), so alerts.production.yml
-    is not even present inside the staging container.
+def test_staging_compose_uses_directory_mount_and_config_file_selector():
+    """The compose-side guard (2026-05-28 — was single-file mount until
+    PR #34 prod-verify caught the R6-5 inode trap on staging
+    prometheus). The staging compose must:
+
+      (a) directory-mount `./prometheus/` into `/etc/prometheus/` —
+          file-content updates propagate via path-resolution-per-syscall
+          (single-file mounts pin to the inode at container start);
+      (b) select the staging variant via
+          `--config.file=/etc/prometheus/prometheus.staging.yml` in the
+          command override (the directory mount carries both
+          `prometheus.yml` and `prometheus.staging.yml`);
+      (c) NOT carry a single-file overlay of either prometheus.yml or
+          alerts.yml — those would re-introduce the inode trap.
 
     Reading the compose with PyYAML loses the `!override` tag (we'd need
     a custom loader to handle docker-compose's tag extensions), so we
-    do a text-level check that's resilient to formatting changes.
-    """
-    text = (_BACKEND / "docker" / "docker-compose.staging.yml").read_text(encoding="utf-8")
-    assert "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" in text, (
-        "staging compose doesn't mount the shared alerts.yml as a single "
-        "file — re-add the `!override` mount or staging will lose alerts."
+    do a text-level check that's resilient to formatting changes."""
+    text = (_BACKEND / "docker" / "docker-compose.staging.yml").read_text(
+        encoding="utf-8"
     )
-    # If anyone changes staging to bind-mount the directory, the prod-only
-    # rule file would become visible inside the container.
-    forbidden = "./prometheus:/etc/prometheus:ro"
-    in_staging_block = False
-    for line in text.splitlines():
+
+    # Find the prometheus service block. Block ends at the next
+    # top-level (2-indent) service key, which is the next line matching
+    # `^  <word>:` that is NOT a sub-key of prometheus.
+    lines = text.splitlines()
+    block_lines: list[str] = []
+    in_block = False
+    for line in lines:
         stripped = line.strip()
-        if stripped.startswith("prometheus:"):
-            in_staging_block = True
+        if not in_block:
+            if stripped.startswith("prometheus:"):
+                in_block = True
             continue
-        if in_staging_block:
-            # Detect block exit by encountering another top-level service
-            # (2-space indent followed by name + colon, not a list/key).
-            if line.startswith("  ") and not line.startswith("   ") \
-                    and stripped.endswith(":") and not stripped.startswith("#") \
-                    and not stripped.startswith("-"):
-                in_staging_block = False
-                continue
-            assert forbidden not in line, (
-                "staging compose mounts the prometheus/ DIRECTORY — this "
-                "would expose alerts.production.yml inside the staging "
-                "container. Mount alerts.yml as a single file instead."
-            )
+        # In-block: block ends at the next 2-indent service-level key.
+        if line.startswith("  ") and not line.startswith("   ") \
+                and stripped.endswith(":") and not stripped.startswith("#") \
+                and not stripped.startswith("-"):
+            break
+        block_lines.append(line)
+    block = "\n".join(block_lines)
+
+    # (a) directory mount must be present
+    assert "./prometheus:/etc/prometheus:ro" in block, (
+        "staging compose must directory-mount ./prometheus/ — single-file "
+        "mounts hit the R6-5 inode trap when CD rsyncs the file."
+    )
+
+    # (b) --config.file= must point at the staging variant inside the dir
+    assert "--config.file=/etc/prometheus/prometheus.staging.yml" in block, (
+        "staging compose must select prometheus.staging.yml via "
+        "--config.file= (the directory mount carries both variants)."
+    )
+
+    # (c) NO single-file overlay of prometheus.yml or alerts.yml. These
+    # would re-introduce the inode trap (R6-5 regression).
+    forbidden_overlays = (
+        "./prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro",
+        "./prometheus/prometheus.staging.yml:/etc/prometheus/prometheus.yml:ro",
+        "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro",
+        "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+    )
+    for overlay in forbidden_overlays:
+        assert overlay not in block, (
+            f"staging compose has a single-file overlay {overlay!r} — "
+            f"that re-introduces R6-5 inode trap. Use the directory "
+            f"mount + --config.file= pattern instead."
+        )
 
 
 def test_no_rule_was_dropped_silently_in_the_split():

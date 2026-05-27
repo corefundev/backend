@@ -77,3 +77,40 @@ def test_lockbox_fetch_key_script_absent():
         "recur, AND (b) `unset $KEY` before invoking bootstrap so the "
         "clobber-guard doesn't preserve a stale inherited value."
     )
+
+
+def test_cd_deploy_reloads_prometheus_after_recreate():
+    """2026-05-28 — `prometheus` config-reload step.
+
+    Discovered during PR #34 prod-verify: the alerts.yml split landed
+    on both prod and staging filesystems via the standard rsync, but
+    the prometheus process had `lastConfigTime` from 6 days earlier.
+    Directory bind-mount means new files are VISIBLE inside the
+    container; prometheus only re-reads its rule_files on
+    SIGHUP / POST /-/reload / restart. Without this step, every CD
+    that ships a rule file change silently fails to take effect on
+    the running prometheus.
+
+    Asserted: the script POSTs to /-/reload from inside the prometheus
+    container (so 127.0.0.1 + the container's own lifecycle endpoint),
+    tolerantly (`|| ...` so an unhealthy prometheus doesn't block the
+    app-tier deploy)."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+
+    assert "docker exec docker-prometheus-1" in text, (
+        "cd_deploy.sh must reach into the prometheus container to POST "
+        "the /-/reload — the lifecycle endpoint binds to 127.0.0.1, "
+        "not the host."
+    )
+    assert "http://127.0.0.1:9090/-/reload" in text, (
+        "cd_deploy.sh must POST to prometheus's /-/reload endpoint "
+        "after rsync ships rule files / prometheus.yml changes. "
+        "Without this, the container picks up the new files in `ls` "
+        "but the running process keeps serving the stale config."
+    )
+    # Tolerance — `|| ...` (echo or `true`) so a transient reload
+    # failure doesn't fail the whole CD run.
+    assert "|| echo" in text or "|| true" in text, (
+        "the prometheus reload must be tolerant (|| true or || echo) "
+        "so a transient reload failure doesn't block the app deploy."
+    )

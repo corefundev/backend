@@ -22,12 +22,16 @@
 # inside the alert expression itself. The only correct per-env split
 # is to mount different rule files on different envs.
 #
-# Mount logic:
-#   * prod: `docker/docker-compose.yml` prometheus service mounts BOTH
-#     `alerts.yml` and `alerts.production.yml`.
-#   * staging: `docker/docker-compose.staging.yml` uses
-#     `volumes: !override` to re-list mounts; only `alerts.yml` is
-#     listed there, so this file is automatically excluded on staging.
+# Mount logic (2026-05-28 — directory mount on BOTH envs):
+#   * prod: `docker/docker-compose.yml` directory-binds `./prometheus/`
+#     to `/etc/prometheus/`; both rule files become visible inside the
+#     container, and `prometheus.yml`'s `rule_files:` lists both.
+#   * staging: `docker/docker-compose.staging.yml` ALSO directory-binds
+#     `./prometheus/` (the 2026-05-28 fix for the R6-5 inode trap that
+#     surfaced during PR #34 prod-verify). This file IS visible inside
+#     the staging container, but is NOT loaded because
+#     `prometheus.staging.yml`'s `rule_files:` lists only alerts.yml.
+#     That single line is the exclusion gate.
 #
 # Verified property: see `tests/unit/test_alerts_split.py` for the
 # regression-protection assertions covering both the cross-file rule
