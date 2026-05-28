@@ -283,8 +283,16 @@ done
 # wal/ + base/ retention rules in lockstep with the script in git, even
 # if someone changes them manually via the bucket console. Best-effort:
 # don't fail deploy if this step trips.
-echo "  reconciling S3 lifecycle policy (backups/wal/base)"
-docker exec docker-backup-1 sh /scripts/init_s3_lifecycle.sh 2>&1 \
+echo "  reconciling S3 lifecycle policy (backups/wal/base — primary + mirror)"
+# 2026-05-28 (R10 B5) — MUST run through lockbox_bootstrap.sh. A plain
+# `docker exec ... sh /scripts/init_s3_lifecycle.sh` sees only the
+# compose-blank env (S3_BACKUP_* = "") → the script's `:?` guards exit
+# non-zero → the `|| echo` swallowed it → the reconcile had been a
+# SILENT NO-OP since it was added. The primary bucket's lifecycle was
+# applied manually once and never self-healed. Wrapping in
+# lockbox_bootstrap.sh injects the real S3_BACKUP_* + S3_MIRROR_* so the
+# policy is actually (re)applied to BOTH buckets every deploy.
+docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh /scripts/init_s3_lifecycle.sh 2>&1 \
     | sed 's/^/    /' || echo "    (lifecycle reconcile failed — not blocking)"
 
 if [ "$ENVIRONMENT" = "production" ]; then

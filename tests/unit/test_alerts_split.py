@@ -56,6 +56,9 @@ PROD_ONLY_RULES = frozenset({
     # prod-only — staging has no off-region copy by design.
     "BackupMirrorStale",
     "BaseBackupMirrorStale",
+    # Off-region WAL mirror staleness (R10 B1, PR #43). Same prod-only
+    # rationale — wal_mirror.sh only runs where S3_MIRROR_* is set.
+    "WalMirrorStale",
 })
 
 
@@ -216,11 +219,15 @@ def test_no_rule_was_dropped_silently_in_the_split():
     # 2026-05-28 — +4 alerts in PR #38 (R10 C1 + B3 closure):
     #   AuditLogRetentionStale, BaseBackupCronSilent, BackupDailyCronSilent,
     #   AuditLogRetentionCronSilent. All 4 in the shared `backup` group
-    #   of alerts.yml. New total: 30 shared + 7 prod-only = 37.
+    #   of alerts.yml → 30 shared + 7 prod-only = 37.
+    #
+    # 2026-05-28 — +1 alert in PR #43 (R10 B1 WAL mirror): WalMirrorStale
+    #   in the prod-only `backup-mirror` group → 30 shared + 8 prod-only
+    #   = 38.
     #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 37
+    EXPECTED_TOTAL = 38
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (

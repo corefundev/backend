@@ -169,3 +169,35 @@ groups:
         annotations:
           summary:     "Off-region weekly base backup mirror is stale (>16d)"
           description: "Selectel `uz-2` weekly base_backup mirror hasn't received a fresh push in 16d (2 missed cycles). Primary Beget base_backup is unaffected. PITR is still functional from the primary; this is a DR-posture degradation only."
+
+      # R10 B1 (2026-05-28) — off-region mirror of the continuous WAL
+      # stream. R7-9 mirrored the daily dump + weekly base but NOT the
+      # WAL, so a mirror-recovery could only restore to the last weekly
+      # base (RPO measured in DAYS). `scripts/wal_mirror.sh` runs every
+      # 5 min reconciling wal/ → Selectel; this watches its freshness.
+      #
+      # `time() - metric` staleness with an `or absent()` defence, BUT
+      # — unlike the PR #38 *CronSilent storm — absent() IS safe here:
+      # the sync cadence (5 min) is far shorter than this alert's
+      # for:15m, so on a fresh backup-image deploy the metric appears
+      # (first sync ≤5 min) BEFORE the for: window completes → the
+      # absent() branch never stays true long enough to fire. The
+      # absent() branch THEN correctly catches "wal_mirror.sh never
+      # succeeded at all" (script bug / mirror unreachable from
+      # first boot). Verified by tests/prometheus/alerts_acceptance_test.yml.
+      #
+      # 30 min threshold = 6 missed 5-min syncs — a genuine Selectel
+      # outage / cred-rotation, not a transient blip. severity=warning:
+      # primary WAL archive (WalArchiveFailing, critical) is the hot
+      # path; the off-region copy is defence-in-depth.
+      - alert: WalMirrorStale
+        expr: |
+          (time() - sku_wal_mirror_last_success_timestamp_seconds > 1800)
+            or absent(sku_wal_mirror_last_success_timestamp_seconds)
+        for:   15m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Off-region WAL mirror is stale (>30m)"
+          description: "Selectel `uz-2` WAL mirror (scripts/wal_mirror.sh, every 5 min) hasn't completed a sync in 30+ min. Primary Beget WAL archive is unaffected (PITR from primary is intact) — this degrades the off-region RPO from ~5 min back toward the last weekly base. Inspect: `docker exec docker-backup-1 tail /var/log/wal_mirror.log`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."

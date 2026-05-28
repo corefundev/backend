@@ -1,8 +1,12 @@
 #!/bin/sh
 # ─────────────────────────────────────────────────────────────────────────────
-# init_s3_lifecycle.sh — apply lifecycle policy to the backups S3 bucket.
+# init_s3_lifecycle.sh — apply lifecycle policy to the backup buckets.
 #
-# Three rules, three prefixes — without these the bucket grows forever:
+# Applies to BOTH:
+#   • primary  — Beget S3   (S3_BACKUP_*)            — always
+#   • mirror   — Selectel uz-2 (S3_MIRROR_*)         — if configured
+#
+# Three rules, three prefixes — without these a bucket grows forever:
 #
 #   backups/    encrypted nightly pg_dump      → expire after 30d
 #   wal/        WAL segments archived by PG    → expire after 14d
@@ -16,29 +20,28 @@
 #     two consecutive weeklies fail.
 #   • backups/ unchanged from the original 30d policy.
 #
+# R10 B4 (2026-05-28) — the mirror bucket previously had NO lifecycle at
+# all (init only ever touched the primary). With WAL now mirrored
+# (scripts/wal_mirror.sh, R10 B1), an un-lifecycled mirror would grow
+# unbounded (16 MB/segment × continuous). The mirror gets the SAME
+# retention as the primary so its PITR window matches.
+#
 # Idempotent: `mc ilm import` replaces the entire policy with the JSON
-# below, so re-running converges every time.
+# below, so re-running converges every time, per bucket.
 #
-# Required env (read first from S3_BACKUP_*, fallback to AWS_*):
-#   S3_BACKUP_BUCKET            e.g. "762089886d76-testcore"
-#   S3_BACKUP_ENDPOINT_URL      e.g. "https://s3.ru1.storage.beget.cloud"
-#   S3_BACKUP_ACCESS_KEY_ID
-#   S3_BACKUP_SECRET_ACCESS_KEY
+# Required env (Lockbox-injected — run via the lockbox_bootstrap.sh
+# wrapper so these are populated; a plain `docker exec` sees empty
+# compose-blanks and the script will fail-loud on the :? guards):
+#   S3_BACKUP_BUCKET / S3_BACKUP_ENDPOINT_URL / S3_BACKUP_ACCESS_KEY_ID
+#   / S3_BACKUP_SECRET_ACCESS_KEY                          — primary
+#   S3_MIRROR_BUCKET / S3_MIRROR_ENDPOINT_URL / S3_MIRROR_ACCESS_KEY_ID
+#   / S3_MIRROR_SECRET_ACCESS_KEY                          — mirror (opt)
 #
-# Run from anywhere with mc + S3 creds. Easiest: from inside the backup
-# container which already has these:
-#
-#   docker exec docker-backup-1 sh /scripts/init_s3_lifecycle.sh
-#
-# To inspect after applying:
-#   docker exec docker-backup-1 mc ilm rule list bak/<bucket>
+# Run:
+#   docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh \
+#       /scripts/init_s3_lifecycle.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -eu
-
-BUCKET="${S3_BACKUP_BUCKET:?ERROR: set S3_BACKUP_BUCKET}"
-ENDPOINT="${S3_BACKUP_ENDPOINT_URL:?ERROR: set S3_BACKUP_ENDPOINT_URL}"
-ACCESS_KEY="${S3_BACKUP_ACCESS_KEY_ID:?ERROR: set S3_BACKUP_ACCESS_KEY_ID}"
-SECRET_KEY="${S3_BACKUP_SECRET_ACCESS_KEY:?ERROR: set S3_BACKUP_SECRET_ACCESS_KEY}"
 
 # Knobs (env override per-rule for ops experimentation; defaults are the
 # enterprise-sane values documented in deploy/PITR.md).
@@ -52,21 +55,25 @@ command -v mc >/dev/null 2>&1 || {
     exit 2
 }
 
-ALIAS=bak-init
-mc alias set "$ALIAS" "$ENDPOINT" "$ACCESS_KEY" "$SECRET_KEY" >/dev/null
+# apply_lifecycle <alias> <endpoint> <access> <secret> <bucket>
+# Sets the 3-prefix policy on one bucket. Idempotent (mc ilm import
+# replaces the whole policy).
+apply_lifecycle() {
+    _alias="$1"; _endpoint="$2"; _access="$3"; _secret="$4"; _bucket="$5"
 
-echo "[init_s3_lifecycle] applying policy to s3://${BUCKET}/"
-echo "  backups/  expire after ${BACKUPS_EXPIRE_DAYS} days  (nightly pg_dump)"
-echo "  wal/      expire after ${WAL_EXPIRE_DAYS} days  (PG WAL segments)"
-echo "  base/     expire after ${BASE_EXPIRE_DAYS} days  (weekly pg_basebackup)"
-echo "  noncurrent versions expire after ${NONCURRENT_EXPIRE_DAYS} days"
+    # mc requires scheme://host — Lockbox values may omit the scheme.
+    case "$_endpoint" in
+        http://*|https://*) ;;
+        *) _endpoint="https://$_endpoint" ;;
+    esac
 
-# Use `mc ilm import` for a deterministic, replaceable policy. The JSON
-# is a standard S3 LifecycleConfiguration body.
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"; mc alias remove "$ALIAS" >/dev/null 2>&1 || true' EXIT
+    mc alias set "$_alias" "$_endpoint" "$_access" "$_secret" >/dev/null
 
-cat > "$TMP" <<EOF
+    echo "[init_s3_lifecycle] applying policy to ${_alias} → s3://${_bucket}/"
+    echo "  backups/  expire ${BACKUPS_EXPIRE_DAYS}d | wal/  expire ${WAL_EXPIRE_DAYS}d | base/  expire ${BASE_EXPIRE_DAYS}d | noncurrent ${NONCURRENT_EXPIRE_DAYS}d"
+
+    _tmp="$(mktemp)"
+    cat > "$_tmp" <<EOF
 {
   "Rules": [
     {
@@ -93,9 +100,32 @@ cat > "$TMP" <<EOF
   ]
 }
 EOF
+    cat "$_tmp" | mc ilm import "$_alias/$_bucket"
+    rm -f "$_tmp"
+    mc alias remove "$_alias" >/dev/null 2>&1 || true
+    echo "[init_s3_lifecycle] ${_bucket}: applied + verified:"
+    mc alias set "$_alias" "$_endpoint" "$_access" "$_secret" >/dev/null
+    mc ilm rule list "$_alias/$_bucket" || true
+    mc alias remove "$_alias" >/dev/null 2>&1 || true
+}
 
-cat "$TMP" | mc ilm import "$ALIAS/$BUCKET"
+# ── Primary (Beget) — always ──────────────────────────────────────
+: "${S3_BACKUP_BUCKET:?ERROR: set S3_BACKUP_BUCKET (run via lockbox_bootstrap.sh)}"
+: "${S3_BACKUP_ENDPOINT_URL:?ERROR: set S3_BACKUP_ENDPOINT_URL}"
+: "${S3_BACKUP_ACCESS_KEY_ID:?ERROR: set S3_BACKUP_ACCESS_KEY_ID}"
+: "${S3_BACKUP_SECRET_ACCESS_KEY:?ERROR: set S3_BACKUP_SECRET_ACCESS_KEY}"
+apply_lifecycle bak-init \
+    "$S3_BACKUP_ENDPOINT_URL" "$S3_BACKUP_ACCESS_KEY_ID" \
+    "$S3_BACKUP_SECRET_ACCESS_KEY" "$S3_BACKUP_BUCKET"
 
-echo
-echo "[init_s3_lifecycle] applied. Verifying:"
-mc ilm rule list "$ALIAS/$BUCKET"
+# ── Mirror (Selectel uz-2) — if configured (B4) ───────────────────
+if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
+   [ -n "${S3_MIRROR_ENDPOINT_URL:-}" ] && \
+   [ -n "${S3_MIRROR_ACCESS_KEY_ID:-}" ] && \
+   [ -n "${S3_MIRROR_SECRET_ACCESS_KEY:-}" ]; then
+    apply_lifecycle mir-init \
+        "$S3_MIRROR_ENDPOINT_URL" "$S3_MIRROR_ACCESS_KEY_ID" \
+        "$S3_MIRROR_SECRET_ACCESS_KEY" "$S3_MIRROR_BUCKET"
+else
+    echo "[init_s3_lifecycle] S3_MIRROR_* not configured — skipping mirror lifecycle (by design on non-prod)"
+fi

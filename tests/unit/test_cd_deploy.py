@@ -14,6 +14,7 @@ Tests below are scoped to the parts of cd_deploy.sh that still exist.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -179,6 +180,96 @@ def test_base_backup_sh_mirror_metric_has_retry():
         "base_backup.sh mirror metric name must remain "
         "sku_base_backup_mirror_last_success_timestamp_seconds "
         "(referenced by BaseBackupMirrorStale alert in alerts.production.yml)."
+    )
+
+
+def test_wal_mirror_script_exists_and_is_off_hotpath():
+    """R10 B1 — wal_mirror.sh reconciles wal/ → off-region mirror on its
+    OWN cron, NOT inline in wal_archive.sh (which is the postgres
+    synchronous archive_command). Verify the script exists, uses
+    `mc mirror` (reconcile, self-healing), pushes the freshness metric,
+    and is NOT referenced from wal_archive.sh (would re-couple the
+    hot-path)."""
+    wm = _BACKEND / "scripts" / "wal_mirror.sh"
+    assert wm.exists(), "scripts/wal_mirror.sh must exist (R10 B1)"
+    text = wm.read_text()
+    assert "mc mirror" in text, (
+        "wal_mirror.sh must use `mc mirror` (full-prefix reconcile — "
+        "self-heals WAL gaps, which PITR requires). A per-segment `mc cp` "
+        "would not self-heal."
+    )
+    assert "sku_wal_mirror_last_success_timestamp_seconds" in text, (
+        "wal_mirror.sh must push the freshness metric WalMirrorStale "
+        "watches."
+    )
+    # Check the actual `mc mirror` INVOCATION line(s), not the whole file
+    # (a comment may legitimately mention `--remove` to explain its
+    # absence). Find lines that invoke mc mirror and assert none carry
+    # --remove.
+    mirror_invocations = [
+        ln for ln in text.splitlines()
+        if "mc mirror" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert mirror_invocations, "no non-comment `mc mirror` invocation found"
+    assert all("--remove" not in ln for ln in mirror_invocations), (
+        "wal_mirror.sh's `mc mirror` must NOT pass `--remove` — the "
+        "mirror keeps its own lifecycle; a primary-side WAL expiry must "
+        "not cascade-delete the off-region copy."
+    )
+    # Must NOT be wired into the synchronous archive_command path.
+    wa = (_BACKEND / "scripts" / "wal_archive.sh").read_text()
+    assert "wal_mirror" not in wa and "mir/" not in wa, (
+        "wal_archive.sh (postgres archive_command, SYNCHRONOUS) must NOT "
+        "push to the mirror inline — that would gate primary WAL "
+        "archiving on the off-region mirror's availability (disk-fill / "
+        "write-stop risk). Mirroring is a separate cron (wal_mirror.sh)."
+    )
+
+
+def test_dockerfile_backup_has_wal_mirror_cron():
+    """wal_mirror.sh must run on a frequent cron (every few minutes) so
+    the off-region RPO stays tight. Routed via lockbox_bootstrap (for
+    S3 creds) but NOT cron_wrapper (no dedicated cron_fired metric —
+    WalMirrorStale watches the success metric; crond-death is caught by
+    the sibling *CronSilent alerts)."""
+    text = (_BACKEND / "docker" / "Dockerfile.backup").read_text()
+    assert "/scripts/wal_mirror.sh" in text, (
+        "Dockerfile.backup crontab must include wal_mirror.sh"
+    )
+    # `*/N * * * *` minute-cadence line for wal_mirror.
+    assert re.search(r"\*/\d+ \* \* \* \*[^\n]*wal_mirror\.sh", text), (
+        "wal_mirror.sh must be on a `*/N * * * *` minute-cadence cron "
+        "(tight off-region RPO)."
+    )
+
+
+def test_init_s3_lifecycle_applies_to_mirror_too():
+    """R10 B4 — the Selectel mirror bucket previously had NO lifecycle
+    (init only touched the primary), so mirrored backups grew unbounded.
+    init_s3_lifecycle.sh must now apply the policy to the mirror bucket
+    when S3_MIRROR_* is configured."""
+    text = (_BACKEND / "scripts" / "init_s3_lifecycle.sh").read_text()
+    assert "S3_MIRROR_BUCKET" in text and "apply_lifecycle" in text, (
+        "init_s3_lifecycle.sh must apply the lifecycle to the mirror "
+        "bucket (S3_MIRROR_*) too, not just the primary (R10 B4)."
+    )
+
+
+def test_cd_deploy_lifecycle_reconcile_uses_lockbox_bootstrap():
+    """R10 B5 — the CD lifecycle reconcile was a SILENT no-op: invoked
+    via plain `docker exec ... sh /scripts/init_s3_lifecycle.sh`, which
+    sees only the compose-blank env (S3_BACKUP_*=""), so the script's
+    `:?` guards exited non-zero and the `|| echo` swallowed it. It must
+    run through lockbox_bootstrap.sh so the real S3 creds are injected
+    and the policy is actually applied to both buckets every deploy."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    assert re.search(
+        r"docker exec docker-backup-1\s+/usr/local/bin/lockbox_bootstrap\.sh\s+/scripts/init_s3_lifecycle\.sh",
+        text,
+    ), (
+        "cd_deploy.sh must invoke init_s3_lifecycle.sh THROUGH "
+        "lockbox_bootstrap.sh — otherwise S3_BACKUP_* are empty and the "
+        "reconcile is a silent no-op (R10 B5)."
     )
 
 
