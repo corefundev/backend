@@ -747,3 +747,62 @@ tests:
             exp_annotations:
               summary: "Off-region weekly base backup mirror is stale (>16d)"
               description: "Selectel `uz-2` weekly base_backup mirror hasn't received a fresh push in 16d (2 missed cycles). Primary Beget base_backup is unaffected. PITR is still functional from the primary; this is a DR-posture degradation only."
+
+  # ── WalMirrorStale (R10 B1, prod-only) ────────────────────────
+  # The off-region WAL mirror freshness alert. Critical property to
+  # verify: absent() is storm-SAFE here (unlike the PR #38 *CronSilent)
+  # because the 5-min sync cadence << for:15m, so the metric appears
+  # before the absent() pending window completes on a fresh deploy.
+  - interval: 1m
+    name: "WalMirrorStale fires when WAL mirror stale >30m"
+    input_series:
+      # -2000 < -1800: time() - (-2000) > 1800 from t=0 → active immediately.
+      - series: 'sku_wal_mirror_last_success_timestamp_seconds{instance="sku-forecasting", job="wal_mirror"}'
+        values: '-2000x40'
+    alert_rule_test:
+      - eval_time: 18m     # active from t=0, > for:15m
+        alertname: WalMirrorStale
+        exp_alerts:
+          - exp_labels: {instance: "sku-forecasting", job: "wal_mirror", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Off-region WAL mirror is stale (>30m)"
+              description: "Selectel `uz-2` WAL mirror (scripts/wal_mirror.sh, every 5 min) hasn't completed a sync in 30+ min. Primary Beget WAL archive is unaffected (PITR from primary is intact) — this degrades the off-region RPO from ~5 min back toward the last weekly base. Inspect: `docker exec docker-backup-1 tail /var/log/wal_mirror.log`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."
+
+  - interval: 1m
+    name: "WalMirrorStale fires when metric NEVER appears (wal_mirror.sh broken from boot)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 18m     # absent the whole time, past for:15m
+        alertname: WalMirrorStale
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Off-region WAL mirror is stale (>30m)"
+              description: "Selectel `uz-2` WAL mirror (scripts/wal_mirror.sh, every 5 min) hasn't completed a sync in 30+ min. Primary Beget WAL archive is unaffected (PITR from primary is intact) — this degrades the off-region RPO from ~5 min back toward the last weekly base. Inspect: `docker exec docker-backup-1 tail /var/log/wal_mirror.log`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."
+
+  - interval: 1m
+    name: "WalMirrorStale STORM-SAFE: absent for first 6m then metric appears → does NOT fire"
+    input_series:
+      # Mirrors a fresh deploy: no sync for the first 6 min (metric
+      # absent), then the first 5-min cron sync lands a fresh value.
+      # Because for:15m > the 6m absent window, the pending absent()
+      # alert resets when the metric appears and never fires. This is
+      # the property that makes absent() safe here (vs the PR #38 storm
+      # where for: < time-to-first-metric).
+      - series: 'sku_wal_mirror_last_success_timestamp_seconds{instance="sku-forecasting", job="wal_mirror"}'
+        values: '_x6 1200x20'   # absent 0-5m, fresh (value≈time()) from 6m
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WalMirrorStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: "WalMirrorStale does NOT fire when sync is fresh"
+    input_series:
+      # value tracks ~now (fresh): at eval 10m time()=600, value 600 → diff 0.
+      - series: 'sku_wal_mirror_last_success_timestamp_seconds{instance="sku-forecasting", job="wal_mirror"}'
+        values: '600x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WalMirrorStale
+        exp_alerts: []

@@ -56,12 +56,22 @@ RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh
 # but the cron-fired metric only updates when cron actually fires.
 # Stale cron-fired → BaseBackupCronSilent / BackupDailyCronSilent /
 # AuditLogRetentionCronSilent alerts surface the drift.
-RUN printf '%s\n%s\n%s\n' \
+# wal_mirror runs every 5 min (R10 B1) — off-region WAL reconcile to
+# Selectel uz-2. NOT wrapped in cron_wrapper.sh (unlike the 3 above):
+# WalMirrorStale (alerts.production.yml) watches the success metric
+# `sku_wal_mirror_last_success_timestamp_seconds`, and a dead crond is
+# already caught by the sibling *CronSilent alerts (shared crond). A
+# dedicated cron_fired metric here would be unused → dead metric. The
+# 5-min cadence is << WalMirrorStale's for:15m, so absent() on the
+# success metric is storm-safe (the metric appears before the first
+# for: window completes on a fresh deploy — see the alert's NOTE).
+RUN printf '%s\n%s\n%s\n%s\n' \
         "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh backup /scripts/backup.sh >> /var/log/backup.log 2>&1" \
         "30 3 * * 0 /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh base_backup /scripts/base_backup.sh >> /var/log/base_backup.log 2>&1" \
         "0  4 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh audit_log_retention /scripts/audit_log_retention.sh >> /var/log/audit_log_retention.log 2>&1" \
+        "*/5 * * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/wal_mirror.sh >> /var/log/wal_mirror.log 2>&1" \
         | crontab - \
- && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log
+ && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log
 
 # Foreground crond — image PID 1.
 # Echo the "backup cron installed" sentinel so scripts/restart-backup
