@@ -1,0 +1,262 @@
+# tests/prometheus/alerts_acceptance_test.yml
+#
+# promtool alert-acceptance tests — behavioural coverage of the
+# Prometheus alert rules in docker/prometheus/alerts.yml +
+# alerts.production.yml. Run via:
+#
+#   promtool test rules tests/prometheus/alerts_acceptance_test.yml
+#
+# Why this exists (R10 G1, 2026-05-28): the static unit tests in
+# tests/unit/test_*alerts*.py assert YAML-STRING presence (metric
+# name appears, severity is warning, etc) — they CANNOT catch
+# behavioural bugs. Three reactive-find incidents proved the gap:
+#   • R5-12/R5-13 — phantom-metric alerts that never fired (wrong
+#     metric name; static test would have passed)
+#   • R10 A1-A3 — same class, 3 more sites
+#   • PR #38 absent()-storm — *CronSilent alerts fired for up to 7
+#     days post-deploy because absent() matched a not-yet-pushed
+#     metric. The unit test ASSERTED absent() was present — it
+#     encoded the bug. A behavioural test ("given metric absent,
+#     alert must NOT fire") would have caught it at PR time.
+#
+# promtool feeds synthetic time-series and asserts which alerts are
+# firing at each eval_time. `time()` inside an expression returns the
+# eval timestamp as seconds since the test's epoch-0 start, so a
+# gauge holding a unix timestamp of VALUE 0 reads as "<eval_time>
+# seconds old" — that's how the `time() - metric > threshold`
+# staleness alerts are exercised below.
+
+rule_files:
+  - ../../docker/prometheus/alerts.yml
+  - ../../docker/prometheus/alerts.production.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ──────────────────────────────────────────────────────────────
+  # A1 — WorkerQueueBacklog uses the REAL rq_jobs{queue,status} metric
+  # (regression for the phantom `rq_queue_jobs` we fixed in PR #36).
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "WorkerQueueBacklog fires when a queue has >100 queued jobs"
+    input_series:
+      - series: 'rq_jobs{queue="sku-scan", status="queued"}'
+        values: '150x25'   # 150 queued, constant, 25 min
+    alert_rule_test:
+      - eval_time: 21m       # for: 20m + 1m slack
+        alertname: WorkerQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+              queue: sku-scan
+            exp_annotations:
+              summary: "Queue sku-scan has >100 pending jobs"
+              description: "Consider scaling the matching worker."
+
+  - interval: 1m
+    name: "WorkerQueueBacklog does NOT fire under threshold (50 queued)"
+    input_series:
+      - series: 'rq_jobs{queue="sku-scan", status="queued"}'
+        values: '50x25'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: WorkerQueueBacklog
+        exp_alerts: []
+
+  - interval: 1m
+    name: "WorkerQueueBacklog ignores non-queued statuses"
+    input_series:
+      # 500 finished jobs must NOT trip the backlog alert — only queued counts.
+      - series: 'rq_jobs{queue="sku-scan", status="finished"}'
+        values: '500x25'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: WorkerQueueBacklog
+        exp_alerts: []
+
+  # ──────────────────────────────────────────────────────────────
+  # BackupStale — success-side staleness with absent() defence.
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "BackupStale fires when last success >25h ago"
+    input_series:
+      # gauge value 0 = "backup succeeded at epoch 0"; at eval 26h it
+      # reads as 26h old > 25h threshold.
+      - series: 'sku_backup_last_success_timestamp_seconds{instance="sku-forecasting", job="backup"}'
+        values: '0x1600'   # constant 0, 1600 min ≈ 26.6h
+    alert_rule_test:
+      - eval_time: 1580m     # 26.3h > 25h, well past for:15m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: forecasting
+              instance: sku-forecasting
+              job: backup
+            exp_annotations:
+              summary: "Postgres backup is stale or missing (>25h)"
+              description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
+
+  - interval: 1m
+    name: "BackupStale fires when metric is ABSENT (never pushed)"
+    input_series: []   # no series at all
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: forecasting
+            exp_annotations:
+              summary: "Postgres backup is stale or missing (>25h)"
+              description: "No fresh dump pushed to pushgateway in 25h. Trigger the Diagnose Backup → Restart Backup workflows."
+
+  # ──────────────────────────────────────────────────────────────
+  # PR #38 / PR #39 regression — *CronSilent alerts must NOT fire on
+  # an ABSENT cron_fired metric (the post-deploy storm bug). This is
+  # the test that would have caught the absent()-storm at PR time.
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "BaseBackupCronSilent does NOT fire when cron_fired metric is absent (PR #38 storm regression)"
+    input_series:
+      # success metric present + fresh, but cron_fired NEVER defined.
+      # Pre-PR-39 (with `or absent()`) this would FIRE — the bug.
+      - series: 'sku_base_backup_last_success_timestamp_seconds{instance="sku-forecasting", job="base_backup"}'
+        values: '0x130'
+    alert_rule_test:
+      - eval_time: 125m    # well past for: 1h
+        alertname: BaseBackupCronSilent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "BackupDailyCronSilent does NOT fire when cron_fired metric is absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupDailyCronSilent
+        exp_alerts: []
+
+  - interval: 1m
+    name: "AuditLogRetentionCronSilent does NOT fire when cron_fired metric is absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: AuditLogRetentionCronSilent
+        exp_alerts: []
+
+  # ──────────────────────────────────────────────────────────────
+  # *CronSilent DO fire when the metric exists but has gone stale.
+  #
+  # Synthetic-value note: promtool's `for:` state doesn't accumulate
+  # across a COARSE evaluation interval (a 1h interval skips the
+  # intermediate pending→firing transitions), so these use the fine
+  # 1m interval. To avoid materialising 25h / 8d of 1-min samples we
+  # set the gauge to a large NEGATIVE constant — a unix timestamp
+  # "before 1970", which never occurs in prod but makes
+  # `time() - metric` exceed the threshold from t=0. The alert is
+  # then active immediately and `for:` fires it after its window
+  # with only a few dozen samples. This exercises the threshold
+  # ARITHMETIC + for: timing, which is what we're asserting.
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "BackupDailyCronSilent fires when cron_fired is stale >25h"
+    input_series:
+      # -100000 < -(25*3600=-90000): time() - (-100000) > 90000 from t=0.
+      - series: 'sku_backup_cron_fired_timestamp_seconds{instance="sku-forecasting", job="backup_cron_fired"}'
+        values: '-100000x40'
+    alert_rule_test:
+      - eval_time: 35m     # active from t=0, > for:30m
+        alertname: BackupDailyCronSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+              instance: sku-forecasting
+              job: backup_cron_fired
+            exp_annotations:
+              summary: "Daily backup cron hasn't fired in >25h"
+              description: "The 02:10 UTC cron line for backup.sh inside docker-backup-1 has not pushed a `sku_backup_cron_fired_timestamp_seconds` in 25+ hours. Pairs with `BackupStale` which catches the script-success side; this one catches the cron-infrastructure side. Same triage: crontab + crond + container logs."
+
+  - interval: 1m
+    name: "BaseBackupCronSilent fires when cron_fired is stale >8d"
+    input_series:
+      # -700000 < -(8*86400=-691200): time() - (-700000) > 691200 from t=0.
+      - series: 'sku_base_backup_cron_fired_timestamp_seconds{instance="sku-forecasting", job="base_backup_cron_fired"}'
+        values: '-700000x70'
+    alert_rule_test:
+      - eval_time: 65m     # active from t=0, > for:1h
+        alertname: BaseBackupCronSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+              instance: sku-forecasting
+              job: base_backup_cron_fired
+            exp_annotations:
+              summary: "Weekly base_backup cron hasn't fired in >8d"
+              description: "The Sunday 03:30 UTC cron line for base_backup.sh inside docker-backup-1 has not pushed a `sku_base_backup_cron_fired_timestamp_seconds` in 8+ days. If `BaseBackupStale` is GREEN this means an operator has been running base_backup.sh manually to recover, which masks the cron drift. Investigate: `docker exec docker-backup-1 crontab -l` (line present?), `docker exec docker-backup-1 ps -e | grep crond` (daemon alive?), `docker logs docker-backup-1 --since 24h`."
+
+  # ──────────────────────────────────────────────────────────────
+  # AuditLogRetentionStale — success-side with absent() defence.
+  # Fires when the metric is absent (the D1 "never ran" state).
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1h
+    name: "AuditLogRetentionStale fires when retention success metric is absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: AuditLogRetentionStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+            exp_annotations:
+              summary: "audit_log retention script hasn't pushed success in >48h"
+              description: "`scripts/audit_log_retention.sh` runs daily 04:00 UTC from the backup container, calling postgres function `prune_audit_log()` and pushing a success timestamp. Stale metric means either (a) the cron didn't fire — see `BackupContainerCronSilent` or `AuditLogRetentionCronSilent` for that orthogonal signal — or (b) the script ran but failed (likely DB connectivity / permissions). Check `docker exec docker-backup-1 tail /var/log/audit_log_retention.log`."
+
+  - interval: 1h
+    name: "AuditLogRetentionStale does NOT fire when success metric is fresh"
+    input_series:
+      # value = eval-relative fresh: at eval 2h, a value of 3600 means
+      # "succeeded 1h ago" (time()=7200, 7200-3600=3600s=1h < 48h).
+      - series: 'sku_audit_log_retention_last_success_timestamp_seconds{instance="sku-forecasting", job="audit_log_retention"}'
+        values: '3600x5'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: AuditLogRetentionStale
+        exp_alerts: []
+
+  # ──────────────────────────────────────────────────────────────
+  # A3 — OtpBruteForce uses audit_log_event_failure_total (the Counter
+  # added to src/audit/log.py in PR #36). Regression for the phantom
+  # metric that left this security alert silent since R2-8.
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "OtpBruteForce fires when one email exceeds 10 failed logins / 10m"
+    input_series:
+      # Counter rising 0→30 over 15 min → increase[10m] ≈ 20 > 10.
+      - series: 'audit_log_event_failure_total{event_type="login", actor_email="attacker@example.test"}'
+        values: '0+2x15'
+    alert_rule_test:
+      - eval_time: 13m     # >10m window populated + for:2m
+        alertname: OtpBruteForce
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+              actor_email: attacker@example.test
+            exp_annotations:
+              summary: "OTP brute force against attacker@example.test (>10 fails / 10m)"
+              description: "The audit-log lockout will block this email automatically. Verify in audit_log: `SELECT * FROM audit_log WHERE actor_email='attacker@example.test' AND ts > NOW() - INTERVAL '10 minutes' ORDER BY ts DESC;`"
+
+  - interval: 1m
+    name: "OtpBruteForce does NOT fire for a slow trickle of failures (<10 / 10m)"
+    input_series:
+      # Counter rising 0→7 over 15 min → increase[10m] ≈ 5 < 10.
+      - series: 'audit_log_event_failure_total{event_type="login", actor_email="typo@example.test"}'
+        values: '0+0.5x15'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: OtpBruteForce
+        exp_alerts: []
