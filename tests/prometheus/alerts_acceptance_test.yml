@@ -806,3 +806,40 @@ tests:
       - eval_time: 10m
         alertname: WalMirrorStale
         exp_alerts: []
+
+  # ── MirrorPruneStale (R10 B4, prod-only) ──────────────────────
+  # NO absent() (daily cadence > for: → a fresh deploy would storm if
+  # absent() were present). Tests: fires-when-stale, no-fire-fresh,
+  # and absent→no-fire (storm-safety for the daily-metric case).
+  - interval: 1m
+    name: "MirrorPruneStale fires when prune stale >50h"
+    input_series:
+      # -181000 < -(50*3600=-180000): time() - (-181000) > 180000 from t=0.
+      - series: 'sku_mirror_prune_last_success_timestamp_seconds{instance="sku-forecasting", job="mirror_prune"}'
+        values: '-181000x80'
+    alert_rule_test:
+      - eval_time: 65m     # active from t=0, > for:1h
+        alertname: MirrorPruneStale
+        exp_alerts:
+          - exp_labels: {instance: "sku-forecasting", job: "mirror_prune", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Off-region mirror retention prune is stale (>50h)"
+              description: "Selectel `uz-2` mirror prune (scripts/mirror_prune.sh, daily 05:00 UTC) hasn't completed in 50+ h. Selectel can't self-expire via S3 lifecycle, so without this prune the mirror grows unbounded (cost, not data-loss). Inspect: `docker exec docker-backup-1 tail /var/log/mirror_prune.log`."
+
+  - interval: 1m
+    name: "MirrorPruneStale STORM-SAFE: absent metric does NOT fire (daily cadence, no absent() branch)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: MirrorPruneStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: "MirrorPruneStale does NOT fire when prune is fresh"
+    input_series:
+      - series: 'sku_mirror_prune_last_success_timestamp_seconds{instance="sku-forecasting", job="mirror_prune"}'
+        values: '600x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: MirrorPruneStale
+        exp_alerts: []

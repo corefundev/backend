@@ -59,6 +59,9 @@ PROD_ONLY_RULES = frozenset({
     # Off-region WAL mirror staleness (R10 B1, PR #43). Same prod-only
     # rationale — wal_mirror.sh only runs where S3_MIRROR_* is set.
     "WalMirrorStale",
+    # Off-region mirror retention-prune staleness (R10 B4 — Selectel
+    # can't self-expire, prune is client-side, prod-only).
+    "MirrorPruneStale",
 })
 
 
@@ -225,9 +228,13 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #   in the prod-only `backup-mirror` group → 30 shared + 8 prod-only
     #   = 38.
     #
+    # 2026-05-28 — +1 alert in the B4-real follow-up: MirrorPruneStale
+    #   (Selectel can't self-expire → client-side prune) in the prod-only
+    #   `backup-mirror` group → 30 shared + 9 prod-only = 39.
+    #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 38
+    EXPECTED_TOTAL = 39
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (

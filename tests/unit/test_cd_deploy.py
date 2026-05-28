@@ -243,15 +243,69 @@ def test_dockerfile_backup_has_wal_mirror_cron():
     )
 
 
-def test_init_s3_lifecycle_applies_to_mirror_too():
-    """R10 B4 — the Selectel mirror bucket previously had NO lifecycle
-    (init only touched the primary), so mirrored backups grew unbounded.
-    init_s3_lifecycle.sh must now apply the policy to the mirror bucket
-    when S3_MIRROR_* is configured."""
+def test_init_s3_lifecycle_does_NOT_attempt_mirror_lifecycle():
+    """R10 B4 (corrected) — Selectel S3 accepts PutBucketLifecycle but
+    does NOT persist it (verified prod 2026-05-28: import 'successfully'
+    → GET 'does not exist'). So init_s3_lifecycle.sh must NOT call
+    apply_lifecycle on the mirror (it would log a misleading
+    'applied … does not exist' every deploy). Mirror retention is
+    enforced client-side by mirror_prune.sh instead."""
     text = (_BACKEND / "scripts" / "init_s3_lifecycle.sh").read_text()
-    assert "S3_MIRROR_BUCKET" in text and "apply_lifecycle" in text, (
-        "init_s3_lifecycle.sh must apply the lifecycle to the mirror "
-        "bucket (S3_MIRROR_*) too, not just the primary (R10 B4)."
+    # The primary apply must still be present.
+    assert "apply_lifecycle bak-init" in text, (
+        "init_s3_lifecycle.sh must still apply lifecycle to the PRIMARY "
+        "(Beget persists it)."
+    )
+    # The mirror apply (mir-init) must be GONE.
+    assert "apply_lifecycle mir-init" not in text, (
+        "init_s3_lifecycle.sh must NOT apply_lifecycle to the mirror — "
+        "Selectel discards it (no-op + misleading log). Retention is via "
+        "mirror_prune.sh (R10 B4)."
+    )
+    # And it must point readers at the real mechanism.
+    assert "mirror_prune.sh" in text, (
+        "init_s3_lifecycle.sh should reference mirror_prune.sh as the "
+        "mirror's retention mechanism."
+    )
+
+
+def test_mirror_prune_script_is_age_based_not_mirror_remove():
+    """R10 B4 — mirror_prune.sh enforces mirror retention client-side
+    (Selectel can't lifecycle). It MUST prune by AGE (`mc rm
+    --older-than`), NOT by `mc mirror --remove` — the latter would
+    cascade a malicious/buggy primary delete to the off-region copy,
+    defeating ransomware/corruption resilience."""
+    mp = _BACKEND / "scripts" / "mirror_prune.sh"
+    assert mp.exists(), "scripts/mirror_prune.sh must exist (R10 B4)"
+    text = mp.read_text()
+    assert "mc rm" in text and "--older-than" in text, (
+        "mirror_prune.sh must prune by age via `mc rm --older-than`."
+    )
+    assert "sku_mirror_prune_last_success_timestamp_seconds" in text, (
+        "mirror_prune.sh must push the freshness metric MirrorPruneStale "
+        "watches."
+    )
+    # Must NOT use the cascade-prone --remove approach in wal_mirror.sh.
+    wm = (_BACKEND / "scripts" / "wal_mirror.sh").read_text()
+    wm_invocations = [
+        ln for ln in wm.splitlines()
+        if "mc mirror" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert all("--remove" not in ln for ln in wm_invocations), (
+        "wal_mirror.sh must not use `mc mirror --remove` — mirror "
+        "retention is decoupled (age-based prune), not primary-tracking."
+    )
+
+
+def test_dockerfile_backup_has_mirror_prune_cron():
+    """mirror_prune.sh runs on a daily cron (Selectel-independent
+    retention). Via lockbox_bootstrap (needs S3_MIRROR creds)."""
+    text = (_BACKEND / "docker" / "Dockerfile.backup").read_text()
+    assert "/scripts/mirror_prune.sh" in text, (
+        "Dockerfile.backup crontab must include mirror_prune.sh"
+    )
+    assert re.search(r"\d+ +\d+ \* \* \*[^\n]*mirror_prune\.sh", text), (
+        "mirror_prune.sh must be on a daily `M H * * *` cron."
     )
 
 
