@@ -256,6 +256,90 @@ groups:
           summary:     "Postgres weekly base backup is overdue (>8d)"
           description: "Backup hasn't been pushed in 8 days — one day short of the 9d critical threshold. Inspect backup container logs while there's still a healthy PITR window. Suppressed by BaseBackupStale once it fires (see alertmanager inhibit rules)."
 
+      # R10 audit C1 (2026-05-28) — audit_log_retention.sh runs daily
+      # 04:00 UTC, pushes `sku_audit_log_retention_last_success_timestamp_seconds`.
+      # Before the R10 audit caught D1, this script had been silently
+      # NOT RUNNING for 20+ days on prod (backup container image was
+      # built 2026-05-07 before commit bf24fb1 added the audit_log
+      # retention cron line, and CD didn't `--build` the backup image —
+      # closed by PR #37). With the script now running, this alert is
+      # the success-side staleness check.
+      #
+      # Threshold 48h = 2 missed daily runs. audit_log growth is gradual
+      # (currently 27 rows / 128KB on prod), so warning-severity not
+      # critical. The retention is 730 days (per migration 012); the
+      # script doesn't need to be exactly on-time to maintain audit
+      # integrity.
+      - alert: AuditLogRetentionStale
+        expr: |
+          (time() - sku_audit_log_retention_last_success_timestamp_seconds > 48 * 3600)
+            or absent(sku_audit_log_retention_last_success_timestamp_seconds)
+        for:   1h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "audit_log retention script hasn't pushed success in >48h"
+          description: "`scripts/audit_log_retention.sh` runs daily 04:00 UTC from the backup container, calling postgres function `prune_audit_log()` and pushing a success timestamp. Stale metric means either (a) the cron didn't fire — see `BackupContainerCronSilent` or `AuditLogRetentionCronSilent` for that orthogonal signal — or (b) the script ran but failed (likely DB connectivity / permissions). Check `docker exec docker-backup-1 tail /var/log/audit_log_retention.log`."
+
+      # R10 audit B3 (2026-05-28) — per-cron-job "fired" metric, pushed
+      # by `scripts/cron_wrapper.sh` BEFORE the wrapped script runs.
+      # Independent of the wrapped script's success — bumps every time
+      # cron actually fires, regardless of outcome.
+      #
+      # Purpose: detect cron-infrastructure drift that the existing
+      # *Stale alerts MISS when an operator runs the script manually.
+      # Sunday 5-24 was the only true cron-time base_backup in May
+      # (per `mc ls` audit); earlier Sundays had silent cron failures
+      # masked by Tuesday/Wednesday manual recovery runs. With the
+      # cron-fired metric, those manual recoveries would NOT have
+      # silenced this alert.
+      #
+      # Threshold 8d = 1 missed Sunday cron + 1d slack. Pairs with
+      # BaseBackupWarning (also 8d) — but the two diverge in shape:
+      # this fires if cron didn't fire AT ALL, BaseBackupWarning
+      # fires if no base was pushed even with manual recovery.
+      - alert: BaseBackupCronSilent
+        expr: |
+          (time() - sku_base_backup_cron_fired_timestamp_seconds > 8 * 86400)
+            or absent(sku_base_backup_cron_fired_timestamp_seconds)
+        for:   1h
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Weekly base_backup cron hasn't fired in >8d"
+          description: "The Sunday 03:30 UTC cron line for base_backup.sh inside docker-backup-1 has not pushed a `sku_base_backup_cron_fired_timestamp_seconds` in 8+ days. If `BaseBackupStale` is GREEN this means an operator has been running base_backup.sh manually to recover, which masks the cron drift. Investigate: `docker exec docker-backup-1 crontab -l` (line present?), `docker exec docker-backup-1 ps -e | grep crond` (daemon alive?), `docker logs docker-backup-1 --since 24h`."
+
+      # Same shape as BaseBackupCronSilent but for the daily backup
+      # cron. Threshold 25h = 1 missed daily + 1h slack (same as
+      # BackupStale's threshold).
+      - alert: BackupDailyCronSilent
+        expr: |
+          (time() - sku_backup_cron_fired_timestamp_seconds > 25 * 3600)
+            or absent(sku_backup_cron_fired_timestamp_seconds)
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Daily backup cron hasn't fired in >25h"
+          description: "The 02:10 UTC cron line for backup.sh inside docker-backup-1 has not pushed a `sku_backup_cron_fired_timestamp_seconds` in 25+ hours. Pairs with `BackupStale` which catches the script-success side; this one catches the cron-infrastructure side. Same triage: crontab + crond + container logs."
+
+      # Same shape, for audit_log_retention daily cron. 25h threshold
+      # symmetric with BackupDailyCronSilent.
+      - alert: AuditLogRetentionCronSilent
+        expr: |
+          (time() - sku_audit_log_retention_cron_fired_timestamp_seconds > 25 * 3600)
+            or absent(sku_audit_log_retention_cron_fired_timestamp_seconds)
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "audit_log_retention cron hasn't fired in >25h"
+          description: "The 04:00 UTC cron line for audit_log_retention.sh inside docker-backup-1 has not pushed a `sku_audit_log_retention_cron_fired_timestamp_seconds` in 25+ hours. Pairs with `AuditLogRetentionStale`. Same triage."
+
       # R5-17 (2026-05-17) — WAL archive_command failure surfacing.
       # `wal_archive.sh` pushes each WAL segment to S3; postgres retries
       # on failure (data is safe in pg_wal/), but the retry loop grows

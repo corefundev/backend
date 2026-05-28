@@ -211,9 +211,16 @@ def test_no_rule_was_dropped_silently_in_the_split():
     prod_only = _collect_alert_names(_PROD_ONLY)
 
     # Pre-split alerts.yml had 26 + 7 prod-only-now-extracted = 33 rules.
-    # After the split: 26 in shared + 7 in prod-only = 33. Updating this
-    # constant requires conscious justification.
-    EXPECTED_TOTAL = 33
+    # After the split: 26 in shared + 7 in prod-only = 33.
+    #
+    # 2026-05-28 — +4 alerts in PR #38 (R10 C1 + B3 closure):
+    #   AuditLogRetentionStale, BaseBackupCronSilent, BackupDailyCronSilent,
+    #   AuditLogRetentionCronSilent. All 4 in the shared `backup` group
+    #   of alerts.yml. New total: 30 shared + 7 prod-only = 37.
+    #
+    # Updating this constant requires conscious justification — each
+    # change should be a deliberate decision recorded in a PR.
+    EXPECTED_TOTAL = 37
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (
