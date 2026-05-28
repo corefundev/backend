@@ -20,11 +20,14 @@
 #     two consecutive weeklies fail.
 #   • backups/ unchanged from the original 30d policy.
 #
-# R10 B4 (2026-05-28) — the mirror bucket previously had NO lifecycle at
-# all (init only ever touched the primary). With WAL now mirrored
-# (scripts/wal_mirror.sh, R10 B1), an un-lifecycled mirror would grow
-# unbounded (16 MB/segment × continuous). The mirror gets the SAME
-# retention as the primary so its PITR window matches.
+# R10 B4 (2026-05-28) — this S3-lifecycle policy is applied to the
+# PRIMARY (Beget) only. The Selectel `uz-2` mirror CANNOT use an S3
+# lifecycle: Selectel accepts `PutBucketLifecycle` ("imported
+# successfully") but does NOT persist it — GetBucketLifecycle returns
+# "does not exist" (verified on prod 2026-05-28). So mirror retention
+# is enforced CLIENT-SIDE by scripts/mirror_prune.sh (`mc rm
+# --older-than`), NOT here. Attempting `mc ilm import` on the mirror
+# would just log a misleading "applied … does not exist" every deploy.
 #
 # Idempotent: `mc ilm import` replaces the entire policy with the JSON
 # below, so re-running converges every time, per bucket.
@@ -118,14 +121,7 @@ apply_lifecycle bak-init \
     "$S3_BACKUP_ENDPOINT_URL" "$S3_BACKUP_ACCESS_KEY_ID" \
     "$S3_BACKUP_SECRET_ACCESS_KEY" "$S3_BACKUP_BUCKET"
 
-# ── Mirror (Selectel uz-2) — if configured (B4) ───────────────────
-if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
-   [ -n "${S3_MIRROR_ENDPOINT_URL:-}" ] && \
-   [ -n "${S3_MIRROR_ACCESS_KEY_ID:-}" ] && \
-   [ -n "${S3_MIRROR_SECRET_ACCESS_KEY:-}" ]; then
-    apply_lifecycle mir-init \
-        "$S3_MIRROR_ENDPOINT_URL" "$S3_MIRROR_ACCESS_KEY_ID" \
-        "$S3_MIRROR_SECRET_ACCESS_KEY" "$S3_MIRROR_BUCKET"
-else
-    echo "[init_s3_lifecycle] S3_MIRROR_* not configured — skipping mirror lifecycle (by design on non-prod)"
-fi
+# ── Mirror (Selectel uz-2) — retention is NOT an S3 lifecycle ─────
+# Selectel doesn't persist PutBucketLifecycle (R10 B4, see header).
+# Mirror retention is enforced by scripts/mirror_prune.sh on its own
+# daily cron. Nothing to do here.
