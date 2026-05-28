@@ -260,3 +260,490 @@ tests:
       - eval_time: 13m
         alertname: OtpBruteForce
         exp_alerts: []
+
+  # ════════════════════════════════════════════════════════════════
+  # FULL COVERAGE BACKFILL (R10 G1, 2026-05-28) — behavioural test for
+  # every remaining alert so the coverage gate
+  # (tests/lint/test_alert_test_coverage.py) reaches 100%. One fires-
+  # case per alert minimum; no-fire cases added where they guard a
+  # real boundary. $value-templated annotations were resolved by
+  # running promtool and pasting the rendered output verbatim.
+  # ════════════════════════════════════════════════════════════════
+
+  # ── api-availability ──────────────────────────────────────────
+  - interval: 1m
+    name: "ApiDown fires when up=0"
+    input_series:
+      - series: 'up{job="sku-forecasting-api"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ApiDown
+        exp_alerts:
+          - exp_labels: {job: "sku-forecasting-api", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "API /metrics is unreachable for 2m"
+              description: "No successful scrape of api:8000 since 0. Check container health, /readyz."
+
+  - interval: 1m
+    name: "ApiDown does NOT fire when up=1"
+    input_series:
+      - series: 'up{job="sku-forecasting-api"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ApiDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: "ApiHighErrorRate fires at 10% error ratio"
+    input_series:
+      - series: 'forecast_requests_total{status="error"}'
+        values: '0+1x15'
+      - series: 'forecast_requests_total{status="ok"}'
+        values: '0+9x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ApiHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "API error rate >5% for 10m"
+              description: "Current error ratio is 10%."
+
+  - interval: 1m
+    name: "ApiPredictSlow fires when p95 latency >2s"
+    input_series:
+      - series: 'forecast_latency_seconds_bucket{le="1"}'
+        values: '0x30'
+      - series: 'forecast_latency_seconds_bucket{le="2"}'
+        values: '0x30'
+      - series: 'forecast_latency_seconds_bucket{le="5"}'
+        values: '0+100x30'
+      - series: 'forecast_latency_seconds_bucket{le="+Inf"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApiPredictSlow
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Predict p95 latency >2s (15m)"
+              description: "p95 = 4.85s. Check model load / feature build path."
+
+  - interval: 1m
+    name: "FallbackModelInUse fires when fallback rate exceeds 5/min"
+    input_series:
+      - series: 'fallback_model_used_total'
+        values: '0+6x25'
+    alert_rule_test:
+      - eval_time: 17m       # rate active ~5m, + for:10m
+        alertname: FallbackModelInUse
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Fallback model active for 10m"
+              description: "Clients: check primary model load logs."
+
+  # ── workers ───────────────────────────────────────────────────
+  - interval: 1m
+    name: "RqWorkerSilent fires when rq_workers metric is absent (exporter down)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: RqWorkerSilent
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "RQ workers not consuming queued jobs (or rq-exporter down)"
+              description: "Either rq-exporter is silent (DNS-cache-stale after redis recreate? see 2026-05-17 incident; restart docker-rq-exporter-1) OR queued jobs are not being picked up. Inspect: `docker logs docker-worker-1 --tail 50`. If workers running but idle while queue non-empty, restart: `docker compose restart worker scan-worker process-worker`."
+
+  # ── database ──────────────────────────────────────────────────
+  - interval: 1m
+    name: "PostgresDown fires when up=0"
+    input_series:
+      - series: 'up{job="postgres"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PostgresDown
+        exp_alerts:
+          - exp_labels: {job: "postgres", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Postgres exporter unreachable"
+
+  - interval: 1m
+    name: "PostgresConnectionsHigh fires at 90% of max_connections"
+    input_series:
+      - series: 'pg_stat_activity_count'
+        values: '90x15'
+      - series: 'pg_settings_max_connections'
+        values: '100x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PostgresConnectionsHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Postgres connections >80% of max_connections"
+
+  # ── slo ───────────────────────────────────────────────────────
+  - interval: 1m
+    name: "SloErrorBudgetFastBurn fires at 2% error over 1h+5m"
+    input_series:
+      - series: 'forecast_requests_total{status="error"}'
+        values: '0+2x70'
+      - series: 'forecast_requests_total{status="ok"}'
+        values: '0+98x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: SloErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "SLO error budget burning fast (14.4× — 2-day burn-down)"
+              description: "Forecast endpoint error rate >1.44% sustained for 1h AND 5m windows. At this rate the 30-day error budget is gone in 2 days. Investigate immediately."
+
+  - interval: 1m
+    name: "SloErrorBudgetSlowBurn fires at 2% error over 6h+30m"
+    input_series:
+      - series: 'forecast_requests_total{status="error"}'
+        values: '0+2x380'
+      - series: 'forecast_requests_total{status="ok"}'
+        values: '0+98x380'
+    alert_rule_test:
+      - eval_time: 375m
+        alertname: SloErrorBudgetSlowBurn
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "SLO error budget burning slowly (6× — 5-day burn-down)"
+              description: "Forecast endpoint error rate >0.6% sustained for 6h AND 30m windows. At this rate the 30-day error budget is gone in 5 days. Diagnose during business hours."
+
+  # ── backup (stale variants — absent() defence) ────────────────
+  - interval: 1m
+    name: "BaseBackupStale fires when success metric absent (>9d / never)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BaseBackupStale
+        exp_alerts:
+          - exp_labels: {severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Postgres weekly base backup stale or missing (>9d)"
+              description: "pg_basebackup hasn't pushed a success ts in 9 days. PITR window will start shrinking once WAL retention (14d) catches up. Check backup container cron + S3 base/ prefix."
+
+  - interval: 1m
+    name: "BaseBackupWarning fires when success metric absent (>8d / never)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BaseBackupWarning
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Postgres weekly base backup is overdue (>8d)"
+              description: "Backup hasn't been pushed in 8 days — one day short of the 9d critical threshold. Inspect backup container logs while there's still a healthy PITR window. Suppressed by BaseBackupStale once it fires (see alertmanager inhibit rules)."
+
+  - interval: 1m
+    name: "WalArchiveFailing fires when archiver failed_count metric absent (exporter silent)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: WalArchiveFailing
+        exp_alerts:
+          # absent() propagates the equality-matcher label job="postgres".
+          - exp_labels: {job: "postgres", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Postgres WAL archive_command failing or exporter silent"
+              description: "wal_archive.sh is failing to push to S3 (or postgres-exporter is down). WAL accumulates in pg_wal/ on the postgres data volume until the host disk fills. Inspect: `docker logs docker-postgres-1 --tail 50 | grep archive`; `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. Likely causes: S3 outage, Beget key rotation, Lockbox SA expiry, or backup bucket policy change."
+
+  - interval: 1m
+    name: "WalArchiveFailing fires when failed_count increases"
+    input_series:
+      - series: 'pg_stat_archiver_failed_count{job="postgres"}'
+        values: '0+1x10'   # one failure per minute → increase[5m] > 0
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: WalArchiveFailing
+        exp_alerts:
+          - exp_labels: {job: "postgres", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Postgres WAL archive_command failing or exporter silent"
+              description: "wal_archive.sh is failing to push to S3 (or postgres-exporter is down). WAL accumulates in pg_wal/ on the postgres data volume until the host disk fills. Inspect: `docker logs docker-postgres-1 --tail 50 | grep archive`; `docker exec docker-postgres-1 psql -U sku -c 'SELECT * FROM pg_stat_archiver'`. Likely causes: S3 outage, Beget key rotation, Lockbox SA expiry, or backup bucket policy change."
+
+  - interval: 1m
+    name: "WalArchiveStale fires when archiver age metric absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: WalArchiveStale
+        exp_alerts:
+          # absent() propagates the equality-matcher label job="postgres".
+          - exp_labels: {job: "postgres", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Postgres WAL archive idle >30 min while DB has WRITE activity"
+              description: "No new WAL segment archived in 30 min AND `sku_forecasting` saw >10 row writes (inserted+updated+deleted) in the same window — archive_command may be stuck retrying. Inspect: `docker exec docker-postgres-1 psql -U sku -d postgres -c 'SELECT * FROM pg_stat_archiver'`. If failed_count > 0, switch to WalArchiveFailing for the canonical diagnosis. If failed_count = 0 but archive is genuinely stale on a write-active DB, suspect S3 outage / Beget key rotation / Lockbox SA expiry. Quiet-DB AND read-only-DB false positives can no longer fire here (R5-17 enterprise fix iteration 2, 2026-05-18)."
+
+  # ── container-lifecycle ───────────────────────────────────────
+  - interval: 1m
+    name: "ContainerRestartLoop fires when start_time changes >5x / 15m"
+    input_series:
+      - series: 'container_start_time_seconds{name="docker-mlflow-1"}'
+        values: '1+1x25'   # value changes every minute → changes[15m]=15 > 5
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: ContainerRestartLoop
+        exp_alerts:
+          - exp_labels: {name: "docker-mlflow-1", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Container docker-mlflow-1 restart-looping (>5 starts/15m)"
+              description: "Container is restarting too fast for the unless-stopped policy to be normal recovery. Common causes: OOM (check mem_limit + actual usage), bad config, dependency unhealthy. ExitCode=0 + Docker restart-policy hides this from `docker inspect` — only metric-side detection works."
+
+  - interval: 1m
+    name: "ContainerOOMKilled fires when oom_events increases"
+    input_series:
+      - series: 'container_oom_events_total{name="docker-mlflow-1"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ContainerOOMKilled
+        exp_alerts:
+          - exp_labels: {name: "docker-mlflow-1", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Container docker-mlflow-1 OOM-killed"
+              description: "Out-of-memory kill in last 10m. Bump mem_limit or investigate leak."
+
+  # ── monitoring-pipeline ───────────────────────────────────────
+  - interval: 1m
+    name: "PushgatewayDown fires when up=0"
+    input_series:
+      - series: 'up{job="pushgateway"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PushgatewayDown
+        exp_alerts:
+          - exp_labels: {job: "pushgateway", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Pushgateway is down — batch metrics blind"
+              description: "BackupStale / BaseBackupStale / future push-metrics depend on this. Restart docker-pushgateway-1 and verify it accepts pushes."
+
+  - interval: 1m
+    name: "PromtailDown fires when up=0"
+    input_series:
+      - series: 'up{job="promtail"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PromtailDown
+        exp_alerts:
+          - exp_labels: {job: "promtail", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Promtail :9080 unreachable for 5m"
+              description: "All container logs flowing to Loki stop. Restart docker-promtail-1; positions persist via volume so no replay flood."
+
+  - interval: 1m
+    name: "LokiPushFailure fires when discarded bytes rate >0"
+    input_series:
+      - series: 'loki_discarded_bytes_total{reason="rate_limited"}'
+        values: '0+1000x15'   # 1000 B/min discarded
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: LokiPushFailure
+        exp_alerts:
+          - exp_labels: {reason: "rate_limited", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Loki dropping log bytes for 10m"
+              description: "16.67B/s being rejected (reason=rate_limited). Check promtail positions persistence (#198 fix) and loki ingester health."
+
+  # ── certificates ──────────────────────────────────────────────
+  - interval: 1m
+    name: "LeCertExpiringSoon fires when cert <14d out"
+    input_series:
+      # ssl_cert_not_after = unix ts. value 1000000 ≈ 11.57d from epoch;
+      # (1000000 - time())/86400 < 14 from t=0.
+      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.testcore.ru"}'
+        values: '1000000x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: LeCertExpiringSoon
+        exp_alerts:
+          - exp_labels: {job: "ssl-https", instance: "https://api.testcore.ru", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "LE cert https://api.testcore.ru expires in <14d (11.5d)"
+              description: "Certbot should auto-renew at 30d remaining. If we're at 14d, cron isn't firing or renewal is failing. Inspect certbot container logs."
+
+  - interval: 1m
+    name: "LeCertExpiringCritical fires when cert <3d out"
+    input_series:
+      # value 100000 ≈ 1.16d from epoch; (100000 - time())/86400 < 3 from t=0.
+      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.testcore.ru"}'
+        values: '100000x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LeCertExpiringCritical
+        exp_alerts:
+          - exp_labels: {job: "ssl-https", instance: "https://api.testcore.ru", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "LE cert https://api.testcore.ru expires in <3 DAYS"
+              description: "User-facing TLS will break. Run certbot manually now and check renewal cron."
+
+  # ── host-resources ────────────────────────────────────────────
+  - interval: 1m
+    name: "HostDiskFillingUp fires at 90% disk usage"
+    input_series:
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+        values: '10x20'
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HostDiskFillingUp
+        exp_alerts:
+          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.testcore.ru", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Host disk usage >80% on api.testcore.ru"
+              description: "Filesystem at / is 90.0% full. Likely cause: pg_wal backup if S3 archive_command failing, or container logs / docker images bloat. Run `docker system df` and check S3 archive health."
+
+  - interval: 1m
+    name: "HostDiskCritical fires at 95% disk usage"
+    input_series:
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+        values: '5x10'
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostDiskCritical
+        exp_alerts:
+          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.testcore.ru", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Host disk usage >92% on api.testcore.ru — postgres at risk"
+              description: "Postgres will stop accepting writes when the disk fills. Evacuate large files NOW. 95.0% used."
+
+  - interval: 1m
+    name: "HostMemoryHigh fires at 95% memory usage"
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{instance="api.testcore.ru"}'
+        values: '5x35'
+      - series: 'node_memory_MemTotal_bytes{instance="api.testcore.ru"}'
+        values: '100x35'
+    alert_rule_test:
+      - eval_time: 32m
+        alertname: HostMemoryHigh
+        exp_alerts:
+          - exp_labels: {instance: "api.testcore.ru", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Host memory >90% used for 30m on api.testcore.ru"
+              description: "95.0% used. Check for memory-leak suspects (mlflow has had crash loops; api / worker can spike during training)."
+
+  # ════════════════════════════════════════════════════════════════
+  # PROD-ONLY rules (alerts.production.yml) — replication + mirror.
+  # ════════════════════════════════════════════════════════════════
+  - interval: 1m
+    name: "PgReplicationCertExpiringSoon fires when replica cert <30d out"
+    input_series:
+      - series: 'ssl_cert_not_after{job="ssl-pg-tls", instance="postgres:5432"}'
+        values: '1000000x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: PgReplicationCertExpiringSoon
+        exp_alerts:
+          - exp_labels: {job: "ssl-pg-tls", instance: "postgres:5432", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "PG replication TLS cert expires in <30 days (12 days left)"
+              description: "Self-signed cert at /srv/backend/secrets/pg-ssl/server.crt expires soon. Rotate via the Setup PG Replication (Primary) workflow with force_regen_cert=true; runbook in deploy/REPLICATION.md → 'SSL cert rotation'."
+
+  - interval: 1m
+    name: "PgReplicationCertExpired fires when replica cert already expired"
+    input_series:
+      - series: 'ssl_cert_not_after{job="ssl-pg-tls", instance="postgres:5432"}'
+        values: '0x10'   # not_after=epoch → already expired
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: PgReplicationCertExpired
+        exp_alerts:
+          - exp_labels: {job: "ssl-pg-tls", instance: "postgres:5432", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "PG replication TLS cert HAS EXPIRED — replica streaming will break on next reconnect"
+              description: "Rotate immediately. Runbook in deploy/REPLICATION.md."
+
+  - interval: 1m
+    name: "PgReplicaLagHigh fires when lag >60s"
+    input_series:
+      - series: 'pg_replication_lag_seconds{job="postgres-replica"}'
+        values: '120x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PgReplicaLagHigh
+        exp_alerts:
+          - exp_labels: {job: "postgres-replica", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Replica is 120s behind primary (or exporter silent)"
+              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
+
+  - interval: 1m
+    name: "PgReplicaLagHigh fires when lag metric absent (exporter missing queries.yaml)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PgReplicaLagHigh
+        exp_alerts:
+          # absent() propagates the equality-matcher label job="postgres-replica".
+          - exp_labels: {job: "postgres-replica", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Replica is 1s behind primary (or exporter silent)"
+              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
+
+  - interval: 1m
+    name: "PgReplicaWalReceiverDown fires when pg_up=0"
+    input_series:
+      - series: 'pg_up{job="postgres-replica"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PgReplicaWalReceiverDown
+        exp_alerts:
+          - exp_labels: {job: "postgres-replica", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Replica's postgres-exporter unreachable for 2m"
+              description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."
+
+  - interval: 1m
+    name: "PgReplicaScrapeFailed fires when up=0"
+    input_series:
+      - series: 'up{job="postgres-replica"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PgReplicaScrapeFailed
+        exp_alerts:
+          - exp_labels: {job: "postgres-replica", severity: critical, team: forecasting}
+            exp_annotations:
+              summary: "Prometheus can't scrape postgres-replica for 3m"
+              description: "Likely cause: REPLICA_EXPORTER_HOST env on primary doesn't match the current replica IP (rotate via prod .env + recreate prometheus), OR replica firewall dropped our IP, OR the replica VPS is down."
+
+  - interval: 1m
+    name: "BackupMirrorStale fires when mirror metric absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BackupMirrorStale
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Off-region backup mirror is stale (>49h)"
+              description: "Selectel `uz-2` backup mirror hasn't received a fresh dump in 49h. Primary Beget backup is unaffected (data is safe); this is a DR-posture degradation. Inspect: `docker exec docker-backup-1 sh -c 'mc alias set mir <S3_MIRROR_ENDPOINT_URL> ... && mc ls mir/<S3_MIRROR_BUCKET>/'`. Likely causes: Selectel creds rotated, bucket permission changed, or off-region network outage."
+
+  - interval: 1m
+    name: "BaseBackupMirrorStale fires when base mirror metric absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 125m
+        alertname: BaseBackupMirrorStale
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Off-region weekly base backup mirror is stale (>16d)"
+              description: "Selectel `uz-2` weekly base_backup mirror hasn't received a fresh push in 16d (2 missed cycles). Primary Beget base_backup is unaffected. PITR is still functional from the primary; this is a DR-posture degradation only."
