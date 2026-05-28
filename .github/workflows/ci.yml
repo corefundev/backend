@@ -137,6 +137,60 @@ jobs:
           pip install pytest pydantic
           python -m pytest tests/lint/test_placeholder_constant_consistency.py -v
 
+  # ── 1e. Alert acceptance (promtool test rules — R10 G1) ─────────
+  # Behavioural coverage of docker/prometheus/alerts*.yml: feeds
+  # synthetic time-series via `promtool test rules` and asserts which
+  # alerts fire at each eval_time. This catches the class of bug the
+  # static unit tests (tests/unit/test_*alerts*.py) CANNOT — they
+  # assert YAML-string presence, not firing behaviour. Three reactive
+  # finds proved the gap (R5-12/R5-13 phantom-metric silent alerts,
+  # R10 A1-A3, and the PR #38 absent()-storm whose unit test ASSERTED
+  # the buggy `absent()`). promtool's synthetic-series tests would
+  # have caught all of them at PR time. See
+  # tests/prometheus/alerts_acceptance_test.yml.
+  alert-acceptance:
+    name: Alert acceptance (promtool)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Pin to the same prometheus version as the prod image
+      # (docker/Dockerfile.prometheus) so the rule-eval semantics
+      # under test match production exactly.
+      PROM_VERSION: "2.55.1"
+      # SHA256 of prometheus-2.55.1.linux-amd64.tar.gz from the
+      # upstream release `sha256sums.txt`. Pinned per the repo's
+      # supply-chain discipline (R3 Phase 9 digest pins) — a
+      # MITM'd / swapped tarball fails the checksum and the job
+      # aborts before executing downloaded code. Bump together with
+      # PROM_VERSION when the prod prometheus image is upgraded.
+      PROM_SHA256: "19700bdd42ec31ee162e4079ebda4cd0a44432df4daa637141bdbea4b1cd8927"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install promtool ${{ env.PROM_VERSION }} (SHA256-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/prom.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prom.tar.gz" | sha256sum -c -
+          tar xzf /tmp/prom.tar.gz -C /tmp
+          sudo install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version | head -1
+      - name: Validate alert rule files parse
+        run: |
+          promtool check rules \
+            docker/prometheus/alerts.yml \
+            docker/prometheus/alerts.production.yml
+      - name: Run alert acceptance tests
+        run: |
+          promtool test rules tests/prometheus/alerts_acceptance_test.yml
+      - name: Coverage gate — every alert must have a behavioural test
+        run: |
+          pip install pytest pyyaml
+          python -m pytest tests/lint/test_alert_test_coverage.py -v
+
   # ── 2. Type check ──────────────────────────────────────────
   # Mypy is now a hard gate — the legacy 41-error backlog was cleared
   # in the type-cleanup commit (OAuth provider Protocols, chaos.py

@@ -444,8 +444,19 @@ groups:
       # restart-loop. Would have caught the mlflow OOM episode
       # (RestartCount=10458 over 3d before mem_limit 1g→2g fix).
       - alert: ContainerRestartLoop
+        # 2026-05-28 (R10 G1) — was `count by (name) (changes(...))`,
+        # which is a BUG: `count` returns the NUMBER OF SERIES per
+        # name (always 1, since each container emits one
+        # container_start_time_seconds), so the expression was
+        # effectively `1 > 5` and NEVER fired — even during the
+        # mlflow OOM restart-loop this alert was written to catch
+        # (RestartCount=10458). `max by (name)` returns the actual
+        # change-count value. Caught by the promtool acceptance test
+        # (tests/prometheus/alerts_acceptance_test.yml) — the static
+        # unit test could not see this. Same phantom/broken-alert
+        # class as R5-12 / R10 A1-A3.
         expr: |
-          count by (name) (changes(container_start_time_seconds{name=~"docker-.+"}[15m])) > 5
+          max by (name) (changes(container_start_time_seconds{name=~"docker-.+"}[15m])) > 5
         for:   5m
         labels:
           severity: critical
