@@ -67,13 +67,22 @@ def test_audit_log_retention_stale_alert_exists():
 
 def test_base_backup_cron_silent_alert_exists():
     """B3 — cron-fired metric staleness for weekly base. Threshold 8d
-    (=1 missed Sunday + 1d slack)."""
+    (=1 missed Sunday + 1d slack).
+
+    Deliberately NO `absent()` defence (unlike success-side alerts):
+    the cron_fired metric doesn't exist until the first cron tick
+    after a fresh backup-image deploy. An absent() branch would fire
+    this for up to a week post-deploy (pure noise). The absent-forever
+    failure mode is covered by BaseBackupStale (success-side, has
+    absent()). See the inline NOTE in alerts.yml."""
     rule = _get_alert("BaseBackupCronSilent")
     expr = rule["expr"]
     assert "sku_base_backup_cron_fired_timestamp_seconds" in expr, expr
-    assert "absent(sku_base_backup_cron_fired_timestamp_seconds" in expr, (
-        "BaseBackupCronSilent needs absent() — same phantom-metric "
-        "protection as success-side alerts."
+    assert "absent(" not in expr, (
+        "BaseBackupCronSilent must NOT use absent() — it would fire for "
+        "up to a week after every backup-image rebuild (cron_fired "
+        "metric only appears on first cron tick). absent-forever is "
+        "covered by the success-side BaseBackupStale."
     )
     # 8d expressed as 8*86400.
     assert "8 * 86400" in expr or "691200" in expr, expr
@@ -81,22 +90,29 @@ def test_base_backup_cron_silent_alert_exists():
 
 
 def test_backup_daily_cron_silent_alert_exists():
-    """Daily backup cron-fired metric staleness. 25h threshold."""
+    """Daily backup cron-fired metric staleness. 25h threshold.
+    No absent() — see BaseBackupCronSilent docstring."""
     rule = _get_alert("BackupDailyCronSilent")
     expr = rule["expr"]
     assert "sku_backup_cron_fired_timestamp_seconds" in expr, expr
-    assert "absent(sku_backup_cron_fired_timestamp_seconds" in expr, expr
+    assert "absent(" not in expr, (
+        "BackupDailyCronSilent must NOT use absent() (post-deploy "
+        "storm). absent-forever covered by BackupStale."
+    )
     assert "25 * 3600" in expr or "90000" in expr, expr
     assert rule["labels"]["severity"] == "warning"
 
 
 def test_audit_log_retention_cron_silent_alert_exists():
     """audit_log_retention cron-fired metric staleness. 25h threshold
-    (daily cron — same as BackupDailyCronSilent shape)."""
+    (daily cron — same as BackupDailyCronSilent shape). No absent()."""
     rule = _get_alert("AuditLogRetentionCronSilent")
     expr = rule["expr"]
     assert "sku_audit_log_retention_cron_fired_timestamp_seconds" in expr, expr
-    assert "absent(sku_audit_log_retention_cron_fired_timestamp_seconds" in expr, expr
+    assert "absent(" not in expr, (
+        "AuditLogRetentionCronSilent must NOT use absent() (post-deploy "
+        "storm). absent-forever covered by AuditLogRetentionStale."
+    )
     assert "25 * 3600" in expr or "90000" in expr, expr
     assert rule["labels"]["severity"] == "warning"
 

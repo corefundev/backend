@@ -299,10 +299,22 @@ groups:
       # BaseBackupWarning (also 8d) — but the two diverge in shape:
       # this fires if cron didn't fire AT ALL, BaseBackupWarning
       # fires if no base was pushed even with manual recovery.
+      # NOTE: deliberately NO `or absent()` here (unlike the success-side
+      # *Stale alerts). The cron_fired metric does not exist until the
+      # FIRST cron tick after a fresh backup-image deploy (cron_wrapper.sh
+      # only ships in the image as of 2026-05-28). An `absent()` branch
+      # would fire this warning for up to a full week (until the next
+      # Sunday 03:30) on every deploy that rebuilds the backup image —
+      # pure noise. The absent-forever failure mode (cron_wrapper.sh
+      # broken / never pushes) is covered by the success-side
+      # BaseBackupStale + BaseBackupWarning, which DO carry absent()
+      # defence: if cron_fired never lands, the wrapped base_backup.sh
+      # also never ran, so the success metric goes absent → those fire.
+      # This alert only needs to catch "cron fired before, but has gone
+      # silent since" — which requires the metric to exist first.
       - alert: BaseBackupCronSilent
         expr: |
-          (time() - sku_base_backup_cron_fired_timestamp_seconds > 8 * 86400)
-            or absent(sku_base_backup_cron_fired_timestamp_seconds)
+          time() - sku_base_backup_cron_fired_timestamp_seconds > 8 * 86400
         for:   1h
         labels:
           severity: warning
@@ -314,10 +326,12 @@ groups:
       # Same shape as BaseBackupCronSilent but for the daily backup
       # cron. Threshold 25h = 1 missed daily + 1h slack (same as
       # BackupStale's threshold).
+      # No `or absent()` — same rationale as BaseBackupCronSilent above.
+      # absent-forever is caught by BackupStale (success-side, has
+      # absent() defence). This catches only "fired before, gone silent".
       - alert: BackupDailyCronSilent
         expr: |
-          (time() - sku_backup_cron_fired_timestamp_seconds > 25 * 3600)
-            or absent(sku_backup_cron_fired_timestamp_seconds)
+          time() - sku_backup_cron_fired_timestamp_seconds > 25 * 3600
         for:   30m
         labels:
           severity: warning
@@ -328,10 +342,11 @@ groups:
 
       # Same shape, for audit_log_retention daily cron. 25h threshold
       # symmetric with BackupDailyCronSilent.
+      # No `or absent()` — same rationale. absent-forever is caught by
+      # AuditLogRetentionStale (success-side, has absent() defence).
       - alert: AuditLogRetentionCronSilent
         expr: |
-          (time() - sku_audit_log_retention_cron_fired_timestamp_seconds > 25 * 3600)
-            or absent(sku_audit_log_retention_cron_fired_timestamp_seconds)
+          time() - sku_audit_log_retention_cron_fired_timestamp_seconds > 25 * 3600
         for:   30m
         labels:
           severity: warning
