@@ -615,15 +615,16 @@ groups:
   # routed to the same Telegram severity-lanes as the rest.
   - name: security-events
     rules:
-      # R2-8 / R4-20 — removed JwtDecodeFailureSpike. The original
-      # expression used LogQL syntax (`{logger_name=...} |~ "regex"`) in
-      # a Prometheus alert rule, which Prometheus rejects with a
-      # parse error and refuses to load ANY rules from this file. The
-      # alert silently never worked since R2-8, and on the next CD with
-      # a real-tag prometheus pull (R4-20) the whole rule-set failed
-      # to load → container restart-loop. To restore: move this alert
-      # to a Loki ruler config (Loki ruler supports LogQL natively),
-      # not back into Prometheus.
+      # NOTE: the three log-based security alerts — JwtDecodeFailureSpike,
+      # OauthStateRejectedSpike, LockboxBootstrapFailed — are NOT in this
+      # file. They use LogQL stream syntax (`{logger_name=...} |~ "regex"`)
+      # which Prometheus cannot parse (R2-8 originally put them here and
+      # Prometheus refused to load the whole rule-set → R4-20 restart-loop
+      # incident 2026-05-17). They were PORTED to the Loki ruler and are
+      # LIVE on prod: docker/loki/rules/fake/loki-rules.yml (verified via
+      # `/loki/api/v1/rules` on prod 2026-05-28). Regression test:
+      # tests/unit/test_loki_ruler_porting.py. Do NOT re-add them here —
+      # Prometheus still can't evaluate LogQL.
 
       # OTP brute-force: a single canonical email producing >10 failed
       # OTP verify events over 10 min is well past the per-row attempt
@@ -643,8 +644,8 @@ groups:
           summary:     "OTP brute force against {{ $labels.actor_email }} (>10 fails / 10m)"
           description: "The audit-log lockout will block this email automatically. Verify in audit_log: `SELECT * FROM audit_log WHERE actor_email='{{ $labels.actor_email }}' AND ts > NOW() - INTERVAL '10 minutes' ORDER BY ts DESC;`"
 
-      # R2-8 / R4-20 — removed OauthStateRejectedSpike (same LogQL-in-
-      # PromQL bug as JwtDecodeFailureSpike above). Move to Loki ruler.
+      # (OauthStateRejectedSpike also lives in the Loki ruler — see the
+      # NOTE at the top of this group.)
 
       # RQ worker silence — workers running but NOT consuming queued
       # jobs (stuck/deadlocked). Refactored 2026-05-17 after a real
@@ -685,9 +686,7 @@ groups:
           summary:     "RQ workers not consuming queued jobs (or rq-exporter down)"
           description: "Either rq-exporter is silent (DNS-cache-stale after redis recreate? see 2026-05-17 incident; restart docker-rq-exporter-1) OR queued jobs are not being picked up. Inspect: `docker logs docker-worker-1 --tail 50`. If workers running but idle while queue non-empty, restart: `docker compose restart worker scan-worker process-worker`."
 
-      # R2-8 / R4-20 — removed LockboxBootstrapFailed (same LogQL-in-
-      # PromQL bug as above). The CRITICAL-severity intent is preserved
-      # — once Loki ruler is configured, re-add this rule there.
-      # Until then, container logs at WARN/ERROR level for
-      # "Lockbox bootstrap failed" are still in Loki and discoverable
-      # via grafana query; the alert wiring is the only thing missing.
+      # (LockboxBootstrapFailed — CRITICAL-severity — also lives in the
+      # Loki ruler; see the NOTE at the top of this group. It is wired
+      # to alertmanager via the ruler's alertmanager_url, not via this
+      # file.)
