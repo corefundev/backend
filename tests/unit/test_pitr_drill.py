@@ -127,6 +127,30 @@ def test_uses_postgres_16_to_match_prod():
     )
 
 
+def test_runs_both_primary_and_mirror_legs():
+    """R10 G4b — the drill must run a matrix over [primary, mirror] so
+    the off-region Selectel copy is proven RESTORABLE, not just written
+    to. The mirror leg must source its creds from S3_MIRROR_* and skip
+    cleanly (not hard-fail) when those secrets are absent."""
+    data = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+    job = data["jobs"]["pitr"]
+    matrix = job.get("strategy", {}).get("matrix", {})
+    assert matrix.get("source") == ["primary", "mirror"], (
+        f"PITR drill must matrix over [primary, mirror]; got {matrix}"
+    )
+    text = _WF.read_text(encoding="utf-8")
+    # Mirror leg selects S3_MIRROR_* creds.
+    assert "secrets.S3_MIRROR_BUCKET" in text and "secrets.S3_MIRROR_SECRET_ACCESS_KEY" in text, (
+        "mirror leg must source creds from S3_MIRROR_* secrets."
+    )
+    # And a guard that skips the mirror leg when those secrets are absent
+    # (so the scheduled run doesn't hard-fail if an operator removes them).
+    assert "skip=true" in text and "steps.guard.outputs.skip" in text, (
+        "mirror leg must skip cleanly (guard step) when S3_MIRROR_* "
+        "secrets are absent — not hard-fail the scheduled drill."
+    )
+
+
 def test_self_contained_no_prod_db_credentials():
     """Like the B2 drill — uses only the S3 backup secrets, never prod
     DB creds. The restored cluster's pg_hba is overridden to local trust

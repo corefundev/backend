@@ -23,9 +23,12 @@
 # credentials (the restored cluster's pg_hba is overridden to local
 # trust for the throwaway drill, so no prod password is needed).
 #
-# G4b (mirror-recovery) will add a second matrix leg sourcing from the
-# Selectel mirror — gated on S3_MIRROR_* being added as GitHub repo
-# secrets (operator action; not present yet).
+# Runs as a matrix over `source`:
+#   * primary — Beget (S3_BACKUP_*), always.
+#   * mirror  — Selectel uz-2 (S3_MIRROR_*), the off-region DR proof
+#               (R10 G4b): B1 put the WAL on the mirror; this leg proves
+#               you can actually RESTORE from it. Skips cleanly (guard
+#               step) if the S3_MIRROR_* repo secrets aren't configured.
 
 name: PITR Drill
 
@@ -39,13 +42,36 @@ on:
 
 jobs:
   pitr:
-    name: PITR replay drill + RTO (primary)
+    name: PITR replay drill + RTO (${{ matrix.source }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false   # primary + mirror legs are independent DR proofs
+      matrix:
+        # primary = Beget (S3_BACKUP_*), always runs.
+        # mirror  = Selectel uz-2 (S3_MIRROR_*) — the off-region DR proof
+        #           (R10 G4b). B1 put WAL on the mirror; this leg proves
+        #           you can actually RESTORE from it. Skips cleanly if the
+        #           S3_MIRROR_* repo secrets aren't configured.
+        source: [primary, mirror]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Resolve source + skip mirror leg if its secrets are absent
+        id: guard
+        env:
+          MIRROR_BUCKET: ${{ secrets.S3_MIRROR_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.source }}" = "mirror" ] && [ -z "${MIRROR_BUCKET:-}" ]; then
+              echo "::notice::S3_MIRROR_* repo secrets not configured — skipping the mirror-recovery leg (G4b operator prerequisite)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install mc + postgresql-client
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           curl -fsSL -o /usr/local/bin/mc \
@@ -57,41 +83,49 @@ jobs:
           psql --version
 
       - name: Download latest base + full WAL archive from S3
+        if: steps.guard.outputs.skip != 'true'
         env:
-          S3_BACKUP_BUCKET:            ${{ secrets.S3_BACKUP_BUCKET }}
-          S3_BACKUP_ENDPOINT_URL:      ${{ secrets.S3_BACKUP_ENDPOINT_URL }}
-          S3_BACKUP_ACCESS_KEY_ID:     ${{ secrets.S3_BACKUP_ACCESS_KEY_ID }}
-          S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
+          # Source-selected creds: mirror leg uses S3_MIRROR_*, primary
+          # uses S3_BACKUP_*. The `&&/||` ternary is GitHub-Actions'
+          # expression idiom for a conditional value.
+          S3_BUCKET:            ${{ matrix.source == 'mirror' && secrets.S3_MIRROR_BUCKET            || secrets.S3_BACKUP_BUCKET }}
+          S3_ENDPOINT_URL:      ${{ matrix.source == 'mirror' && secrets.S3_MIRROR_ENDPOINT_URL      || secrets.S3_BACKUP_ENDPOINT_URL }}
+          S3_ACCESS_KEY_ID:     ${{ matrix.source == 'mirror' && secrets.S3_MIRROR_ACCESS_KEY_ID     || secrets.S3_BACKUP_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ matrix.source == 'mirror' && secrets.S3_MIRROR_SECRET_ACCESS_KEY || secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          for v in S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY; do
-              if [ -z "${!v:-}" ]; then echo "ERROR: secret $v not set" >&2; exit 2; fi
+          for v in S3_BUCKET S3_ENDPOINT_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+              if [ -z "${!v:-}" ]; then echo "ERROR: ${{ matrix.source }} secret $v not set" >&2; exit 2; fi
           done
-          mc alias set bak "$S3_BACKUP_ENDPOINT_URL" \
-              "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+          # Selectel endpoints may arrive without a scheme — mc needs scheme://host.
+          case "$S3_ENDPOINT_URL" in http://*|https://*) ;; *) S3_ENDPOINT_URL="https://$S3_ENDPOINT_URL" ;; esac
+          mc alias set src "$S3_ENDPOINT_URL" \
+              "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY" >/dev/null
+          echo "source=${{ matrix.source }} bucket=$S3_BUCKET"
 
           # Latest base dir — the date prefix sorts lexically =
           # chronologically.
-          BASE_DIR=$(mc ls "bak/$S3_BACKUP_BUCKET/base/" | awk '{print $NF}' | tr -d '/' | sort | tail -1)
+          BASE_DIR=$(mc ls "src/$S3_BUCKET/base/" | awk '{print $NF}' | tr -d '/' | sort | tail -1)
           if [ -z "$BASE_DIR" ]; then
-              echo "ERROR: no base/ backups found in s3://$S3_BACKUP_BUCKET/base/" >&2
+              echo "ERROR: no base/ backups found in s3://$S3_BUCKET/base/ (${{ matrix.source }})" >&2
               exit 3
           fi
           echo "latest base: $BASE_DIR"
           echo "BASE_DIR=$BASE_DIR" >> "$GITHUB_ENV"
 
           mkdir -p /tmp/restore /tmp/walarchive
-          mc cp "bak/$S3_BACKUP_BUCKET/base/$BASE_DIR/base.tar.gz"   /tmp/restore/
-          mc cp "bak/$S3_BACKUP_BUCKET/base/$BASE_DIR/pg_wal.tar.gz" /tmp/restore/
+          mc cp "src/$S3_BUCKET/base/$BASE_DIR/base.tar.gz"   /tmp/restore/
+          mc cp "src/$S3_BUCKET/base/$BASE_DIR/pg_wal.tar.gz" /tmp/restore/
 
           # All archived WAL segments → local dir the restore_command
           # reads from. `mc mirror` lands objects flat at the dst root.
-          mc mirror --quiet "bak/$S3_BACKUP_BUCKET/wal/" /tmp/walarchive/
+          mc mirror --quiet "src/$S3_BUCKET/wal/" /tmp/walarchive/
           # Flatten any nesting defensively (WAL segment names are 24 hex).
           find /tmp/walarchive -mindepth 2 -type f -exec mv -t /tmp/walarchive {} + 2>/dev/null || true
           echo "WAL segments downloaded: $(find /tmp/walarchive -maxdepth 1 -type f | wc -l)"
 
       - name: Lay out PGDATA + recovery config
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p pgdata
@@ -135,6 +169,7 @@ jobs:
           sudo chmod 700 pgdata
 
       - name: Start postgres in recovery + measure RTO
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           START=$(date +%s)
@@ -165,6 +200,7 @@ jobs:
           echo "RTO_SECONDS=$RTO" >> "$GITHUB_ENV"
 
       - name: Verify recovered cluster (data-equivalence)
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           q() { docker exec pitr psql -U sku -d sku_forecasting -tAc "$1" | tr -d '[:space:]'; }
@@ -195,6 +231,7 @@ jobs:
           echo "═══ PITR drill PASSED — base ($BASE_DIR) + WAL replay → latest; RTO ${RTO_SECONDS}s ═══"
 
       - name: Assert archived WAL was actually REPLAYED (not just base-consistency)
+        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           # The proof that PITR truly works: postgres must have pulled
@@ -229,7 +266,7 @@ jobs:
           echo "═══ archive-replay PROVEN: WAL pulled from archive + replayed forward + promoted ═══"
 
       - name: Teardown
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true'
         run: |
           docker logs pitr 2>&1 | tail -20 || true
           docker rm -f pitr 2>/dev/null || true
