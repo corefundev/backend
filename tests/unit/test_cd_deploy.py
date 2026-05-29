@@ -134,6 +134,61 @@ def test_cd_deploy_rebuilds_all_custom_image_services():
     )
 
 
+def test_cd_deploy_brings_postgres_up_with_wait_before_dependents():
+    """2026-05-30 regression — the universal `--build` loop (PR #37)
+    recreated postgres + pgbouncer with no health-gate between them. On
+    staging this raced: pgbouncer started before postgres's docker-DNS
+    alias was registered and its c-ares resolver WEDGED ("DNS lookup
+    failed: postgres: result=0", non-self-healing), cascading to ApiDown.
+
+    Fix: postgres must be brought up with `--wait` (block until healthy +
+    DNS-registered) BEFORE pgbouncer/mlflow start."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    assert re.search(r"up -d --build --wait postgres", text), (
+        "cd_deploy.sh must bring postgres up with `--wait` so its "
+        "dependents (pgbouncer/mlflow) start against a live, "
+        "DNS-registered DB — prevents the pgbouncer resolver wedge."
+    )
+    # postgres must be handled BEFORE the dependents loop that includes
+    # pgbouncer (so the --wait actually gates them).
+    wait_idx = text.find("--wait postgres")
+    loop_idx = text.find("for svc in postgres-exporter")
+    assert 0 < wait_idx < loop_idx, (
+        "postgres `--wait` must come BEFORE the dependents loop "
+        "(postgres-exporter/pgbouncer/...) so the health-gate orders them."
+    )
+
+
+def test_cd_deploy_health_gates_pgbouncer_fail_closed():
+    """The pool layer is on every DB query's path — a wedged pgbouncer =
+    ApiDown. After the infra recreate, the deploy must health-gate
+    pgbouncer: a one-shot restart to clear a wedged resolver, and a
+    FAIL-CLOSED abort (before the app tier is touched) if it still won't
+    go healthy. Shipping a broken pool to prod is not acceptable."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    # Health is polled via compose ps … Health.
+    assert re.search(r"ps pgbouncer --format '\{\{\.Health\}\}'", text), (
+        "deploy must poll pgbouncer health via `compose ps pgbouncer "
+        "--format '{{.Health}}'`"
+    )
+    # One-shot restart to clear the wedged resolver.
+    assert "restart pgbouncer" in text, (
+        "deploy must restart pgbouncer to clear a wedged DNS resolver"
+    )
+    # Fail-closed: a distinct non-zero exit when it stays unhealthy.
+    assert re.search(r'PGB_OK"? != "true"', text) and "exit 6" in text, (
+        "deploy must FAIL-CLOSED (exit 6) when pgbouncer never becomes "
+        "healthy — not silently proceed to recreate the app tier."
+    )
+    # The gate must run BEFORE the app-tier recreate (fail before api).
+    gate_idx = text.find("verifying pgbouncer health")
+    app_idx = text.find("rolling: workers first")
+    assert 0 < gate_idx < app_idx, (
+        "pgbouncer health-gate must run BEFORE the app-tier recreate so a "
+        "wedged pool aborts the deploy instead of producing ApiDown."
+    )
+
+
 def test_backup_sh_mirror_metric_has_retry():
     """L1 audit fix — mirror metric push must use the same 3-attempt
     retry as the primary metric push. Single-attempt was the original

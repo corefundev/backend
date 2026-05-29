@@ -258,11 +258,18 @@ echo "  rebuilding + up-d for all custom-image infra services (cache-friendly)"
 #                            Dockerfile.postgres actually changed.
 #                            Steady-state: build cache hit, no recreate.
 #   2. postgres-exporter   — sidecar; recreate fine.
-#   3. pgbouncer           — pool layer; survives postgres recreate via
-#                            auto-reconnect. Recreating after postgres
-#                            means pgbouncer's new image gets fresh
-#                            connection to the (already-restarted)
-#                            postgres.
+#   3. pgbouncer           — pool layer. Its c-ares resolver WEDGES if it
+#                            (re)starts before postgres's docker-DNS alias
+#                            is registered: persistent "DNS lookup failed:
+#                            postgres: result=0" that does NOT self-heal
+#                            even once postgres is back (a fresh getent in
+#                            the same container resolves, but the running
+#                            pgbouncer daemon stays stuck). Observed on
+#                            staging 2026-05-30 — cascaded to ApiDown.
+#                            Mitigated below: postgres comes up with
+#                            --wait (healthy + DNS-registered) BEFORE its
+#                            dependents, and pgbouncer is health-gated
+#                            after the loop (restart-on-wedge, fail-closed).
 #   4. mlflow              — depends on postgres via Lockbox-injected DSN;
 #                            recreate fine.
 #   5. prometheus, alertmanager, backup — observability layer,
@@ -271,12 +278,49 @@ echo "  rebuilding + up-d for all custom-image infra services (cache-friendly)"
 # Each is tolerant via `|| echo` per-iteration — one image's build
 # failure doesn't block the rest. A real build error will likely
 # also fail the subsequent app-tier recreate, triggering rollback.
-for svc in postgres postgres-exporter pgbouncer mlflow prometheus alertmanager backup; do
+# postgres FIRST, with --wait: its dependents (pgbouncer, mlflow) must
+# connect against a live, DNS-registered DB. Without the wait, pgbouncer
+# starts into the gap and its resolver wedges (see the order note above).
+# --wait blocks until postgres's healthcheck passes; a steady-state
+# cache-hit (no recreate) just confirms-healthy fast, so no added cost.
+echo "    --- postgres (--wait healthy before dependents) ---"
+docker compose $COMPOSE_ARGS up -d --build --wait postgres 2>&1 \
+    | sed 's/^/      [postgres] /' \
+    || echo "    (warning: postgres build/up-d/--wait returned non-zero — not blocking)"
+
+for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup; do
     echo "    --- $svc ---"
     docker compose $COMPOSE_ARGS up -d --build "$svc" 2>&1 \
         | sed "s/^/      [$svc] /" \
         || echo "    (warning: $svc build/up-d returned non-zero — not blocking)"
 done
+
+# pgbouncer health-gate — FAIL-CLOSED, BEFORE the app tier is touched.
+# The pool layer is on the request path for every DB query; bringing api
+# up against a wedged pgbouncer just produces ApiDown. If its c-ares
+# resolver wedged during the recreate (the DNS race above), a ONE-SHOT
+# restart re-inits it against the now-healthy postgres and clears the
+# wedge (verified manually on staging 2026-05-30: healthy within 20s of a
+# restart). If it STILL won't go healthy, abort the deploy here — the app
+# tier hasn't been recreated yet, so there is nothing to roll back, and a
+# failed staging leg correctly skips the production leg.
+echo "  verifying pgbouncer health (pool layer — fail-closed)"
+PGB_OK=false
+for attempt in 1 2; do
+    for i in $(seq 1 12); do
+        PS=$(docker compose $COMPOSE_ARGS ps pgbouncer --format '{{.Health}}' 2>/dev/null || true)
+        if [ "$PS" = "healthy" ]; then PGB_OK=true; break; fi
+        sleep 5
+    done
+    [ "$PGB_OK" = "true" ] && break
+    echo "    pgbouncer not healthy after 60s (attempt $attempt) — restarting to clear a wedged DNS resolver"
+    docker compose $COMPOSE_ARGS restart pgbouncer >/dev/null 2>&1 || true
+done
+if [ "$PGB_OK" != "true" ]; then
+    echo "ERROR: pgbouncer never became healthy (wedged pool layer) — aborting before the app tier is recreated" >&2
+    exit 6
+fi
+echo "    pgbouncer healthy"
 
 # Reconcile S3 lifecycle policy. mc ilm import replaces the entire
 # policy with the JSON the script generates — idempotent, ~2s. Keeps
