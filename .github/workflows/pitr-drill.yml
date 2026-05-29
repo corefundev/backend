@@ -194,6 +194,40 @@ jobs:
           echo "  recovered audit_log newest ts: $NEWEST"
           echo "═══ PITR drill PASSED — base ($BASE_DIR) + WAL replay → latest; RTO ${RTO_SECONDS}s ═══"
 
+      - name: Assert archived WAL was actually REPLAYED (not just base-consistency)
+        run: |
+          set -euo pipefail
+          # The proof that PITR truly works: postgres must have pulled
+          # archived WAL segments via restore_command and finished archive
+          # recovery — NOT merely reached base-consistency from the base's
+          # bundled pg_wal (base_backup uses --wal-method=stream, so the
+          # base alone is consistent at backup-end without the archive).
+          #
+          # Without this gate, a regression where restore_command silently
+          # fetches nothing (e.g. wrong /walarchive path) would still PASS
+          # the data assertions — the cluster would just recover to the
+          # base point. The recovery log is the only place that proves the
+          # ARCHIVE-replay path actually ran. (Found 2026-05-29 reading the
+          # first drill's log by hand — making it a hard gate now.)
+          LOG=$(docker logs pitr 2>&1)
+
+          if ! printf '%s\n' "$LOG" | grep -q "restored log file"; then
+              echo "FAIL: recovery log has no 'restored log file' — restore_command never fetched an archived WAL segment, so the ARCHIVE-replay path was NOT exercised (cluster recovered from the base's bundled WAL only)." >&2
+              printf '%s\n' "$LOG" | tail -40 >&2
+              exit 12
+          fi
+          RESTORED=$(printf '%s\n' "$LOG" | grep -c "restored log file" || true)
+          echo "OK: postgres restored $RESTORED archived WAL segment(s) via restore_command"
+
+          if ! printf '%s\n' "$LOG" | grep -qiE "archive recovery complete|selected new timeline"; then
+              echo "FAIL: recovery log shows no 'archive recovery complete' / timeline promotion — replay did not finish cleanly." >&2
+              printf '%s\n' "$LOG" | tail -40 >&2
+              exit 13
+          fi
+          LASTTX=$(printf '%s\n' "$LOG" | grep -oE "last completed transaction was at log time [^ ]+ [^ ]+" | tail -1 || true)
+          echo "OK: archive recovery complete + timeline promoted — $LASTTX"
+          echo "═══ archive-replay PROVEN: WAL pulled from archive + replayed forward + promoted ═══"
+
       - name: Teardown
         if: always()
         run: |

@@ -95,6 +95,28 @@ def test_verifies_recovered_data_not_just_that_it_started():
     )
 
 
+def test_asserts_archive_was_actually_replayed():
+    """The drill must HARD-GATE on the recovery log proving archived WAL
+    was replayed — not just that the cluster recovered. base_backup uses
+    --wal-method=stream, so the base alone reaches consistency without
+    the archive; a regression where restore_command fetches nothing
+    would still pass the data assertions. The 'restored log file' +
+    'archive recovery complete' log lines are the proof that the
+    ARCHIVE-replay path (the whole point of PITR) actually ran."""
+    run = _run_text()
+    assert "restored log file" in run, (
+        "drill must assert the recovery log contains 'restored log file' "
+        "(proves restore_command fetched archived WAL — the PITR path)."
+    )
+    assert re.search(r"archive recovery complete|selected new timeline", run), (
+        "drill must assert archive recovery completed / timeline promoted."
+    )
+    # Must inspect the actual postgres recovery log.
+    assert "docker logs pitr" in run, (
+        "drill must capture `docker logs pitr` to inspect the recovery log."
+    )
+
+
 def test_uses_postgres_16_to_match_prod():
     """Physical base restore requires the SAME major version as prod
     (postgres:16-alpine)."""
