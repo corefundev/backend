@@ -62,6 +62,57 @@ echo "[$(date -u +%FT%TZ)] dumping database →  $OUT"
 pg_dump --format=custom --no-owner --no-privileges --compress=6 \
         --file="$OUT" "$DATABASE_URL"
 
+# ── G4d (2026-05-30) — completeness manifest ─────────────────────────
+# Record per-table EXACT row counts from the SOURCE db at dump time so
+# the restore drill can detect PARTIAL data loss the non-empty +
+# freshness checks miss: a dump that captured a table but only some of
+# its rows, or dropped a whole table, would still pg_restore cleanly
+# and pass those checks — but fail the manifest comparison.
+#
+# Exact COUNT(*) over every user table (not the stale pg_stat
+# n_live_tup estimate), built as one UNION ALL and run in a second
+# pass. Output is `table count` lines, encrypted with the SAME
+# passphrase as the dump (the table inventory + per-table volumes leak
+# customer count / activity — encrypt, don't hand them to anyone with
+# bucket read).
+#
+# COVER-ALL by design: pg_stat_user_tables enumerates EVERY user table
+# in the database, which here (verified on prod 2026-05-30) includes
+# the ~45-table MLflow backend store co-resident in sku_forecasting
+# (runs / metrics / experiments / spans / alembic_version / …) beside
+# the app tables (sku_*, audit_log, _db_migrations, legal_documents).
+# pg_dump captures the whole DB, so the manifest verifies the WHOLE
+# dump restored completely — we deliberately do NOT cherry-pick a
+# subset. The drill skips manifest rows with 0 rows at source, so the
+# many legitimately-empty MLflow tables don't trip the gate.
+#
+# BEST-EFFORT: a failure here must NOT cost us the dump (not uploaded
+# yet). This is supplementary integrity metadata; if it can't be
+# written we log loudly and ship the dump anyway. A missing manifest is
+# surfaced on the read side by the drill (loud ::warning::, gate
+# skipped — never a silent pass). The `if` condition also suspends
+# `set -e` for the psql calls, so a transient query hiccup falls
+# through to the warning instead of aborting the backup.
+MANIFEST="$OUT.manifest"
+echo "[$(date -u +%FT%TZ)] writing completeness manifest"
+if COUNT_SQL="$(psql "$DATABASE_URL" -tAc \
+        "SELECT string_agg(
+             format('SELECT %L AS t, count(*) AS n FROM %I.%I', relname, schemaname, relname),
+             ' UNION ALL ')
+         FROM pg_stat_user_tables")" \
+   && [ -n "$COUNT_SQL" ] \
+   && psql "$DATABASE_URL" -tAF' ' -c "$COUNT_SQL" > "$MANIFEST"; then
+    echo "[$(date -u +%FT%TZ)] manifest: $(wc -l < "$MANIFEST" | tr -d ' ') tables counted"
+    openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in  "$MANIFEST" \
+            -out "$MANIFEST.enc" \
+            -pass env:BACKUP_PASSPHRASE
+    rm -f "$MANIFEST"
+else
+    echo "[$(date -u +%FT%TZ)] WARNING: completeness manifest generation failed — shipping dump without it (drill will warn)" >&2
+    rm -f "$MANIFEST" "$MANIFEST.enc"
+fi
+
 echo "[$(date -u +%FT%TZ)] encrypting"
 openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
         -in  "$OUT" \
@@ -72,6 +123,10 @@ rm -f "$OUT"
 echo "[$(date -u +%FT%TZ)] uploading to s3://$S3_BACKUP_BUCKET/$BACKUP_PREFIX/$DATE_PATH/"
 mc alias set bak "$BACKUP_ENDPOINT" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" > /dev/null
 mc cp "$OUT.enc" "bak/$S3_BACKUP_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$OUT.enc")"
+# G4d — co-locate the completeness manifest with the dump (if written).
+if [ -f "$MANIFEST.enc" ]; then
+    mc cp "$MANIFEST.enc" "bak/$S3_BACKUP_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$MANIFEST.enc")"
+fi
 
 # Integrity check — re-read and compare SHA-256
 LOCAL_SHA="$(sha256sum "$OUT.enc" | awk '{print $1}')"
@@ -109,6 +164,13 @@ if [ -n "${S3_MIRROR_BUCKET:-}" ] && \
        mc cp "$OUT.enc" \
              "mir/$S3_MIRROR_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$OUT.enc")"; then
         echo "[$(date -u +%FT%TZ)] mirror push complete"
+        # G4d — mirror the manifest too so the off-region copy is
+        # self-describing (best-effort; the dump is already safe).
+        if [ -f "$MANIFEST.enc" ]; then
+            mc cp "$MANIFEST.enc" \
+                  "mir/$S3_MIRROR_BUCKET/$BACKUP_PREFIX/$DATE_PATH/$(basename "$MANIFEST.enc")" \
+                  || echo "[$(date -u +%FT%TZ)] WARNING: manifest mirror push failed (non-fatal)" >&2
+        fi
         MIRROR_NOW=$(date -u +%s)
         # Push mirror timestamp with the SAME 3-attempt retry as the
         # primary metric below. Prior to 2026-05-28 this was a single-
@@ -144,7 +206,7 @@ else
     echo "[$(date -u +%FT%TZ)] S3_MIRROR_* not configured — skipping mirror push"
 fi
 
-rm -f "$OUT.enc"
+rm -f "$OUT.enc" "$MANIFEST.enc"
 echo "[$(date -u +%FT%TZ)] backup complete"
 
 # Push success-timestamp to Prometheus pushgateway. Prometheus scrapes

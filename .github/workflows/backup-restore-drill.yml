@@ -113,6 +113,26 @@ jobs:
               -pass env:BACKUP_PASSPHRASE
           ls -la /tmp/drill/backup.dump
 
+          # G4d — also fetch the completeness manifest co-located with
+          # the dump (backup.sh writes <name>.dump.manifest.enc beside
+          # <name>.dump.enc). BEST-EFFORT: dumps taken before G4d
+          # shipped have no manifest — emit a loud ::warning:: and let
+          # the completeness gate skip rather than hard-fail a legacy
+          # dump. The drill always picks the LATEST dump, so once the
+          # daily cron has run once since G4d the manifest is always
+          # present (the absent path is only the ship-day transition).
+          MANIFEST_REMOTE="${BACKUP_REMOTE_PATH%.dump.enc}.dump.manifest.enc"
+          if mc cp "$MANIFEST_REMOTE" /tmp/drill/manifest.enc 2>/dev/null; then
+              openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+                  -in  /tmp/drill/manifest.enc \
+                  -out /tmp/drill/manifest \
+                  -pass env:BACKUP_PASSPHRASE
+              echo "manifest: $(wc -l < /tmp/drill/manifest | tr -d ' ') tables"
+              echo "MANIFEST_FILE=/tmp/drill/manifest" >> "$GITHUB_ENV"
+          else
+              echo "::warning::no completeness manifest at $MANIFEST_REMOTE — pre-G4d dump? completeness gate will skip"
+          fi
+
       - name: pg_restore into ephemeral postgres
         run: |
           set -euo pipefail
@@ -240,6 +260,61 @@ jobs:
           echo "OK: latest dump date $DUMP_DATE is $AGE_DAYS day(s) old (≤2)"
 
           echo "═══ B2 data-equivalence: all assertions passed ═══"
+
+      # ── R10 G4d (2026-05-30) — COMPLETENESS gate vs the dump-time manifest ──
+      # B2 proves the restore isn't schema-only/stale/truncated, but
+      # all its assertions are intrinsic — a dump that captured a table
+      # yet only SOME of its rows (a partial loss) would still pass B2.
+      # backup.sh now ships a per-table row-count manifest captured from
+      # the SOURCE db at dump time; this gate compares the RESTORED
+      # counts to it.
+      #
+      # Two independent assertions per table:
+      #   • total-loss  — every table with rows at dump time must restore
+      #                   >0 (protects small tables a relative % can't).
+      #   • partial-loss — restored ≥ 90% of the manifest count (catches
+      #                   >10% shortfall on larger tables; the 10% band
+      #                   absorbs the few-row append skew between
+      #                   pg_dump's snapshot opening and the manifest's
+      #                   COUNT(*) running just after).
+      # A table present in the manifest but MISSING from the restore is
+      # itself a loss → fail. Pre-G4d dumps (no manifest) skip the gate
+      # with the loud ::warning:: already emitted on download.
+      - name: Completeness assertions (G4d)
+        run: |
+          set -euo pipefail
+          if [ -z "${MANIFEST_FILE:-}" ] || [ ! -s "${MANIFEST_FILE:-/nonexistent}" ]; then
+              echo "::warning::completeness manifest absent — G4d gate skipped (pre-G4d dump)"
+              exit 0
+          fi
+          fail=0
+          while read -r t m; do
+              [ -n "$t" ] || continue
+              # Skip tables empty at source — nothing to assert, and a
+              # relative floor on 0 is meaningless.
+              [ "$m" -gt 0 ] 2>/dev/null || continue
+              EXISTS=$(psql -tAc "SELECT 1 FROM pg_tables WHERE tablename = '$t'" || true)
+              if [ "$EXISTS" != "1" ]; then
+                  echo "FAIL: table '$t' had $m rows at dump time but is MISSING from the restore" >&2
+                  fail=1; continue
+              fi
+              R=$(psql -tAc "SELECT count(*) FROM \"$t\"")
+              if [ "$R" -lt 1 ]; then
+                  echo "FAIL: table '$t' had $m rows at dump time, restored 0 (total loss)" >&2
+                  fail=1; continue
+              fi
+              FLOOR=$(( m - m / 10 ))   # 90% of the manifest count, integer floor
+              if [ "$R" -lt "$FLOOR" ]; then
+                  echo "FAIL: table '$t' restored $R rows < floor $FLOOR (manifest $m) — partial loss >10%" >&2
+                  fail=1; continue
+              fi
+              echo "OK: $t restored $R / manifest $m (≥ floor $FLOOR)"
+          done < "$MANIFEST_FILE"
+          if [ "$fail" -ne 0 ]; then
+              echo "FAIL: completeness gate detected partial data loss vs the dump-time manifest" >&2
+              exit 11
+          fi
+          echo "═══ G4d completeness: restored counts match the dump-time manifest ═══"
 
       - name: Final report
         run: |
