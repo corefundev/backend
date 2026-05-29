@@ -1,0 +1,201 @@
+# PITR drill — exercises the ACTUAL point-in-time-recovery path:
+# restore the weekly base_backup, then REPLAY the archived WAL stream
+# forward to the latest point, and verify the recovered cluster.
+#
+# Why this is separate from backup-restore-drill.yml (R10 G4a, 2026-05-29):
+# that drill restores the daily LOGICAL dump (`pg_restore`) — the
+# easiest recovery path. The PITR path (base + WAL replay) is the
+# ZERO-RPO path the whole WAL-archive + off-region-mirror effort
+# (R7-9 / B1) exists for, and nothing automated exercised it. A backup
+# chain that's never replayed is a hope, not a guarantee.
+#
+# Mechanics (hermetic — no network during replay):
+#   1. Download the latest base/<date>/{base.tar.gz,pg_wal.tar.gz} +
+#      ALL wal/ segments from S3 to a local archive dir.
+#   2. Lay out a PGDATA from the base tar; recovery.signal +
+#      restore_command='cp /walarchive/%f %p' so postgres replays the
+#      archived WAL locally, recovery_target_action=promote to latest.
+#   3. Start postgres:16-alpine (matches prod) on that PGDATA, measure
+#      RTO (start → recovery-complete + accepting writes), then run
+#      data-equivalence assertions on the recovered cluster.
+#
+# Self-contained: uses the S3 backup creds only — never prod DB
+# credentials (the restored cluster's pg_hba is overridden to local
+# trust for the throwaway drill, so no prod password is needed).
+#
+# G4b (mirror-recovery) will add a second matrix leg sourcing from the
+# Selectel mirror — gated on S3_MIRROR_* being added as GitHub repo
+# secrets (operator action; not present yet).
+
+name: PITR Drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 15th of the month, 03:15 UTC — offset from the logical-dump
+    # backup-restore-drill (1st), giving two recovery-validation points
+    # per month.
+    - cron: "15 3 15 * *"
+
+jobs:
+  pitr:
+    name: PITR replay drill + RTO (primary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install mc + postgresql-client
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/mc \
+              https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x /usr/local/bin/mc
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          mc --version | head -1
+          psql --version
+
+      - name: Download latest base + full WAL archive from S3
+        env:
+          S3_BACKUP_BUCKET:            ${{ secrets.S3_BACKUP_BUCKET }}
+          S3_BACKUP_ENDPOINT_URL:      ${{ secrets.S3_BACKUP_ENDPOINT_URL }}
+          S3_BACKUP_ACCESS_KEY_ID:     ${{ secrets.S3_BACKUP_ACCESS_KEY_ID }}
+          S3_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.S3_BACKUP_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          for v in S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY; do
+              if [ -z "${!v:-}" ]; then echo "ERROR: secret $v not set" >&2; exit 2; fi
+          done
+          mc alias set bak "$S3_BACKUP_ENDPOINT_URL" \
+              "$S3_BACKUP_ACCESS_KEY_ID" "$S3_BACKUP_SECRET_ACCESS_KEY" >/dev/null
+
+          # Latest base dir — the date prefix sorts lexically =
+          # chronologically.
+          BASE_DIR=$(mc ls "bak/$S3_BACKUP_BUCKET/base/" | awk '{print $NF}' | tr -d '/' | sort | tail -1)
+          if [ -z "$BASE_DIR" ]; then
+              echo "ERROR: no base/ backups found in s3://$S3_BACKUP_BUCKET/base/" >&2
+              exit 3
+          fi
+          echo "latest base: $BASE_DIR"
+          echo "BASE_DIR=$BASE_DIR" >> "$GITHUB_ENV"
+
+          mkdir -p /tmp/restore /tmp/walarchive
+          mc cp "bak/$S3_BACKUP_BUCKET/base/$BASE_DIR/base.tar.gz"   /tmp/restore/
+          mc cp "bak/$S3_BACKUP_BUCKET/base/$BASE_DIR/pg_wal.tar.gz" /tmp/restore/
+
+          # All archived WAL segments → local dir the restore_command
+          # reads from. `mc mirror` lands objects flat at the dst root.
+          mc mirror --quiet "bak/$S3_BACKUP_BUCKET/wal/" /tmp/walarchive/
+          # Flatten any nesting defensively (WAL segment names are 24 hex).
+          find /tmp/walarchive -mindepth 2 -type f -exec mv -t /tmp/walarchive {} + 2>/dev/null || true
+          echo "WAL segments downloaded: $(find /tmp/walarchive -maxdepth 1 -type f | wc -l)"
+
+      - name: Lay out PGDATA + recovery config
+        run: |
+          set -euo pipefail
+          mkdir -p pgdata
+          tar xzf /tmp/restore/base.tar.gz -C pgdata
+          mkdir -p pgdata/pg_wal
+          tar xzf /tmp/restore/pg_wal.tar.gz -C pgdata/pg_wal
+
+          # Recovery config — overrides go in postgresql.auto.conf (wins
+          # over the prod postgresql.conf captured in the base). Defensive
+          # overrides so prod-only settings don't break startup in the
+          # throwaway runner:
+          #   * restore_command — replay archived WAL from the local dir
+          #   * recovery_target_timeline=latest + action=promote — replay
+          #     ALL available WAL, then open for writes (PITR to latest)
+          #   * ssl=off       — prod has ssl=on with cert paths absent here
+          #   * archive_mode=off — don't try wal_archive.sh post-promote
+          #   * shared_preload_libraries='' — drop any prod-only extensions
+          {
+            echo ""
+            echo "# ── PITR drill recovery overrides ──"
+            echo "restore_command = 'cp /walarchive/%f %p'"
+            echo "recovery_target_timeline = 'latest'"
+            echo "recovery_target_action = 'promote'"
+            echo "ssl = off"
+            echo "archive_mode = off"
+            echo "shared_preload_libraries = ''"
+          } >> pgdata/postgresql.auto.conf
+          touch pgdata/recovery.signal
+
+          # Throwaway drill — override pg_hba to local/loopback trust so we
+          # can verify WITHOUT prod's scram password (the base carries
+          # prod's pg_hba). No prod creds enter this job.
+          {
+            echo "local all all trust"
+            echo "host  all all 127.0.0.1/32 trust"
+            echo "host  all all ::1/128 trust"
+          } > pgdata/pg_hba.conf
+
+          # postgres:16-alpine runs as uid 70; PGDATA must be 0700 + owned.
+          sudo chown -R 70:70 pgdata
+          sudo chmod 700 pgdata
+
+      - name: Start postgres in recovery + measure RTO
+        run: |
+          set -euo pipefail
+          START=$(date +%s)
+          docker run -d --name pitr \
+            -v "$PWD/pgdata":/var/lib/postgresql/data \
+            -v /tmp/walarchive:/walarchive:ro \
+            -p 5432:5432 \
+            postgres:16-alpine
+
+          RTO=""
+          for i in $(seq 1 120); do   # up to 240s
+              if docker exec pitr pg_isready -U sku -d sku_forecasting >/dev/null 2>&1; then
+                  INREC=$(docker exec pitr psql -U sku -d sku_forecasting -tAc \
+                          "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d '[:space:]' || echo t)
+                  if [ "$INREC" = "f" ]; then
+                      NOW=$(date +%s); RTO=$(( NOW - START )); break
+                  fi
+              fi
+              sleep 2
+          done
+
+          if [ -z "$RTO" ]; then
+              echo "FAIL: postgres did not finish recovery + promote within 240s" >&2
+              docker logs pitr 2>&1 | tail -50
+              exit 11
+          fi
+          echo "OK: recovery complete + promoted to latest after ${RTO}s (RTO)"
+          echo "RTO_SECONDS=$RTO" >> "$GITHUB_ENV"
+
+      - name: Verify recovered cluster (data-equivalence)
+        run: |
+          set -euo pipefail
+          q() { docker exec pitr psql -U sku -d sku_forecasting -tAc "$1" | tr -d '[:space:]'; }
+
+          # Non-empty guarantee on always-populated tables — catches a
+          # base/WAL chain that recovered structure but not data.
+          for t in _db_migrations sku_clients audit_log; do
+              N=$(q "SELECT count(*) FROM $t")
+              if [ "${N:-0}" -lt 1 ]; then
+                  echo "FAIL: $t has 0 rows after PITR recovery" >&2
+                  exit 7
+              fi
+              echo "OK: $t = $N rows"
+          done
+
+          # Migration completeness — dynamic floor from the repo (grace 2).
+          EXPECTED=$(ls migrations/*.sql 2>/dev/null | wc -l | tr -d ' ')
+          FLOOR=$(( EXPECTED > 2 ? EXPECTED - 2 : 1 ))
+          M=$(q "SELECT count(*) FROM _db_migrations")
+          if [ "${M:-0}" -lt "$FLOOR" ]; then
+              echo "FAIL: _db_migrations has $M (expected ≥ $FLOOR; repo $EXPECTED)" >&2
+              exit 5
+          fi
+          echo "OK: $M migration rows (repo expects ~$EXPECTED)"
+
+          NEWEST=$(q "SELECT max(ts) FROM audit_log")
+          echo "  recovered audit_log newest ts: $NEWEST"
+          echo "═══ PITR drill PASSED — base ($BASE_DIR) + WAL replay → latest; RTO ${RTO_SECONDS}s ═══"
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker logs pitr 2>&1 | tail -20 || true
+          docker rm -f pitr 2>/dev/null || true
