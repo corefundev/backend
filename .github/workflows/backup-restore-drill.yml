@@ -148,26 +148,86 @@ jobs:
               echo "  $t: $ROWS rows"
           done
 
-          # _db_migrations should have at least 7 entries (we shipped 7
-          # migrations as of v0.9.0). Catches a corrupted dump that
-          # restored only schema but not data.
+      # ── R10 B2 (2026-05-29) — DATA-EQUIVALENCE assertions ────────────
+      # Before this, the smoke step ECHOED row counts but asserted only
+      # table PRESENCE — a restore that loaded the schema with ZERO data
+      # rows would PASS the drill. "A backup that restored only the
+      # schema is a hope, not a backup."
+      #
+      # These checks are SELF-CONTAINED (intrinsic properties of the
+      # restored data) — deliberately NOT a row-count comparison against
+      # the live primary. Comparing to prod would require prod DB
+      # credentials in this CI job, a real security regression (any CI
+      # run could then read prod). The intrinsic assertions below catch
+      # the same failure modes (schema-only, empty, stale, truncated)
+      # without that exposure.
+      - name: Data-equivalence assertions (B2)
+        run: |
+          set -euo pipefail
+
+          # 1) NON-EMPTY guarantee — tables that prod ALWAYS has rows in.
+          #    (sku_anomalies / sku_forecasts / sku_otp_codes can be
+          #    legitimately empty — no anomalies, no pending OTP — so we
+          #    only hard-assert the always-populated ones.) Catches a
+          #    schema-only / 0-row restore that the presence check misses.
+          for t in _db_migrations sku_clients audit_log; do
+              N=$(psql -tAc "SELECT count(*) FROM $t")
+              if [ "$N" -lt 1 ]; then
+                  echo "FAIL: $t restored with 0 rows — schema-only / empty dump?" >&2
+                  exit 7
+              fi
+              echo "OK: $t has $N rows (>0)"
+          done
+
+          # 2) MIGRATION COMPLETENESS — dynamic floor from the repo's
+          #    migrations/ at this commit (was a stale hardcoded `>=7`;
+          #    repo is at 012+). The dump comes from prod, which may lag
+          #    the repo by an undeployed migration or two during a deploy
+          #    window — allow a grace of 2. Catches schema-only (0 << N-2)
+          #    and very-stale dumps (far fewer migrations than expected).
+          EXPECTED=$(ls migrations/*.sql 2>/dev/null | wc -l | tr -d ' ')
+          GRACE=2
+          FLOOR=$(( EXPECTED > GRACE ? EXPECTED - GRACE : 1 ))
           MIGRATIONS=$(psql -tAc "SELECT count(*) FROM _db_migrations")
-          if [ "$MIGRATIONS" -lt 7 ]; then
-              echo "FAIL: _db_migrations has $MIGRATIONS rows (expected ≥ 7)" >&2
+          if [ "$MIGRATIONS" -lt "$FLOOR" ]; then
+              echo "FAIL: _db_migrations has $MIGRATIONS (expected ≥ $FLOOR; repo has $EXPECTED migration files, grace $GRACE)" >&2
               exit 5
           fi
-          echo "OK: $MIGRATIONS migration rows present"
+          echo "OK: $MIGRATIONS migration rows present (repo expects ~$EXPECTED)"
 
-          # The dump must have a recent enough timestamp — yesterday's
-          # backup is fine, a 30-day-old one means cron stopped firing.
-          # Look at backup_manifest oid_max isn't helpful; use the file
-          # size as a sanity floor (>1 KB).
-          SIZE=$(stat -c %s /tmp/drill/backup.dump 2>/dev/null || stat -f %z /tmp/drill/backup.dump)
-          if [ "$SIZE" -lt 1024 ]; then
-              echo "FAIL: dump file size suspiciously small: $SIZE bytes" >&2
-              exit 6
+          # 3) DATA FRESHNESS — the newest audit_log event in the
+          #    restored dump must be recent. audit_log gets continuous
+          #    writes (logins, OAuth, plan changes) on a live SaaS, so a
+          #    fresh daily dump's max(ts) is ~hours old. A 7-day window
+          #    catches a STALE dump (cron stopped → drill restored a
+          #    weeks-old dump) and a TRUNCATED dump (no recent rows),
+          #    while tolerating a genuinely quiet stretch. The drill runs
+          #    monthly against the LATEST dump, which in the healthy case
+          #    is from that morning.
+          STALE=$(psql -tAc "SELECT (max(ts) < NOW() - INTERVAL '7 days') FROM audit_log")
+          NEWEST=$(psql -tAc "SELECT max(ts) FROM audit_log")
+          if [ "$STALE" = "t" ]; then
+              echo "FAIL: newest audit_log.ts in the restored dump is $NEWEST (>7d old) — stale or truncated backup" >&2
+              exit 8
           fi
-          echo "OK: dump size $SIZE bytes"
+          echo "OK: newest audit_log.ts = $NEWEST (within 7d — dump captured recent data)"
+
+          # 4) DUMP RECENCY (S3-side) — the latest dump object itself must
+          #    be from the last ~2 days, else cron stopped firing. The
+          #    date is in the S3 path: backups/YYYY-MM-DD/<file>.dump.enc.
+          DUMP_DATE=$(printf '%s\n' "$BACKUP_REMOTE_PATH" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+          if [ -z "$DUMP_DATE" ]; then
+              echo "FAIL: could not parse YYYY-MM-DD from BACKUP_REMOTE_PATH=$BACKUP_REMOTE_PATH" >&2
+              exit 9
+          fi
+          AGE_DAYS=$(( ( $(date -u +%s) - $(date -u -d "$DUMP_DATE" +%s) ) / 86400 ))
+          if [ "$AGE_DAYS" -gt 2 ]; then
+              echo "FAIL: latest dump is $AGE_DAYS days old ($DUMP_DATE) — daily backup cron likely stopped" >&2
+              exit 10
+          fi
+          echo "OK: latest dump date $DUMP_DATE is $AGE_DAYS day(s) old (≤2)"
+
+          echo "═══ B2 data-equivalence: all assertions passed ═══"
 
       - name: Final report
         run: |
