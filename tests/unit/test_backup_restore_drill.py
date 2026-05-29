@@ -61,13 +61,30 @@ def test_drill_migration_floor_is_dynamic_not_stale_7():
     )
 
 
-def test_drill_asserts_data_freshness():
-    """The newest audit_log.ts in the restored dump must be recent —
-    catches a stale (cron-stopped) or truncated dump."""
+def test_drill_asserts_not_truncated_anchored_to_dump_date():
+    """The newest audit_log.ts must be within a window of the DUMP'S OWN
+    DATE (not wall-clock now) — catches a truncated/corrupt dump while
+    tolerating sparse audit activity.
+
+    Prod-verify 2026-05-29 showed audit_log here is sparse (multi-day
+    gaps), so a NOW()-anchored tight window would false-fail a healthy
+    fresh dump during a quiet stretch (boy-who-cried-wolf). The check is
+    therefore anchored to DUMP_DATE with a generous 30-day window;
+    'is the backup recent?' is answered separately by the dump-recency
+    check (#4)."""
     run = _drill_run_text()
-    assert "max(ts)" in run and "audit_log" in run and "INTERVAL '7 days'" in run, (
-        "drill must assert max(audit_log.ts) is within a freshness "
-        "window (catches stale/truncated dump)."
+    assert "max(ts)" in run and "audit_log" in run, (
+        "drill must inspect max(audit_log.ts)"
+    )
+    # Anchored to the dump's own date, NOT NOW(); 30-day window.
+    assert "DUMP_DATE" in run and "INTERVAL '30 days'" in run, (
+        "freshness/truncation check must anchor to the dump's date "
+        "(DUMP_DATE) with a 30-day window — NOT a tight NOW()-anchored "
+        "window that false-fails on sparse audit activity."
+    )
+    assert "NOW() - INTERVAL '7 days'" not in run, (
+        "the fragile 7d NOW()-anchored window must be gone (would "
+        "false-fail healthy dumps during quiet auth periods)."
     )
 
 
