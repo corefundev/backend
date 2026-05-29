@@ -195,31 +195,43 @@ jobs:
           fi
           echo "OK: $MIGRATIONS migration rows present (repo expects ~$EXPECTED)"
 
-          # 3) DATA FRESHNESS — the newest audit_log event in the
-          #    restored dump must be recent. audit_log gets continuous
-          #    writes (logins, OAuth, plan changes) on a live SaaS, so a
-          #    fresh daily dump's max(ts) is ~hours old. A 7-day window
-          #    catches a STALE dump (cron stopped → drill restored a
-          #    weeks-old dump) and a TRUNCATED dump (no recent rows),
-          #    while tolerating a genuinely quiet stretch. The drill runs
-          #    monthly against the LATEST dump, which in the healthy case
-          #    is from that morning.
-          STALE=$(psql -tAc "SELECT (max(ts) < NOW() - INTERVAL '7 days') FROM audit_log")
-          NEWEST=$(psql -tAc "SELECT max(ts) FROM audit_log")
-          if [ "$STALE" = "t" ]; then
-              echo "FAIL: newest audit_log.ts in the restored dump is $NEWEST (>7d old) — stale or truncated backup" >&2
-              exit 8
-          fi
-          echo "OK: newest audit_log.ts = $NEWEST (within 7d — dump captured recent data)"
-
-          # 4) DUMP RECENCY (S3-side) — the latest dump object itself must
-          #    be from the last ~2 days, else cron stopped firing. The
-          #    date is in the S3 path: backups/YYYY-MM-DD/<file>.dump.enc.
+          # The dump's own date, parsed from the S3 path
+          # (backups/YYYY-MM-DD/<file>.dump.enc). Used by both the
+          # freshness check (#3, anchored to the dump's date) and the
+          # recency check (#4, anchored to now).
           DUMP_DATE=$(printf '%s\n' "$BACKUP_REMOTE_PATH" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
           if [ -z "$DUMP_DATE" ]; then
               echo "FAIL: could not parse YYYY-MM-DD from BACKUP_REMOTE_PATH=$BACKUP_REMOTE_PATH" >&2
               exit 9
           fi
+
+          # 3) DATA NOT-TRUNCATED — the newest audit_log event in the
+          #    restored dump must be reasonably close to WHEN THE DUMP WAS
+          #    TAKEN (anchored to DUMP_DATE, NOT wall-clock now). A
+          #    truncated/corrupt dump whose newest row predates its own
+          #    file-date by a long margin fails.
+          #
+          #    Anchored to DUMP_DATE (not NOW) + a generous 30-day window
+          #    on purpose: prod-verify 2026-05-29 showed audit_log here is
+          #    SPARSE (~1.5 events/day, multi-day gaps), so a tight
+          #    NOW()-anchored window would false-fail a perfectly healthy
+          #    fresh dump during a quiet auth stretch (boy-who-cried-wolf,
+          #    erodes drill trust). "Is the dump itself recent?" is
+          #    answered robustly by #4; this check is only about
+          #    truncation/corruption of the dump's contents. 30 days of
+          #    ZERO audit events on a paying SaaS would itself be alarming,
+          #    so the window is safe.
+          STALE=$(psql -tAc "SELECT (max(ts) < '${DUMP_DATE}'::timestamptz - INTERVAL '30 days') FROM audit_log")
+          NEWEST=$(psql -tAc "SELECT max(ts) FROM audit_log")
+          if [ "$STALE" = "t" ]; then
+              echo "FAIL: newest audit_log.ts ($NEWEST) is >30d before the dump's own date ($DUMP_DATE) — truncated/corrupt backup" >&2
+              exit 8
+          fi
+          echo "OK: newest audit_log.ts = $NEWEST (within 30d of dump date $DUMP_DATE — not truncated)"
+
+          # 4) DUMP RECENCY (S3-side) — the latest dump object itself must
+          #    be from the last ~2 days, else the backup cron stopped.
+          #    This is the robust "is the backup current" signal.
           AGE_DAYS=$(( ( $(date -u +%s) - $(date -u -d "$DUMP_DATE" +%s) ) / 86400 ))
           if [ "$AGE_DAYS" -gt 2 ]; then
               echo "FAIL: latest dump is $AGE_DAYS days old ($DUMP_DATE) — daily backup cron likely stopped" >&2
