@@ -173,6 +173,23 @@ def test_docker_socket_proxy_mounts_sock_read_only():
     )
 
 
+def test_docker_socket_proxy_has_haproxy_cfg_tmpfs():
+    """2026-05-30 regression: tecnativa/docker-socket-proxy is HAProxy-
+    backed and renders its haproxy.cfg from env at every start. With
+    read_only:true on the rootfs (security posture) it crash-loops
+    without a writable mount at /usr/local/etc/haproxy. Observed on
+    prod immediately after first deploy of #54. tmpfs is the right
+    shape (in-memory, gone on stop — no persisted state to leak)."""
+    s = _services(_BASE)
+    tmpfs = s["docker-socket-proxy"].get("tmpfs") or []
+    assert any("/usr/local/etc/haproxy" in str(t) for t in tmpfs), (
+        f"proxy must have a writable mount at /usr/local/etc/haproxy "
+        f"(tmpfs) — without it the read_only rootfs crash-loops with "
+        f"'can't create haproxy.cfg: Read-only file system'. Got "
+        f"tmpfs={tmpfs!r}"
+    )
+
+
 def test_docker_socket_proxy_runs_with_minimal_caps():
     """read_only rootfs + cap_drop ALL + no-new-privileges — standard
     hardened-container hygiene; the proxy needs nothing beyond network
