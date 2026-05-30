@@ -44,6 +44,13 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    # Opt into autoheal — nginx is the front-door; a stuck worker pool
+    # or upstream-resolution drift surfaces as unhealthy. Restart cleanly
+    # resolves both (nginx reload would suffice, but Docker's healthcheck
+    # → autoheal contract is restart-on-unhealthy; correct here since
+    # nginx is stateless front-of-stack).
+    labels:
+      autoheal: "true"
 
   certbot:
     # R4-20 digest-pinned 2026-05-17
