@@ -40,9 +40,12 @@ COPY --from=mc-stage /usr/bin/mc /usr/local/bin/mc
 # rebuilding the image), but lockbox_bootstrap.sh + cron_wrapper.sh
 # are baked here — they're stable and critical deps of the container
 # starting cleanly.
-COPY scripts/lockbox_bootstrap.sh /usr/local/bin/lockbox_bootstrap.sh
-COPY scripts/cron_wrapper.sh      /usr/local/bin/cron_wrapper.sh
-RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh
+COPY scripts/lockbox_bootstrap.sh       /usr/local/bin/lockbox_bootstrap.sh
+COPY scripts/cron_wrapper.sh            /usr/local/bin/cron_wrapper.sh
+COPY scripts/backup_metric_warmup.sh    /usr/local/bin/backup_metric_warmup.sh
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/cron_wrapper.sh \
+             /usr/local/bin/backup_metric_warmup.sh
 
 # Crontab. Every cron run does:
 #   1. lockbox_bootstrap.sh — fetch fresh secrets (Lockbox JWT/IAM/payload)
@@ -77,4 +80,14 @@ RUN printf '%s\n%s\n%s\n%s\n%s\n' \
 # Foreground crond — image PID 1.
 # Echo the "backup cron installed" sentinel so scripts/restart-backup
 # workflow's wait-for-readiness loop still works.
-CMD ["sh", "-c", "echo 'backup cron installed; waiting…' && exec crond -f -L /var/log/backup.log"]
+#
+# Startup warmup: BEFORE crond, run backup_metric_warmup.sh wrapped in
+# lockbox_bootstrap.sh to re-push the REAL last-success timestamps (from
+# S3) for backup / base_backup / mirror metrics. This closes the gap
+# where a pushgateway recreate (deploy, host reboot, fresh volume) left
+# `BackupStale` / `BaseBackupStale` / mirror-staleness alerts firing
+# `absent(metric)` for up to 24h until the next natural cron tick, even
+# though the actual backups were healthy in S3. Best-effort: a failed
+# warmup logs + continues to crond — monitoring resilience must NEVER
+# block the data path.
+CMD ["sh", "-c", "echo 'backup cron installed; warming pushgateway from S3…' && /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/backup_metric_warmup.sh; echo 'warmup done; starting crond' && exec crond -f -L /var/log/backup.log"]

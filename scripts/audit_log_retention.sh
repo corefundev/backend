@@ -47,9 +47,20 @@ echo "audit_log_retention: done, total_deleted=$total"
 # Push to pushgateway — same default as backup.sh so the cron container
 # doesn't need an explicit env var.
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
+NOW=$(date +%s)
 cat <<EOF | curl -fs --data-binary @- "$PUSHGATEWAY_URL/metrics/job/audit_log_retention/instance/sku-forecasting" >/dev/null 2>&1 || true
 # TYPE sku_audit_log_pruned_total counter
 sku_audit_log_pruned_total $total
 # TYPE sku_audit_log_retention_last_success_timestamp_seconds gauge
-sku_audit_log_retention_last_success_timestamp_seconds $(date +%s)
+sku_audit_log_retention_last_success_timestamp_seconds $NOW
 EOF
+
+# 2026-05-30 — persist last-success epoch to disk so backup_metric_warmup.sh
+# can re-push the metric on container start (after a pushgateway recreate
+# / fresh volume that lost it). This script has no S3 artifact warmup can
+# derive from — only a DB op — so the state file is the durable truth.
+# Best-effort: a missing volume / write error must NOT fail the retention
+# script (the pushgateway push above is the primary metric path).
+STATE_DIR=/var/lib/backup-state
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+printf '%s\n' "$NOW" > "$STATE_DIR/audit_log_retention.last_success" 2>/dev/null || true
