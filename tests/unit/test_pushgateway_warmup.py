@@ -174,6 +174,71 @@ def test_warmup_failure_does_not_prevent_crond_start():
     )
 
 
+# ── State-file pattern (for metrics with no S3 artifact) ────────────
+
+
+def test_warmup_covers_audit_log_retention_via_state_file():
+    """audit_log_retention is a pure DB op (no S3 artifact warmup can
+    derive from). Without coverage, a pushgateway recreate leaves the
+    AuditLogRetentionStale alert firing on `absent()` until the next
+    daily cron tick (up to 24h false-critical, hit 2026-05-30 staging).
+
+    Pattern: the script persists its last-success epoch to a file on a
+    named volume; the warmup reads + pushes on every container start.
+    Tests both halves so a regression on either side is caught."""
+    # Producer side — audit_log_retention.sh writes the state file on
+    # success, after the pushgateway push.
+    ar = (_BACKEND / "scripts" / "audit_log_retention.sh").read_text()
+    assert "/var/lib/backup-state" in ar, (
+        "audit_log_retention.sh must write to /var/lib/backup-state/ "
+        "(the volume that survives container recreate — see compose)"
+    )
+    assert "audit_log_retention.last_success" in ar, (
+        "audit_log_retention.sh must write the audit_log_retention."
+        "last_success file (the path the warmup looks for)"
+    )
+    # Consumer side — warmup reads the state file and pushes the metric.
+    t = _warmup_text()
+    assert "warm_from_state_file" in t, (
+        "warmup must define a warm_from_state_file helper (the state-"
+        "file equivalent of the S3-derive path for cron scripts with no "
+        "S3 artifact)"
+    )
+    assert re.search(
+        r"warm_from_state_file\s+audit_log_retention\b.*?sku_audit_log_retention_last_success_timestamp_seconds",
+        t,
+        re.DOTALL,
+    ), (
+        "warmup must invoke warm_from_state_file for audit_log_retention "
+        "(this kills the AuditLogRetentionStale false-fire on pushgateway "
+        "recreate)"
+    )
+
+
+def test_backup_service_mounts_state_volume():
+    """The volume that holds the cross-recreate state must be mounted
+    into the backup container at the path both scripts use
+    (/var/lib/backup-state). Must be a NAMED volume (not bind-mount)
+    so it survives down/up and is host-path-agnostic."""
+    d = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
+    vols = d["services"]["backup"].get("volumes") or []
+    matches = [v for v in vols if "/var/lib/backup-state" in str(v)]
+    assert matches, (
+        "backup service must mount a volume at /var/lib/backup-state — "
+        "without it, the audit_log_retention.last_success file lives "
+        "in the container layer and is wiped on every recreate"
+    )
+    assert any(str(v).startswith("backup_state:") for v in matches), (
+        f"the state mount must use the named volume `backup_state` — "
+        f"a bind-mount would tie persistence to a host path that could "
+        f"be wiped; got {matches!r}"
+    )
+    top_vols = d.get("volumes") or {}
+    assert "backup_state" in top_vols, (
+        "top-level volumes: must declare backup_state"
+    )
+
+
 # ── Layer 2: pushgateway persistence tightening ─────────────────────
 
 

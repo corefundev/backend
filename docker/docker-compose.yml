@@ -1081,6 +1081,12 @@ services:
     volumes:
       - ../scripts:/scripts:ro
       - backups:/tmp/backup
+      # 2026-05-30 — persistent state for the warmup pattern. Scripts
+      # without an S3 artifact (audit_log_retention is a pure DB op)
+      # write their last-success epoch here; backup_metric_warmup.sh
+      # reads on container start and re-pushes the metric so a
+      # pushgateway recreate doesn't false-fire its *Stale alert.
+      - backup_state:/var/lib/backup-state
     # No entrypoint override — Dockerfile.backup CMD echoes the
     # "backup cron installed" sentinel then exec's crond. Crontab entry
     # uses lockbox_bootstrap.sh as a wrapper to fetch fresh secrets
@@ -1267,6 +1273,10 @@ volumes:
   promtail_positions:
   # R5-16 — pushgateway persistence so recreate doesn't wipe metrics.
   pushgateway_data:
+  # 2026-05-30 — persistent state for backup_metric_warmup.sh.
+  # Holds last-success epochs for cron scripts without S3 artifacts
+  # (audit_log_retention). Tiny — one int per file.
+  backup_state:
 
 # ── Networks (2026-05-30 — STABLE POSTGRES IP) ───────────────────────
 # Previously implicit (auto-`docker_default`, dynamic IPs from the whole

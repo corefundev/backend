@@ -154,10 +154,11 @@ def test_dockerfile_backup_copies_cron_wrapper_script():
         "bind-mounting from /scripts isn't reliable for cron daemon "
         "startup paths."
     )
-    # chmod may grant +x to multiple files in one RUN line — accept any
-    # form that includes cron_wrapper.sh in a chmod +x invocation.
+    # chmod may grant +x to multiple files in one RUN — possibly across
+    # multiple lines via backslash continuation. DOTALL so `.` crosses
+    # newlines (the [[feedback_static_shell_test_lines]] lesson).
     chmod_pattern = re.compile(
-        r"chmod\s+\+x[^\n]*\bcron_wrapper\.sh\b", re.MULTILINE
+        r"chmod\s+\+x.*?\bcron_wrapper\.sh\b", re.DOTALL
     )
     assert chmod_pattern.search(text), (
         "cron_wrapper.sh must be made executable in the image (look "

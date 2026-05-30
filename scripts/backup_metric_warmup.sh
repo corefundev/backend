@@ -139,5 +139,34 @@ else
     log "S3_MIRROR_* not set — skipping mirror warmup (correct on staging — no mirror configured)"
 fi
 
+# ── State files (no S3 artifact — durable-on-disk pattern) ──────────
+# Cron scripts that operate ONLY on the DB (audit_log_retention) have
+# nothing for the S3-derive path above. They write their last-success
+# epoch to /var/lib/backup-state/<name>.last_success on each successful
+# run (named volume `backup_state` in compose; survives container
+# recreate). The warmup re-reads + pushes them on every start, so a
+# pushgateway recreate doesn't false-fire their *Stale alerts.
+STATE_DIR=/var/lib/backup-state
+
+warm_from_state_file() {
+    name="$1"; metric="$2"; job="$3"
+    file="$STATE_DIR/${name}.last_success"
+    if [ -r "$file" ]; then
+        ts=$(cat "$file" 2>/dev/null | tr -d '[:space:]')
+        case "$ts" in
+            ''|*[!0-9]*)
+                warn "state file $file malformed (got '${ts:-empty}') — skipping $metric" ;;
+            *)
+                push_metric "$job" "$metric" "$ts" ;;
+        esac
+    else
+        log "no state file at $file — $metric not warmed (script hasn't run since the volume was created)"
+    fi
+}
+
+warm_from_state_file audit_log_retention \
+    sku_audit_log_retention_last_success_timestamp_seconds \
+    audit_log_retention
+
 log "complete (best-effort; exiting 0 regardless)"
 exit 0
