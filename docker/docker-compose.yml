@@ -999,6 +999,13 @@ services:
       LOG_LEVEL: "warning"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro    # READ-only sock mount
+    # The proxy renders its haproxy.cfg from env at every start (it's
+    # a templating entrypoint), so /usr/local/etc/haproxy MUST be
+    # writable. read_only:true on the rootfs needs this tmpfs to not
+    # crash-loop with "can't create haproxy.cfg: Read-only file system"
+    # (observed prod 2026-05-30 on the first deploy of the proxy).
+    tmpfs:
+      - /usr/local/etc/haproxy:mode=1777
     read_only: true
     cap_drop: [ALL]
     security_opt:
