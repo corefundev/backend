@@ -420,6 +420,19 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
     logging: *log-rotation   # R5-M10
+    # 2026-05-30 — STABLE IP. pgbouncer's c-ares resolver wedges when
+    # postgres is recreated with a NEW IP under a running pgbouncer
+    # ("DNS lookup failed: postgres: result=0", non-self-healing; see
+    # the order note in cd_deploy.sh). Pinning postgres to a static IP
+    # in the static half of the subnet (the top-level `networks:` block
+    # at the end of this file reserves 172.18.128.0/17 for dynamic
+    # allocation, leaving 172.18.0.0/17 free for statics) means a
+    # postgres recreate reclaims the SAME IP — pgbouncer's cached
+    # resolution stays valid → wedge eliminated on EVERY path (CD,
+    # manual `up -d --build postgres`, crash-restart, reboot).
+    networks:
+      default:
+        ipv4_address: 172.18.0.10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sku -d sku_forecasting"]
       interval: 10s
@@ -1231,3 +1244,36 @@ volumes:
   promtail_positions:
   # R5-16 — pushgateway persistence so recreate doesn't wipe metrics.
   pushgateway_data:
+
+# ── Networks (2026-05-30 — STABLE POSTGRES IP) ───────────────────────
+# Previously implicit (auto-`docker_default`, dynamic IPs from the whole
+# 172.18.0.0/16 pool). Made explicit so postgres can pin a static IP that
+# survives recreate — eliminating the pgbouncer c-ares wedge root.
+#
+# Subnet matches what Docker had auto-assigned on both VPS (verified
+# 2026-05-30: staging + prod both at 172.18.0.0/16 gw 172.18.0.1), so
+# the network value itself doesn't change — only the IPAM strategy.
+#
+# `ip_range` splits the /16 in half:
+#   • 172.18.0.0/17   — reserved for STATICS (postgres at .0.10; room
+#                       for future pins). Dynamic allocation NEVER
+#                       touches this half, so a dynamically-assigned
+#                       container can't grab .0.10 ahead of postgres.
+#   • 172.18.128.0/17 — dynamic pool for everything else (~32k IPs;
+#                       stack today is ~25 containers).
+#
+# Migration: changing the network's IPAM config requires the network to
+# be RECREATED (Docker can't reconfigure a network with attached
+# containers). One-time on each VPS via a controlled `docker compose
+# down && up -d` (planned maintenance window). After that, steady-state
+# CD (`up -d --build postgres`) honors the static — no recreate, no
+# downtime.
+networks:
+  default:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet:  172.18.0.0/16
+          ip_range: 172.18.128.0/17
+          gateway: 172.18.0.1
