@@ -866,7 +866,15 @@ services:
     # `pushgateway_data` named volume (kB-scale).
     command:
       - "--persistence.file=/data/pushgateway.dump"
-      - "--persistence.interval=5m"
+      # 2026-05-30 — tightened from 5m. A 5-minute window meant a
+      # pushgateway crash / recreate within ~5m of a successful push
+      # lost the metric until the next natural cron tick (24h for the
+      # daily backup metric). 30s shrinks the in-flight-loss window to
+      # noise; disk cost is bytes-per-write × every 30s = nothing on
+      # the host. Combined with backup_metric_warmup.sh (now in the
+      # backup container's CMD), even an empty/fresh volume gets
+      # re-warmed from S3 within seconds of any restart.
+      - "--persistence.interval=30s"
     volumes:
       - pushgateway_data:/data
     # Internal-only — backup pushes from inside docker network,
