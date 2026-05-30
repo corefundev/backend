@@ -159,6 +159,37 @@ def test_cd_deploy_brings_postgres_up_with_wait_before_dependents():
     )
 
 
+def test_cd_deploy_includes_autoheal_and_socket_proxy_in_recreate_loop():
+    """PR #54 reconfigured autoheal (new env DOCKER_SOCK, new depends_on)
+    and added docker-socket-proxy. Without putting BOTH in cd_deploy.sh's
+    universal up-d-build loop, CD ships the new compose to disk but
+    never recreates the running containers — the hardening silently
+    fails to land. (Same class as the R10 D1 stale-image gap.)
+
+    docker-socket-proxy must come BEFORE autoheal in the loop because
+    autoheal's depends_on requires the proxy service_healthy first."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    # Each service must appear in the for-loop list.
+    loop_match = re.search(
+        r"for svc in ([^\n;]+); do", text
+    )
+    assert loop_match, "could not find the universal recreate `for svc in ... ; do` loop"
+    loop_items = loop_match.group(1).split()
+    assert "docker-socket-proxy" in loop_items, (
+        f"docker-socket-proxy must be in the recreate loop. Found: {loop_items}"
+    )
+    assert "autoheal" in loop_items, (
+        f"autoheal must be in the recreate loop (PR #54 env changes won't "
+        f"land otherwise). Found: {loop_items}"
+    )
+    # Order: proxy before autoheal so autoheal's service_healthy
+    # dependency is satisfied when autoheal recreates.
+    assert loop_items.index("docker-socket-proxy") < loop_items.index("autoheal"), (
+        f"docker-socket-proxy must come BEFORE autoheal in the loop (autoheal's "
+        f"depends_on requires it healthy). Order was: {loop_items}"
+    )
+
+
 def test_cd_deploy_health_gates_pgbouncer_fail_closed():
     """The pool layer is on every DB query's path — a wedged pgbouncer =
     ApiDown. After the infra recreate, the deploy must health-gate
