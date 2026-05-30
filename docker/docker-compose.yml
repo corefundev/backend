@@ -642,8 +642,21 @@ services:
       retries: 5
       start_period: 45s
 
-  # ── Airflow ───────────────────────────────────────────────────
+  # ── Airflow (profile-gated — orchestrates the DAGs in dags/, opt-in) ──
+  # Profile `airflow` so a plain `docker compose up -d` does NOT bring
+  # any of these up. The CD pipeline never enables it (cd_deploy.sh runs
+  # the universal infra loop + the app tier, no `--profile airflow`),
+  # which matches the long-standing operational intent. The 2026-05-30
+  # network migration's full `up -d` accidentally surfaced these without
+  # the profile gate — airflow-init failed auth (compose interpolates
+  # the .env POSTGRES_PASSWORD placeholder, not the Lockbox-injected
+  # value the entrypoint scripts use), airflow-webserver / -scheduler
+  # then stayed `Created` blocked on the failed init. Profile-gating
+  # closes the gap: definition stays in compose for the day someone
+  # opts in (`up -d --profile airflow`) with real airflow secrets, but
+  # is invisible to every other start path.
   airflow-webserver:
+    profiles: [airflow]
     # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
     # prod cd_deploy.sh, but pinning keeps the definition consistent).
     image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
@@ -676,6 +689,7 @@ services:
       retries: 5
 
   airflow-scheduler:
+    profiles: [airflow]
     # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
     # prod cd_deploy.sh, but pinning keeps the definition consistent).
     image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
@@ -708,6 +722,7 @@ services:
 
   # One-time DB init for Airflow
   airflow-init:
+    profiles: [airflow]
     # R4-20 digest-pinned 2026-05-17 (airflow stack is NOT enabled in
     # prod cd_deploy.sh, but pinning keeps the definition consistent).
     image: apache/airflow:2.9.1@sha256:2514cee14aae54733f68d0e03680ab74112ac51524c9990377f6cc8a8af949cb
