@@ -288,7 +288,20 @@ docker compose $COMPOSE_ARGS up -d --build --wait postgres 2>&1 \
     | sed 's/^/      [postgres] /' \
     || echo "    (warning: postgres build/up-d/--wait returned non-zero — not blocking)"
 
-for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup; do
+# docker-socket-proxy comes BEFORE autoheal (autoheal's depends_on
+# requires the proxy healthy first; without the proxy in the loop, a
+# compose-side change to its env / image would only appear on disk and
+# autoheal would keep talking to a stale proxy spec).
+# autoheal is in the loop too because PR #54 changed its env / volumes /
+# depends_on — without an explicit recreate the running autoheal keeps
+# its OLD direct docker.sock mount and the hardening never lands.
+# nginx is in the loop because PR #54 added an autoheal=true label that
+# only ships on recreate (verified missing on prod-nginx 2026-05-30 even
+# though the file rsync'd correctly). The per-svc tolerant `|| echo`
+# below handles the staging case where nginx isn't defined (nginx lives
+# in the prod overlay only — `up -d --build nginx` exits non-zero on
+# staging, the iteration logs a warning and the loop continues).
+for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup docker-socket-proxy autoheal nginx; do
     echo "    --- $svc ---"
     docker compose $COMPOSE_ARGS up -d --build "$svc" 2>&1 \
         | sed "s/^/      [$svc] /" \
