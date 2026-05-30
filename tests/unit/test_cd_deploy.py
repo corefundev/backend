@@ -182,6 +182,14 @@ def test_cd_deploy_includes_autoheal_and_socket_proxy_in_recreate_loop():
         f"autoheal must be in the recreate loop (PR #54 env changes won't "
         f"land otherwise). Found: {loop_items}"
     )
+    assert "nginx" in loop_items, (
+        f"nginx must be in the recreate loop too — PR #54 added an "
+        f"autoheal=true label to nginx (prod overlay), but a label-only "
+        f"change ships ONLY on recreate. Verified missing on prod-nginx "
+        f"2026-05-30 after #54's CD ran without nginx in the loop. The "
+        f"tolerant per-svc `|| echo` handles staging where nginx isn't "
+        f"defined. Found: {loop_items}"
+    )
     # Order: proxy before autoheal so autoheal's service_healthy
     # dependency is satisfied when autoheal recreates.
     assert loop_items.index("docker-socket-proxy") < loop_items.index("autoheal"), (
