@@ -1041,27 +1041,43 @@ services:
   # quick-to-recover services where restart=recovery; postgres / redis /
   # the monitoring stack are deliberately NOT opted in).
   #
-  # 2026-05-30: hardened to talk to Docker via the docker-socket-proxy
-  # (see above) instead of mounting /var/run/docker.sock directly.
+  # 2026-05-30: replaced willfarrell/autoheal:1.2.0 with our own
+  # 50-line sidecar (scripts/autoheal.py + Dockerfile.autoheal). The
+  # upstream image was architecturally incompatible with TCP
+  # DOCKER_SOCK — its autoheal logic is inline in /docker-entrypoint
+  # (no separate `autoheal` binary) and is gated by `[ -e "$DOCKER_SOCK" ]`,
+  # which fails on `tcp://...` and crash-loops with "autoheal: not found"
+  # (verified prod 2026-05-30, PRs #54-#58). Reverting to a direct
+  # /var/run/docker.sock mount would lose the hardening, so we replaced
+  # the image instead. See [[feedback_no_revert_to_known_bad]].
+  #
+  # Net: same behavior (poll labeled containers, restart unhealthy),
+  # PLUS the docker.sock attack surface is gone — a compromised autoheal
+  # can only restart labeled containers (proxy verb allowlist), not
+  # exec into them, mount host paths, or pull arbitrary images.
   autoheal:
-    # R4-20 digest-pinned 2026-05-17
-    image: willfarrell/autoheal:1.2.0@sha256:31f580ef0279eaced5b38d631b08c474d70d8403c1c2fdd6ddcf2e879d5f3f7c
-    mem_limit: 32m
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.autoheal
+    image: docker-autoheal:custom
+    mem_limit: 64m   # 32m was tight for python+docker-SDK; bumped
     cpus: 0.1
     environment:
-      AUTOHEAL_CONTAINER_LABEL: "autoheal"
       AUTOHEAL_INTERVAL: "30"
-      AUTOHEAL_START_PERIOD: "0"
-      # Talk to Docker via the least-privilege proxy. Both variables
-      # set because willfarrell/autoheal's entrypoint reads DOCKER_SOCK
-      # for curl and downstream tooling may also read DOCKER_HOST.
-      DOCKER_SOCK: "tcp://docker-socket-proxy:2375"
-      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
-    # No /var/run/docker.sock mount anymore — proxy is the only path.
+      AUTOHEAL_LABEL:    "autoheal=true"
+      AUTOHEAL_TIMEOUT:  "30"
+      DOCKER_HOST:       "tcp://docker-socket-proxy:2375"
+    # No /var/run/docker.sock mount — proxy is the only Docker API path.
     depends_on:
       docker-socket-proxy: { condition: service_healthy }
     restart: unless-stopped
-    # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
+    # Hardening: container is a single python process talking HTTP to
+    # the proxy — needs nothing beyond network bind.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # R5-M10 — bound docker json-log file size.
     logging: *log-rotation
 
   # ── cAdvisor (per-container metrics — restart loops, CPU/mem/IO) ─
