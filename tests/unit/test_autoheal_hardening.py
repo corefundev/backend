@@ -15,9 +15,12 @@ tests/unit/test_autoheal_hardening.py
     sits between autoheal and the daemon with CONTAINERS=1 + POST=1
     only; every other Docker API verb (EXEC, BUILD, NETWORKS, VOLUMES,
     SECRETS, …) is explicitly denied. The proxy mounts the socket :ro,
-    runs read_only / cap_drop ALL / no-new-privileges. If autoheal is
-    ever compromised, the blast radius is "restart any container with
-    the autoheal label" — not "full host control".
+    runs cap_drop ALL / no-new-privileges. (read_only:true on the
+    rootfs was dropped — the HAProxy entrypoint renders its config in
+    /usr/local/etc/haproxy/ and crash-looped; the real hardening is
+    cap_drop + no-new-privileges + sock :ro + env-allowlist, all kept.)
+    If autoheal is ever compromised, the blast radius is "restart any
+    container with the autoheal label" — not "full host control".
 
 These tests pin both invariants so a future edit that broadens the
 proxy's allowed verbs or removes a critical label surfaces in CI before
@@ -173,30 +176,42 @@ def test_docker_socket_proxy_mounts_sock_read_only():
     )
 
 
-def test_docker_socket_proxy_has_haproxy_cfg_tmpfs():
-    """2026-05-30 regression: tecnativa/docker-socket-proxy is HAProxy-
-    backed and renders its haproxy.cfg from env at every start. With
-    read_only:true on the rootfs (security posture) it crash-loops
-    without a writable mount at /usr/local/etc/haproxy. Observed on
-    prod immediately after first deploy of #54. tmpfs is the right
-    shape (in-memory, gone on stop — no persisted state to leak)."""
+def test_docker_socket_proxy_does_NOT_set_readonly_rootfs():
+    """2026-05-30 regression: tried `read_only: true` (#54), which
+    crash-looped on `can't create haproxy.cfg: Read-only file system`
+    because the HAProxy entrypoint renders its config in
+    /usr/local/etc/haproxy/. Tried `tmpfs: /usr/local/etc/haproxy`
+    (#56) — that masked the rootfs's `haproxy.cfg.template` →
+    different crash: `haproxy.cfg.template: No such file or directory`.
+    Dropped read_only entirely (#58); the remaining hardening
+    (cap_drop ALL + no-new-privileges + sock :ro + env-allowlist) is
+    what actually bounds the blast radius. A regression that re-adds
+    read_only would break the proxy again — this test guards it."""
     s = _services(_BASE)
-    tmpfs = s["docker-socket-proxy"].get("tmpfs") or []
-    assert any("/usr/local/etc/haproxy" in str(t) for t in tmpfs), (
-        f"proxy must have a writable mount at /usr/local/etc/haproxy "
-        f"(tmpfs) — without it the read_only rootfs crash-loops with "
-        f"'can't create haproxy.cfg: Read-only file system'. Got "
-        f"tmpfs={tmpfs!r}"
+    proxy = s["docker-socket-proxy"]
+    assert proxy.get("read_only") is not True, (
+        "docker-socket-proxy must NOT have read_only:true — the HAProxy "
+        "entrypoint renders its config in the rootfs at "
+        "/usr/local/etc/haproxy/, and a read_only rootfs blocks it "
+        "(prod 2026-05-30 crash-loop)."
+    )
+    # tmpfs at /usr/local/etc/haproxy is also wrong — it masks the
+    # template. The combination (no read_only, no tmpfs) is what works.
+    tmpfs = proxy.get("tmpfs") or []
+    assert not any("/usr/local/etc/haproxy" in str(t) for t in tmpfs), (
+        "tmpfs at /usr/local/etc/haproxy masks the haproxy.cfg.template "
+        "that the rootfs ships — different crash mode. The right answer "
+        "is no read_only AND no tmpfs there."
     )
 
 
 def test_docker_socket_proxy_runs_with_minimal_caps():
-    """read_only rootfs + cap_drop ALL + no-new-privileges — standard
+    """cap_drop ALL + no-new-privileges + sock mounted :ro — standard
     hardened-container hygiene; the proxy needs nothing beyond network
-    bind."""
+    bind. These are what actually bound blast radius (the dropped
+    read_only was orthogonal cosmetic — see the test above)."""
     s = _services(_BASE)
     proxy = s["docker-socket-proxy"]
-    assert proxy.get("read_only") is True, "proxy must be read_only"
     assert proxy.get("cap_drop") == ["ALL"], (
         f"proxy must cap_drop: [ALL], got {proxy.get('cap_drop')!r}"
     )
