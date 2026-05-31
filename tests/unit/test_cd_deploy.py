@@ -109,6 +109,9 @@ def test_cd_deploy_rebuilds_all_custom_image_services():
         # docker-py sidecar replacing willfarrell/autoheal which was
         # TCP-DOCKER_SOCK-incompatible).
         "autoheal",
+        # 2026-05-31 — custom grafana (Dockerfile.grafana, Lockbox-
+        # aware entrypoint so GRAFANA_PASSWORD never lands in .env).
+        "grafana",
     )
 
     # Find the rebuild block — locate the for-loop with --build inside.
