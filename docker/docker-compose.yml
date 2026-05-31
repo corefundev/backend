@@ -51,29 +51,26 @@ x-common-env: &common-env
   JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"
   MODEL_SIGNING_KEY: "${MODEL_SIGNING_KEY:-}"
   # PostgreSQL client registry — primary, accepts writes.
-  # Audit R3-13 strict — every DSN reads bare ${POSTGRES_PASSWORD} (no
-  # `:-sku` fallback). The postgres service block below enforces the
-  # var via `:?` strict so compose fails fast if it's unset.
-  # `.env` must carry the STRUCTURAL PLACEHOLDER line, set ONCE at VPS
-  # bootstrap:
-  #   echo 'POSTGRES_PASSWORD=_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD' >> /srv/backend/.env
-  # The placeholder satisfies compose strict-gate (it's non-empty) but
-  # is deliberately shaped so no rotation script would ever generate
-  # it — see tests/integration/test_placeholder_pg_auth_rejected.py
-  # for the property assertion (postgres SCRAM rejects this string).
-  # The real value is never on disk. cd_deploy.sh does NOT touch .env
-  # (the historical `inject_lockbox_key` path was removed 2026-05-27
-  # as a functional no-op — see cd_deploy.sh's R3-13/R10 Phase 0-C
-  # NOTE). Runtime injection covers the actual need: every service
-  # that needs the live pwd reads it from Lockbox at startup (Python
-  # `bootstrap_secrets()` or `lockbox_bootstrap.sh` entrypoint),
-  # which OVERWRITES the placeholder in the running process's env.
-  DATABASE_URL: postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
-  # Optional read-replica DSN. When set, read-heavy queries (audit-log
-  # listings, training-run history) use this instead of DATABASE_URL.
-  # Falls back to primary when unset OR replica unreachable. Defaults
-  # empty so dev environments without a replica keep working unchanged.
-  DATABASE_URL_REPLICA: "${DATABASE_URL_REPLICA:-}"
+  # R10 Phase 0-B PR-C (2026-05-31) — DATABASE_URL / DATABASE_URL_REPLICA
+  # are NO LONGER set here via compose-time `${POSTGRES_PASSWORD}`
+  # interpolation. That pattern only worked because the lockbox-blanks
+  # overlay used to blank them back to "", letting vault_agent's
+  # bootstrap_secrets() inject the real value from Lockbox into the
+  # running process's env. PR-C dropped both the composed Lockbox entry
+  # AND the lockbox-blanks override; removing the compose-time
+  # interpolation here closes the root anti-pattern (a fake DSN with
+  # a placeholder password sitting in env until runtime overrides it
+  # — see [[feedback_no_secrets_in_env]]).
+  #
+  # The DSN is now composed inside the Python process by
+  # `src/auth/vault_agent.py::_compose_database_urls_from_components`
+  # from POSTGRES_PASSWORD + DB_HOST/PORT/NAME/USER components, which
+  # come from Lockbox (prod/staging) or .env (dev). POSTGRES_PASSWORD
+  # is the single source of truth. .env still carries the placeholder
+  # POSTGRES_PASSWORD=_LOCKBOX_NOT_INJECTED_DO_NOT_USE_PG_PASSWORD so
+  # the postgres service block's `:?`-strict gate is satisfied and a
+  # mis-configured-Lockbox attempt fails LOUD (SCRAM-rejected — see
+  # tests/integration/test_placeholder_pg_auth_rejected.py).
   # Redis — audit R3-15.
   # The default URL omits credentials so dev (REDIS_PASSWORD unset)
   # keeps working unchanged. When REDIS_PASSWORD is provided (Lockbox

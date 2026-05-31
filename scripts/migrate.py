@@ -116,12 +116,24 @@ def _apply_one(conn, path: Path) -> None:
 
 
 def main() -> int:
-    # Skip Lockbox when DATABASE_URL is already set (CI runner injects
-    # it directly, no SA key on the runner). Vault bootstrap is only
-    # needed when running inside the prod compose where envs come from
-    # Yandex Lockbox.
-    if not os.environ.get("DATABASE_URL"):
-        bootstrap_secrets()
+    # Always call bootstrap_secrets() — it's idempotent and fast.
+    # The previous `if not DATABASE_URL: bootstrap_secrets()` guard
+    # silently broke after R10 Phase 0-B PR-C (2026-05-31): the
+    # x-common-env anchor's
+    #     DATABASE_URL: postgresql://sku:${POSTGRES_PASSWORD}@…
+    # compose-time interpolation always set DATABASE_URL to the .env
+    # placeholder pwd, so the guard skipped bootstrap and migrate
+    # connected with the wrong password. Pre-PR-C, the lockbox-blanks
+    # `DATABASE_URL: ""` overlay blanked it back to empty — but that
+    # blank was removed in PR-C, exposing the latent guard bug.
+    #
+    # bootstrap_secrets() returns False quickly when neither a Lockbox
+    # SA key nor a Vault token is configured (CI runner case), so
+    # there's no slowdown / no behavior change for CI. When Lockbox IS
+    # configured, the composer overwrites whatever DATABASE_URL was
+    # pre-set by compose interpolation with the components-derived
+    # value. POSTGRES_PASSWORD is the single source of truth.
+    bootstrap_secrets()
 
     conn = _connect()
     try:
