@@ -303,7 +303,16 @@ docker compose $COMPOSE_ARGS up -d --build --wait postgres 2>&1 \
 # staging, the iteration logs a warning and the loop continues).
 for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup docker-socket-proxy autoheal nginx; do
     echo "    --- $svc ---"
-    docker compose $COMPOSE_ARGS up -d --build "$svc" 2>&1 \
+    # --no-deps prevents compose's buildx bake from cascading into other
+    # services' build contexts. Without it, `up -d --build nginx`
+    # triggered bake to ALSO build api/migrate/postgres/pgbouncer at the
+    # same time — and the api Dockerfile's `COPY src/ src/` failed
+    # because src/ isn't rsync'd to /srv/backend on the VPS (cd.yml only
+    # rsync's scripts/migrations/configs/docker, not src/). A single
+    # cascaded fail propagated up and the whole iteration silently
+    # failed via `|| echo` — verified prod 2026-05-30 on PR #55's CD.
+    # --no-deps scopes the build to JUST $svc.
+    docker compose $COMPOSE_ARGS up -d --no-deps --build "$svc" 2>&1 \
         | sed "s/^/      [$svc] /" \
         || echo "    (warning: $svc build/up-d returned non-zero — not blocking)"
 done

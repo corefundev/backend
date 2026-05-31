@@ -159,6 +159,29 @@ def test_cd_deploy_brings_postgres_up_with_wait_before_dependents():
     )
 
 
+def test_cd_deploy_loop_uses_no_deps_to_prevent_bake_cascade():
+    """2026-05-30 regression: modern compose v2 `up -d --build <service>`
+    uses buildx bake by default, which builds ALL services with build
+    contexts (not just the named one). On the VPS this cascaded into
+    api/migrate's Dockerfile `COPY src/ src/`, which failed because src/
+    isn't rsync'd to /srv/backend (cd.yml only rsyncs scripts/
+    migrations/configs/docker). The single cascaded fail propagated up
+    and the iteration silently failed via `|| echo` — observed on PR
+    #55's CD where nginx didn't get the autoheal=true label that #54
+    added, even though nginx was in the loop.
+
+    --no-deps scopes the bake to JUST $svc, eliminating the cascade."""
+    text = (_BACKEND / "scripts" / "cd_deploy.sh").read_text()
+    assert re.search(
+        r'up\s+-d\s+--no-deps\s+--build\s+"\$svc"', text
+    ), (
+        "the infra-recreate loop must invoke `up -d --no-deps --build "
+        "\"$svc\"` so buildx bake doesn't cascade into services whose "
+        "build contexts can't be satisfied on the VPS (notably api/"
+        "migrate, which need src/ that cd.yml does NOT rsync)."
+    )
+
+
 def test_cd_deploy_includes_autoheal_and_socket_proxy_in_recreate_loop():
     """PR #54 reconfigured autoheal (new env DOCKER_SOCK, new depends_on)
     and added docker-socket-proxy. Without putting BOTH in cd_deploy.sh's
