@@ -760,10 +760,12 @@ services:
   # Exports pg_stat_database, pg_stat_activity, etc. for the alert rules
   # (PostgresDown, PostgresConnectionsHigh).
   #
-  # Custom image — bakes lockbox_bootstrap.sh so DATABASE_URL gets
-  # fetched from Lockbox at container startup. Without this we'd have
-  # to keep the postgres password in /srv/backend/.env (upstream image
-  # is distroless, can't run a shell-based loader).
+  # Custom image — bakes lockbox_bootstrap.sh so the postgres
+  # credentials get fetched from Lockbox at container startup
+  # (POSTGRES_PASSWORD + DB_HOST/PORT/NAME/USER; the entrypoint then
+  # composes the DSN — R10 Phase 0-B PR-C). Without this we'd have to
+  # keep the postgres password in /srv/backend/.env (upstream image is
+  # distroless, can't run a shell-based loader).
   postgres-exporter:
     build:
       context: ..

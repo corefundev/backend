@@ -39,8 +39,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Anchor: blank-out every var that should come from Lockbox.
-# Without this, x-common-env's hardcoded fallbacks (e.g. DATABASE_URL=
-# postgresql://sku:sku@…) would beat Lockbox's truthy-check.
+# Without this, x-common-env's hardcoded fallbacks (e.g. an S3 bucket
+# default, or a MinIO dev keypair) would beat Lockbox's truthy-check.
+# (DATABASE_URL used to be the canonical example here — it was removed
+# from x-common-env entirely in R10 Phase 0-B PR-C; the DSN is now
+# composed at runtime from POSTGRES_PASSWORD + components.)
 x-lockbox-blanks: &lockbox-blanks
   YC_SA_KEY_FILE:                  /run/secrets/yc-sa-key.json
   YC_LOCKBOX_SECRET_ID:            "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
@@ -102,9 +105,10 @@ x-lockbox-blanks: &lockbox-blanks
   OAUTH_YANDEX_CLIENT_SECRET:      ""
 
 services:
-  # Migration init-job needs the same Lockbox secrets (DATABASE_URL +
-  # the YC SA key for vault_agent.bootstrap_secrets) so the migrate
-  # script can connect.
+  # Migration init-job needs the same Lockbox secrets (POSTGRES_PASSWORD
+  # + DB_HOST/PORT/NAME/USER components, from which vault_agent.
+  # bootstrap_secrets composes DATABASE_URL — see R10 Phase 0-B PR-C)
+  # plus the YC SA key, so the migrate script can connect.
   migrate:
     environment:
       <<: *lockbox-blanks
