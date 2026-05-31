@@ -1,0 +1,152 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Pruned in last 30 days",
+      "description": "Total rows deleted by scripts/audit_log_retention.sh (counter increase). 0 here AND last-run-age low = retention runs but nothing aged out yet (normal on low-volume orgs). 0 AND last-run-age high = retention not running — see AuditLogRetentionStale.",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "increase(sku_audit_log_pruned_total[30d])",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Hours since last successful run",
+      "description": "Age of sku_audit_log_retention_last_success_timestamp_seconds. <25h = healthy (daily cron). 25–48h = AuditLogRetentionStale warning territory. >48h = AuditLogRetentionStale fires. >25h on cron_fired metric = AuditLogRetentionCronSilent.",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "(time() - sku_audit_log_retention_last_success_timestamp_seconds) / 3600",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 25, "color": "orange"},
+              {"value": 48, "color": "red"}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Cron fired age (hours)",
+      "description": "Age of sku_audit_log_retention_cron_fired_timestamp_seconds (set by cron_wrapper.sh before the script runs). Orthogonal to last_success — catches the cron-dead-but-manually-recovered case where success metric is fresh but cron itself hasn't fired (AuditLogRetentionCronSilent at >25h).",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "(time() - sku_audit_log_retention_cron_fired_timestamp_seconds) / 3600",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "area",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 25, "color": "red"}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Daily rows pruned (last 30 days)",
+      "description": "Per-day increase in sku_audit_log_pruned_total. Empty bars = retention ran but nothing aged out (normal); missing bars = retention didn't run that day (see Hours-since-last-run panel + AuditLogRetentionCronSilent).",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 6},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "increase(sku_audit_log_pruned_total[1d])",
+          "refId": "A",
+          "legendFormat": "rows pruned/day"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"showLegend": true, "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["audit-log", "retention", "backup"],
+  "templating": {"list": []},
+  "time": {"from": "now-30d", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Audit log retention",
+  "uid": "audit-log-retention",
+  "version": 1,
+  "weekStart": ""
+}
