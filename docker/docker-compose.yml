@@ -999,14 +999,23 @@ services:
       LOG_LEVEL: "warning"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro    # READ-only sock mount
-    # The proxy renders its haproxy.cfg from env at every start (it's
-    # a templating entrypoint), so /usr/local/etc/haproxy MUST be
-    # writable. read_only:true on the rootfs needs this tmpfs to not
-    # crash-loop with "can't create haproxy.cfg: Read-only file system"
-    # (observed prod 2026-05-30 on the first deploy of the proxy).
-    tmpfs:
-      - /usr/local/etc/haproxy:mode=1777
-    read_only: true
+    # 2026-05-30: tried `read_only: true` + tmpfs at /usr/local/etc/haproxy,
+    # but tecnativa/docker-socket-proxy's HAProxy entrypoint runs
+    # `sed -i …/haproxy.cfg.template > haproxy.cfg`, AND the template
+    # itself lives at /usr/local/etc/haproxy/haproxy.cfg.template
+    # (rootfs). A tmpfs on that directory masks the template →
+    # "haproxy.cfg.template: No such file or directory" crash-loop
+    # (observed prod 2026-05-30 after #56's tmpfs attempt).
+    #
+    # Dropped read_only on the rootfs. The remaining hardening is what
+    # actually limits blast radius if the proxy is compromised:
+    # cap_drop ALL (no NET_ADMIN/SYS_ADMIN/etc.), no-new-privileges
+    # (kill SUID/setcap escalation), sock mounted :ro (proxy can't
+    # corrupt the socket FILE), and the env-allowlist scopes the
+    # Docker API surface to CONTAINERS=1 + POST=1 (~restart only).
+    # Writable rootfs WITHOUT those layers would be worst-case; here
+    # the worst case is "write to a per-container ephemeral rootfs"
+    # that's gone on `docker rm` — bounded.
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
