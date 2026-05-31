@@ -234,7 +234,7 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 39
+    EXPECTED_TOTAL = 40   # +1 task #38 SyntheticAlertTest (2026-05-31)
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (
