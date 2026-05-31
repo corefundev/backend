@@ -724,8 +724,7 @@ groups:
           team:     ops
         annotations:
           summary:     "[E2E test] scrape → AM → Telegram pipeline check"
-          description: |-
-            This alert is fired by .github/workflows/synthetic-alert-test.yml
-            to prove the alerting pipeline routes end-to-end. If you see
-            this message in Telegram, the pipeline is healthy. Auto-resolves
-            ~5 min after the workflow's push (no manual silence needed).
+          # Single-line description (no `|` / `>` block) so the literal value
+          # is byte-equal to the promtool acceptance test's exp_annotations
+          # — line breaks here would diverge silently.
+          description: "This alert is fired by .github/workflows/synthetic-alert-test.yml to prove the alerting pipeline routes end-to-end. If you see this message in Telegram, the pipeline is healthy. Auto-resolves ~5 min after the workflow's push (no manual silence needed)."
