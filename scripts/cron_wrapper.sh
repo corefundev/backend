@@ -45,6 +45,23 @@ case "$JOB" in
         ;;
 esac
 
+# R10 Phase 0-B PR-C (2026-05-31) — after the composed DATABASE_URL
+# Lockbox entry was dropped, non-Python backup scripts (backup.sh,
+# base_backup.sh, audit_log_retention.sh) must compose their own DSN
+# from POSTGRES_PASSWORD here. Mirrors the Python composer at
+# `src/auth/vault_agent.py::_compose_database_urls_from_components`.
+# The helper is idempotent: callers that already export DATABASE_URL
+# (dev/test) are unchanged; in Lockbox-mode the helper composes from
+# the components lockbox_bootstrap.sh just injected. Fail-loud on
+# missing components — see [[feedback_enterprise_grade]].
+if [ -f /scripts/compose_database_url.sh ]; then
+    . /scripts/compose_database_url.sh
+    compose_database_url || {
+        echo "cron_wrapper: DSN composition failed for job=$JOB — aborting" >&2
+        exit 2
+    }
+fi
+
 # Push the cron-fired timestamp BEFORE running the script. Best-
 # effort: if pushgateway is unreachable at this exact second, the
 # cron-fired alert may false-fire later — but that's a legitimate

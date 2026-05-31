@@ -28,7 +28,7 @@ not the database:
 | Alert fires (PostgresDown after 5min stability window) | 5 min |
 | Operator wakes up + opens runbook | 1–10 min |
 | `scripts/promote_replica.sh` (matches drill: ~1 sec) | 1 sec |
-| Lockbox `DATABASE_URL` switch via `yc lockbox payload add` | 30 sec |
+| Lockbox `DB_HOST` switch via `yc lockbox secret add-version` | 30 sec |
 | `docker compose restart api worker scan-worker process-worker` | 30 sec |
 | Smoke test (curl /readyz green) | 30 sec |
 | **Total realistic RTO** | **7–17 min** |
@@ -105,21 +105,28 @@ bash scripts/promote_replica.sh
 
 ### Phase 2 — Point app stack at new primary (10 minutes)
 
-Switch `DATABASE_URL` in Lockbox to point at the new primary
-(db-replica.testcore.ru:5432, since pgbouncer is on api.testcore.ru
-and the old DC is dead — you need a direct connection until pgbouncer
-is rebuilt). Then restart api + workers:
+After R10 Phase 0-B PR-C (2026-05-31), the Postgres DSN is composed at
+runtime from `POSTGRES_PASSWORD` + `DB_HOST` + `DB_PORT` + `DB_NAME` +
+`DB_USER` Lockbox components. Failover = swap just `DB_HOST` (and
+`DB_PORT` if changed) to the new primary, then restart so vault_agent
+recomposes the DSN on next bootstrap.
 
 ```bash
-# From your laptop:
-yc lockbox payload add \
-    --name sku-forecasting-secrets \
-    --payload '[{"key": "DATABASE_URL",
-                 "text_value": "postgresql://sku:PASSWORD@db-replica.testcore.ru:5432/sku_forecasting"}]'
+# 1) Read the current Lockbox payload + edit DB_HOST + DB_PORT in-place,
+#    then push as a new version (Lockbox versions are atomic — you
+#    submit the full payload, not a delta).
+SECRET=$(yc lockbox secret get --name sku-forecasting-secrets --format json | jq -r .id)
+yc lockbox payload get --id "$SECRET" --format json > /tmp/lb.json
+# Edit /tmp/lb.json: set DB_HOST=db-replica.testcore.ru and DB_PORT=5432
+# (and DATABASE_URL_REPLICA equivalents to "" since the old primary is dead).
+yc lockbox secret add-version --id "$SECRET" --payload @/tmp/lb.json
+rm /tmp/lb.json
 
-# SSH to api.testcore.ru, restart api + workers to pick up new env:
+# 2) SSH to api.testcore.ru, restart api + workers to re-bootstrap.
+#    `down + up -d` ensures vault_agent runs at process start and
+#    composes DATABASE_URL from the new DB_HOST.
 ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
-    'cd /srv/backend && docker compose ... restart api worker scan-worker process-worker'
+    'cd /srv/backend && docker compose ... down api worker scan-worker process-worker && docker compose ... up -d api worker scan-worker process-worker'
 # (Replace ... with the full compose-file flag set from
 # project_vps_deploy.md.)
 ```

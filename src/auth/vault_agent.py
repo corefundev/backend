@@ -344,26 +344,26 @@ def _compose_database_urls_from_components() -> None:
     """
     Compose DATABASE_URL and DATABASE_URL_REPLICA at runtime from
     Lockbox-injected components (POSTGRES_PASSWORD + DB_HOST + DB_PORT
-    + DB_NAME + DB_USER), overriding any composed-with-pwd entries that
-    Lockbox might still hold.
+    + DB_NAME + DB_USER). POSTGRES_PASSWORD is the single source of
+    truth — no composed-with-embedded-pwd DATABASE_URL entry exists in
+    Lockbox after PR-C (R10 Phase 0-B, 2026-05-31).
 
-    Why: storing DATABASE_URL in Lockbox as a composed-with-embedded-pwd
-    string AND storing POSTGRES_PASSWORD separately creates two sources
-    of truth for the same secret. The R8-12 v1 SASL trap (2026-05-25)
-    was caused by exactly this: rotating POSTGRES_PASSWORD without
-    DATABASE_URL left the pre-rotation pwd still active via the
+    Why one source of truth: storing the same secret in two places
+    (POSTGRES_PASSWORD bare + DATABASE_URL with embedded pwd) created
+    the R8-12 v1 SASL trap (2026-05-25): rotating POSTGRES_PASSWORD
+    without DATABASE_URL left the pre-rotation pwd still active via the
     composed entry, so pgbouncer (whose `userlist.txt` is built from
     POSTGRES_PASSWORD) and api (whose connection used DATABASE_URL)
-    desynced. Composing the DSN here, after Lockbox bootstrap, makes
-    POSTGRES_PASSWORD the single source of truth.
+    desynced. See [[feedback_secret_atomicity_lockbox]].
 
-    Skips gracefully if POSTGRES_PASSWORD is unset — preserves whatever
-    DATABASE_URL Lockbox or compose env already provides. This is the
-    transitional fallback: as long as composed Lockbox entries are
-    still present alongside components, code reading os.environ
-    ["DATABASE_URL"] gets the right value either way; once the
-    composed entries are dropped from Lockbox (separate PR), the
-    component path is the only one.
+    Fails loud if POSTGRES_PASSWORD is empty — there is no legitimate
+    Lockbox path where it's missing. A missing component means either
+    (a) it's not in the Lockbox payload, (b) it's not in the service's
+    LOCKBOX_ALLOWED_KEYS, or (c) lockbox_bootstrap.sh didn't run before
+    this composer. All three are misconfigurations that must surface
+    immediately ([[feedback_enterprise_grade]] fail-closed default) —
+    masking them with a silent return + stale DATABASE_URL is exactly
+    the R8-12 trap this refactor closes.
 
     Replica DSN is composed only if DB_HOST_REPLICA is set (staging has
     no replica). POSTGRES_PASSWORD_REPLICA falls back to
@@ -377,7 +377,16 @@ def _compose_database_urls_from_components() -> None:
     """
     pwd = os.environ.get("POSTGRES_PASSWORD", "").strip()
     if not pwd:
-        return  # nothing to compose — leave existing DATABASE_URL alone
+        raise RuntimeError(
+            "POSTGRES_PASSWORD is empty after Lockbox bootstrap — DSN "
+            "composition cannot proceed. Check that POSTGRES_PASSWORD is "
+            "in the Lockbox payload AND in this service's "
+            "LOCKBOX_ALLOWED_KEYS (or the service doesn't gate via an "
+            "allowlist). The silent-return fallback (and the composed-"
+            "with-pwd DATABASE_URL entry in Lockbox that it relied on) "
+            "was removed in R10 Phase 0-B PR-C (2026-05-31). "
+            "POSTGRES_PASSWORD is now the only source of truth."
+        )
 
     from urllib.parse import quote
 

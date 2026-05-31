@@ -1181,8 +1181,16 @@ services:
     # `setpgid: Operation not permitted` in logs.
     init: true
     environment:
-      # Audit R3-13 — env-driven, no hardcoded sku:sku.
-      DATABASE_URL:          postgresql://sku:${POSTGRES_PASSWORD}@postgres:5432/sku_forecasting
+      # R10 Phase 0-B PR-C (2026-05-31) — DATABASE_URL is no longer set
+      # here. The previous `postgresql://sku:${POSTGRES_PASSWORD}@…`
+      # compose-time interpolation was a hack that only worked because
+      # Lockbox bootstrap silently overrode it with the composed-pwd
+      # DATABASE_URL entry at script-runtime. After PR-C dropped that
+      # entry from Lockbox, cron_wrapper.sh + restore.sh source
+      # scripts/compose_database_url.sh to compose the DSN from
+      # POSTGRES_PASSWORD — the single source of truth. See
+      # [[feedback_secret_atomicity_lockbox]] +
+      # [[feedback_no_secrets_in_env]].
       # Backup S3 — отдельный аккаунт / keypair. Backup-скрипт смотрит
       # СНАЧАЛА на S3_BACKUP_* , потом fallback на общие AWS_* (dev/MinIO).
       S3_BACKUP_BUCKET:               ${S3_BACKUP_BUCKET:-sku-forecasting-backups}

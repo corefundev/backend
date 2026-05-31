@@ -7,13 +7,16 @@
 #
 # In Lockbox-mode (prod):
 #   YC_SA_KEY_FILE + YC_LOCKBOX_SECRET_ID set, LOCKBOX_ALLOWED_KEYS
-#   gates the export to either:
-#     (legacy)  just DATABASE_URL
-#     (R10 0-B) POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER
-#               — DSN composed at runtime, see below.
+#   exports POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER.
+#   The DSN is composed at runtime from these components.
 #
 # In dev (no Lockbox):
 #   set DATABASE_URL directly via env, OR set all the components.
+#
+# R10 Phase 0-B PR-C (2026-05-31) — the composed DATABASE_URL entry was
+# dropped from Lockbox. POSTGRES_PASSWORD is the only source of truth.
+# See src/auth/vault_agent.py::_compose_database_urls_from_components
+# for the Python-side mirror of this logic.
 
 set -eu
 
@@ -22,13 +25,10 @@ if [ -n "${YC_SA_KEY_FILE:-}" ] && [ -z "${PGEXP_BOOTED:-}" ]; then
     exec /usr/local/bin/lockbox_bootstrap.sh "$0" "$@"
 fi
 
-# R10 Phase 0-B — if DATABASE_URL is not provided directly but
-# component env vars ARE (POSTGRES_PASSWORD + DB_HOST + DB_PORT +
-# DB_NAME + DB_USER), compose the DSN here. Keeps postgres-exporter
-# in sync with vault_agent.py's `_compose_database_urls_from_components`
-# on the Python side — POSTGRES_PASSWORD becomes the single source of
-# truth so a future PR can drop the composed-with-pwd DATABASE_URL
-# from Lockbox without breaking the exporter.
+# If DATABASE_URL is not provided directly but component env vars
+# ARE (POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER),
+# compose the DSN here. Mirrors vault_agent.py's
+# `_compose_database_urls_from_components` on the Python side.
 if [ -z "${DATABASE_URL:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
     _db_user="${DB_USER:-sku}"
     _db_host="${DB_HOST:-postgres}"
