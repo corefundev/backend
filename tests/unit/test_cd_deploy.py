@@ -105,6 +105,10 @@ def test_cd_deploy_rebuilds_all_custom_image_services():
     REQUIRED_BUILD_TARGETS = (
         "pgbouncer", "postgres", "postgres-exporter",
         "prometheus", "alertmanager", "backup", "mlflow",
+        # 2026-05-30 — custom autoheal (Dockerfile.autoheal, 50-line
+        # docker-py sidecar replacing willfarrell/autoheal which was
+        # TCP-DOCKER_SOCK-incompatible).
+        "autoheal",
     )
 
     # Find the rebuild block — locate the for-loop with --build inside.

@@ -236,17 +236,75 @@ def test_autoheal_does_NOT_mount_docker_sock_directly():
 
 
 def test_autoheal_uses_proxy_endpoint():
-    """DOCKER_SOCK / DOCKER_HOST point at the proxy over TCP. Without
-    these set, willfarrell/autoheal would default to /var/run/docker.sock
-    and silently fail (no mount)."""
+    """DOCKER_HOST points at the proxy over TCP. The docker SDK in our
+    custom autoheal sidecar (scripts/autoheal.py) honors DOCKER_HOST
+    natively — no DOCKER_SOCK needed (that env-var was a willfarrell-
+    image quirk that broke with tcp:// values; we replaced the image)."""
     s = _services(_BASE)
     env = s["autoheal"].get("environment", {})
-    assert env.get("DOCKER_SOCK") == "tcp://docker-socket-proxy:2375", (
-        "autoheal DOCKER_SOCK must point at the proxy"
-    )
     assert env.get("DOCKER_HOST") == "tcp://docker-socket-proxy:2375", (
-        "autoheal DOCKER_HOST must point at the proxy (belt for any "
-        "downstream tooling reading DOCKER_HOST)"
+        "autoheal DOCKER_HOST must point at the proxy — that's how the "
+        "custom sidecar reaches the Docker daemon (no direct sock mount)"
+    )
+
+
+def test_autoheal_is_our_custom_image_not_willfarrell():
+    """willfarrell/autoheal:1.2.0 is architecturally incompatible with
+    TCP DOCKER_SOCK (verified prod 2026-05-30 — "autoheal: not found"
+    crash-loop, see scripts/autoheal.py docstring). We replaced it
+    with our own sidecar that uses docker-py + DOCKER_HOST so the
+    proxy-based hardening actually works. A regression that swaps
+    back to willfarrell would re-introduce the crash."""
+    s = _services(_BASE)
+    auto = s["autoheal"]
+    assert auto.get("build"), (
+        "autoheal must use `build:` (our custom Dockerfile.autoheal), "
+        "not a pinned upstream image"
+    )
+    assert auto.get("build", {}).get("dockerfile") == "docker/Dockerfile.autoheal", (
+        "autoheal build must reference docker/Dockerfile.autoheal"
+    )
+    # Defense against a future edit that adds willfarrell back.
+    assert "willfarrell" not in str(auto.get("image", "")), (
+        "autoheal must NOT use the willfarrell image — it crash-loops "
+        "with tcp:// DOCKER_SOCK"
+    )
+
+
+def test_autoheal_sidecar_script_exists_and_uses_docker_sdk():
+    """The custom sidecar must exist and use the docker SDK to talk to
+    the daemon via DOCKER_HOST. A regression that swaps in raw curl or
+    a path-based mount would break the proxy contract."""
+    script = _BACKEND / "scripts" / "autoheal.py"
+    assert script.is_file(), "scripts/autoheal.py must exist"
+    text = script.read_text(encoding="utf-8")
+    assert "import docker" in text, (
+        "autoheal.py must use the docker SDK (it honors DOCKER_HOST=tcp://)"
+    )
+    assert "docker.from_env" in text, (
+        "autoheal.py must use docker.from_env() so it reads DOCKER_HOST"
+    )
+    # And the actual behavior: filter unhealthy + restart.
+    assert "health" in text and "unhealthy" in text, (
+        "autoheal.py must filter for unhealthy containers"
+    )
+    assert ".restart(" in text, (
+        "autoheal.py must restart unhealthy containers"
+    )
+
+
+def test_autoheal_hardened_with_minimal_caps():
+    """Custom autoheal is a single python process talking HTTP to the
+    proxy — needs nothing beyond network bind. read_only + cap_drop ALL
+    + no-new-privileges bound the blast radius if compromised."""
+    s = _services(_BASE)
+    auto = s["autoheal"]
+    assert auto.get("read_only") is True, "autoheal must be read_only"
+    assert auto.get("cap_drop") == ["ALL"], (
+        f"autoheal must cap_drop: [ALL], got {auto.get('cap_drop')!r}"
+    )
+    assert "no-new-privileges:true" in (auto.get("security_opt") or []), (
+        "autoheal must set security_opt: no-new-privileges:true"
     )
 
 

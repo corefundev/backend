@@ -1,0 +1,29 @@
+# Custom autoheal sidecar — restarts containers labeled autoheal=true
+# when they go unhealthy. Talks to Docker via DOCKER_HOST (set to the
+# docker-socket-proxy in compose), so no direct /var/run/docker.sock
+# mount is needed.
+#
+# Why custom: willfarrell/autoheal:1.2.0 is incompatible with TCP
+# DOCKER_SOCK — see scripts/autoheal.py docstring + memory
+# [[feedback_no_revert_to_known_bad]].
+#
+# 30MB final image (alpine + python + docker SDK), pinned digests.
+
+FROM python:3.13-alpine3.20@sha256:fcbcbbecdeae71d3b77445d9144d1914df55110f825ab62b04a66c7c33c09373
+
+# docker SDK — pinned. Latest 7.x as of 2026-05-30.
+RUN pip install --no-cache-dir docker==7.1.0
+
+COPY scripts/autoheal.py /app/autoheal.py
+RUN chmod +x /app/autoheal.py
+
+# Non-root for defense-in-depth (autoheal only needs to send HTTP to the
+# proxy; no need for any host capability). nobody:65534 is the standard
+# unprivileged user on alpine.
+USER 65534:65534
+
+# Simple liveness — the process is up + can reach the proxy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import docker; docker.from_env(timeout=5).ping()" || exit 1
+
+CMD ["python", "-u", "/app/autoheal.py"]
