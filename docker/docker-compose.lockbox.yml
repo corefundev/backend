@@ -163,6 +163,21 @@ services:
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
+  # grafana (custom image, 2026-05-31) bootstraps GRAFANA_PASSWORD
+  # from Lockbox at startup via scripts/grafana_entrypoint.sh →
+  # lockbox_bootstrap.sh. Closes the slip from task #40 (briefly
+  # had the password in /srv/backend/.env). LOCKBOX_ALLOWED_KEYS
+  # is tight to one key — Grafana sees nothing else from the secret
+  # bundle. See [[feedback_no_secrets_in_env]].
+  grafana:
+    environment:
+      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
+      LOCKBOX_ALLOWED_KEYS: "GRAFANA_PASSWORD"
+      GRAFANA_PASSWORD: ""
+    volumes:
+      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+
   # postgres-exporter (custom image) bootstraps DATABASE_URL from
   # Lockbox — closes the last plaintext-secret hole in /srv/backend/.env
   # (the postgres password used to live there because upstream's

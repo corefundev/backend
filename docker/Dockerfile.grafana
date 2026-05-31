@@ -1,0 +1,33 @@
+# Custom grafana image — bakes Lockbox-bootstrap deps so the admin
+# password is fetched from Yandex Lockbox at startup. Avoids ever
+# writing GRAFANA_PASSWORD to /srv/backend/.env (the slip caught
+# 2026-05-31 task #40 → see [[feedback_no_secrets_in_env]]). Same
+# pattern as Dockerfile.alertmanager / Dockerfile.backup.
+
+FROM grafana/grafana:10.4.2@sha256:7d5faae481a4c6f436c99e98af11534f7fd5e8d3e35213552dd1dd02bc393d2e
+
+# Grafana's image is alpine-based. apk add the few extras the Lockbox
+# shell loader needs (curl + jq + openssl + ca-certificates). coreutils
+# is required by lockbox_bootstrap.sh's `mktemp -d` + base64 usage.
+USER root
+RUN apk add --no-cache \
+        curl \
+        jq \
+        openssl \
+        coreutils \
+        ca-certificates
+
+COPY scripts/lockbox_bootstrap.sh   /usr/local/bin/lockbox_bootstrap.sh
+COPY scripts/grafana_entrypoint.sh  /usr/local/bin/grafana_entrypoint.sh
+RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
+             /usr/local/bin/grafana_entrypoint.sh
+
+# Stay as root — same trade-off as Dockerfile.alertmanager / backup.
+# lockbox_bootstrap reads the bind-mounted SA key (mode 644 owned by
+# deploy:deploy; grafana's default UID 472 can't read it). The SA key's
+# actual protection is the parent-dir 700 mode (see
+# docker-compose.lockbox.yml notes). Upstream's /run.sh handles the
+# grafana-server start regardless of UID.
+
+ENTRYPOINT ["/usr/local/bin/grafana_entrypoint.sh"]
+CMD []

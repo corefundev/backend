@@ -301,7 +301,14 @@ docker compose $COMPOSE_ARGS up -d --build --wait postgres 2>&1 \
 # below handles the staging case where nginx isn't defined (nginx lives
 # in the prod overlay only — `up -d --build nginx` exits non-zero on
 # staging, the iteration logs a warning and the loop continues).
-for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup docker-socket-proxy autoheal nginx; do
+# grafana is in the loop because (a) the custom Dockerfile.grafana
+# build (2026-05-31) needs --build to pick up the Lockbox-aware
+# entrypoint, and (b) Grafana's dashboard provisioner only scans
+# /etc/grafana/provisioning at container start, so a new dashboard
+# JSON shipped via rsync stays invisible until a recreate (verified
+# 2026-05-31 task #40 — manual `docker restart` was required for
+# the audit-log dashboard to appear).
+for svc in postgres-exporter pgbouncer mlflow prometheus alertmanager backup docker-socket-proxy autoheal nginx grafana; do
     echo "    --- $svc ---"
     # --no-deps prevents compose's buildx bake from cascading into other
     # services' build contexts. Without it, `up -d --build nginx`
