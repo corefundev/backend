@@ -22,8 +22,21 @@ RUN chmod +x /app/autoheal.py
 # unprivileged user on alpine.
 USER 65534:65534
 
-# Simple liveness — the process is up + can reach the proxy.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import docker; docker.from_env(timeout=5).ping()" || exit 1
+# Liveness via heartbeat-file mtime — autoheal.py rewrites
+# /run/autoheal.heartbeat after every successful poll. The probe is a
+# pure-shell stat (no Python start, no docker-SDK import, no network):
+# on this 0.1-CPU sidecar a cold `import docker` measured 5.6-6.5s,
+# blowing the 5s timeout so the old `python -c …ping()` probe failed
+# EVERY interval despite a healthy poller. A `stat` of the heartbeat is
+# sub-second AND tests the poller's real liveness (a wedged poller or
+# an unreachable proxy stops refreshing the file → unhealthy).
+#
+# start-period is generous (45s) so the slow cold start (python +
+# import docker ~6s + first poll, all at 0.1 CPU) lands the first
+# heartbeat before failures count. Stale threshold = 90s (3× the 30s
+# poll interval) tolerates 2 missed polls before flagging.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD [ -f /run/autoheal.heartbeat ] && \
+        [ "$(( $(date +%s) - $(stat -c %Y /run/autoheal.heartbeat) ))" -lt 90 ]
 
 CMD ["python", "-u", "/app/autoheal.py"]

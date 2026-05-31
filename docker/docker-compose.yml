@@ -1076,6 +1076,14 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Writable scratch for the liveness heartbeat (read_only:true makes
+    # the rest of the FS immutable). autoheal.py writes
+    # /run/autoheal.heartbeat after each successful poll; the Dockerfile
+    # HEALTHCHECK stats its mtime. tmpfs = in-memory, so the read_only
+    # security posture is preserved (nothing lands on a real writable
+    # layer). 1m is ample for a single epoch-timestamp file.
+    tmpfs:
+      - /run:size=1m
     # R5-M10 — bound docker json-log file size.
     logging: *log-rotation
 
