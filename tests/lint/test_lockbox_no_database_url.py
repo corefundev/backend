@@ -135,6 +135,38 @@ def test_lockbox_blanks_anchor_omits_database_url():
 # ── 3. Backup-service compose-interpolation regression ─────────────
 
 
+def test_x_common_env_has_no_database_url_interpolation():
+    """The `x-common-env` anchor (applied via YAML merge to api,
+    worker, scan-worker, process-worker, migrate) must NOT set
+    DATABASE_URL or DATABASE_URL_REPLICA via compose-time
+    `${POSTGRES_PASSWORD}` interpolation.
+
+    Why: that pattern only worked pre-PR-C because the lockbox-blanks
+    overlay blanked the var back to "" at compose merge time, letting
+    vault_agent's bootstrap_secrets() inject the real value from
+    Lockbox into the running process's env. After PR-C dropped the
+    blank, the placeholder-pwd value from `.env` interpolation
+    survived into the container — that's the bug that broke staging
+    CD #26714324409 (`password authentication failed for user "sku"`
+    in the migrate container, 2026-05-31).
+
+    The DSN is now composed inside the Python process by
+    `_compose_database_urls_from_components` from POSTGRES_PASSWORD +
+    DB_HOST/PORT/NAME/USER components. There is no compose-env step
+    that needs the composed DSN.
+    """
+    compose = _load_compose(_MAIN)
+    common_env = compose.get("x-common-env") or {}
+    leaked = [k for k in _FORBIDDEN_KEYS if k in common_env]
+    assert not leaked, (
+        f"x-common-env carries forbidden keys: {leaked}. Drop them — "
+        f"DATABASE_URL is composed at process startup by "
+        f"src/auth/vault_agent.py::_compose_database_urls_from_components, "
+        f"not at compose-merge time. Re-adding the compose-time "
+        f"interpolation regresses the R10 Phase 0-B PR-C hotfix."
+    )
+
+
 def test_backup_service_has_no_database_url_in_compose_env():
     """The main docker-compose.yml `backup:` service.environment must
     NOT set DATABASE_URL.
