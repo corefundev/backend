@@ -1082,8 +1082,14 @@ services:
     # HEALTHCHECK stats its mtime. tmpfs = in-memory, so the read_only
     # security posture is preserved (nothing lands on a real writable
     # layer). 1m is ample for a single epoch-timestamp file.
+    #
+    # mode=1777 is REQUIRED: docker mounts a tmpfs root-owned mode-0755
+    # by default, but this container runs as USER 65534 (nobody) — it
+    # couldn't create the heartbeat file (verified prod: `Permission
+    # denied: /run/autoheal.heartbeat`). 1777 = world-writable + sticky
+    # (same as /tmp), uid-agnostic so it survives a future USER change.
     tmpfs:
-      - /run:size=1m
+      - /run:size=1m,mode=1777
     # R5-M10 — bound docker json-log file size.
     logging: *log-rotation
 

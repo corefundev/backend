@@ -399,7 +399,18 @@ def test_autoheal_has_tmpfs_for_heartbeat_under_readonly():
     )
     # ... and a tmpfs must cover /run for the heartbeat write.
     tmpfs = auto.get("tmpfs") or []
-    assert any(str(t).startswith("/run") for t in tmpfs), (
+    run_mounts = [str(t) for t in tmpfs if str(t).startswith("/run")]
+    assert run_mounts, (
         f"autoheal must tmpfs-mount /run so the read_only container can "
         f"write /run/autoheal.heartbeat; got tmpfs={tmpfs!r}"
+    )
+    # The mount MUST set mode=1777 — docker mounts a tmpfs root-owned
+    # mode-0755 by default, but the container runs as USER 65534
+    # (nobody), which then can't create the heartbeat file (verified
+    # prod 2026-06-01: `Permission denied: /run/autoheal.heartbeat`,
+    # autoheal stuck unhealthy). Without the mode the whole fix is inert.
+    assert any("mode=1777" in m for m in run_mounts), (
+        f"the /run tmpfs must set mode=1777 (world-writable + sticky) so "
+        f"the nobody user can write the heartbeat — default 0755 root-"
+        f"owned tmpfs blocks it. Got {run_mounts!r}"
     )
