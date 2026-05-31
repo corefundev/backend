@@ -44,7 +44,11 @@
 x-lockbox-blanks: &lockbox-blanks
   YC_SA_KEY_FILE:                  /run/secrets/yc-sa-key.json
   YC_LOCKBOX_SECRET_ID:            "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
-  DATABASE_URL:                    ""
+  # NB: DATABASE_URL is intentionally NOT blanked here. After R10 Phase
+  # 0-B PR-C (2026-05-31), the composed DATABASE_URL entry no longer
+  # exists in Lockbox — DSN is composed at runtime from POSTGRES_PASSWORD
+  # + DB_HOST/PORT/NAME/USER components. See
+  # `src/auth/vault_agent.py::_compose_database_urls_from_components`.
   AWS_ACCESS_KEY_ID:               ""
   AWS_SECRET_ACCESS_KEY:           ""
   S3_UNTRUSTED_ACCESS_KEY_ID:      ""
@@ -178,25 +182,22 @@ services:
     volumes:
       - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
 
-  # postgres-exporter (custom image) bootstraps DATABASE_URL from
-  # Lockbox — closes the last plaintext-secret hole in /srv/backend/.env
-  # (the postgres password used to live there because upstream's
-  # exporter image is distroless and couldn't run lockbox_bootstrap.sh).
+  # postgres-exporter (custom image) bootstraps its postgres connection
+  # from Lockbox components (POSTGRES_PASSWORD + DB_HOST/PORT/NAME/USER)
+  # — closes the last plaintext-secret hole in /srv/backend/.env (the
+  # postgres password used to live there because upstream's exporter
+  # image is distroless and couldn't run lockbox_bootstrap.sh).
   #
-  # R10 Phase 0-B — allowlist now carries BOTH the legacy composed
-  # DATABASE_URL AND the component set (POSTGRES_PASSWORD + DB_HOST/
-  # PORT/NAME/USER) so the transition can roll forward+back safely:
-  #   - if DATABASE_URL is in Lockbox → entrypoint uses it directly
-  #   - if absent → entrypoint composes from components
-  # Once the composed DATABASE_URL entry is dropped from Lockbox
-  # (separate PR after this lands clean), the component path is the
-  # only one. See scripts/postgres_exporter_entrypoint.sh.
+  # R10 Phase 0-B PR-C (2026-05-31) — the composed DATABASE_URL Lockbox
+  # entry is gone; the entrypoint always composes the DSN from
+  # components. Single source of truth for the postgres password
+  # (POSTGRES_PASSWORD) — closes the R8-12 v1 SASL trap (2026-05-25).
+  # See scripts/postgres_exporter_entrypoint.sh.
   postgres-exporter:
     environment:
       YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
-      LOCKBOX_ALLOWED_KEYS: "DATABASE_URL POSTGRES_PASSWORD DB_HOST DB_PORT DB_NAME DB_USER"
-      DATABASE_URL:       ""
+      LOCKBOX_ALLOWED_KEYS: "POSTGRES_PASSWORD DB_HOST DB_PORT DB_NAME DB_USER"
       POSTGRES_PASSWORD:  ""
       DB_HOST:            ""
       DB_PORT:            ""

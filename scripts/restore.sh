@@ -18,6 +18,15 @@
 set -eu
 
 SRC="${1:?Usage: restore.sh <backup-path>}"
+
+# R10 Phase 0-B PR-C (2026-05-31) — compose DATABASE_URL from
+# Lockbox components if not directly provided. Single source of truth
+# (POSTGRES_PASSWORD). Mirrors cron_wrapper.sh + Python composer.
+if [ -f /scripts/compose_database_url.sh ]; then
+    . /scripts/compose_database_url.sh
+    compose_database_url || exit $?
+fi
+
 : "${DATABASE_URL:?missing}"
 : "${BACKUP_PASSPHRASE:?missing}"
 

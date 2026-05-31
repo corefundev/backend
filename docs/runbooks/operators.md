@@ -29,8 +29,17 @@ composed secret is the trap these scripts avoid).
 |---|---|---|
 | `scripts/lockbox_set_metrics_token.sh` | `METRICS_TOKEN` | Rotating the Prometheus→api `/metrics` bearer token (R10-S6). |
 | `scripts/lockbox_set_mlflow_s3.sh` | `S3_MLFLOW_*` (5 keys) | Pointing MLflow at its dedicated Selectel artifact bucket (R8-12). Per-env: staging→kz-1, prod→ru-7 (see [[project_selectel_iam_cross_bucket]]). |
-| `scripts/lockbox_set_replica_dsn.sh` | `DATABASE_URL_REPLICA` | Setting/rotating the read-replica DSN (R10 Phase 0-B will drop the composed entry in favour of components — check task #18 status before using). |
 | `scripts/lockbox_set_s3_backup_creds.sh` | `S3_BACKUP_*` | Pointing backups at the dedicated Beget backup bucket, separate from client-data (R5-18). |
+
+> The previous `scripts/lockbox_set_replica_dsn.sh` was removed in
+> R10 Phase 0-B PR-C (2026-05-31). The composed `DATABASE_URL_REPLICA`
+> Lockbox entry no longer exists — the replica DSN is composed at
+> runtime from `POSTGRES_PASSWORD` + `DB_HOST_REPLICA` +
+> `DB_PORT_REPLICA` + `DB_NAME_REPLICA` + `DB_USER_REPLICA` Lockbox
+> components (see
+> `src/auth/vault_agent.py::_compose_database_urls_from_components`).
+> To rotate the replica password: just rotate `POSTGRES_PASSWORD_REPLICA`
+> (or `POSTGRES_PASSWORD` if the replica shares the user).
 
 > ⚠️ Secrets only ever live in Lockbox, never `.env`
 > ([[feedback_no_secrets_in_env]]). These scripts write to Lockbox;

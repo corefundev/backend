@@ -23,7 +23,9 @@
 # original setup from scratch.
 #
 # DOES NOT do:
-#   - Switch DATABASE_URL in Lockbox (that's Phase 2 — manual via yc CLI)
+#   - Switch DB_HOST in Lockbox (that's Phase 2 — manual via yc CLI;
+#     after R10 Phase 0-B PR-C the DSN is composed from components,
+#     so failover means swapping the component, not the composed URL)
 #   - Restart app stack on api.testcore.ru (Phase 2)
 #   - Re-bootstrap old primary as new replica (Phase 3 — failback.sh)
 #   - Adjust prometheus / firewall / TLS certs (Phase 4)
@@ -129,14 +131,17 @@ echo
 echo "  Next steps (manual — see deploy/PROMOTE.md):"
 echo
 echo "  Phase 2 — App cutover:"
-echo "    a) Update DATABASE_URL in Lockbox to point to new primary"
+echo "    a) Update DB_HOST (and DB_PORT if changed) in Lockbox to"
+echo "       point at the new primary. After R10 Phase 0-B PR-C the"
+echo "       DSN is composed from components — failover = swap the"
+echo "       component, not the composed URL."
 echo "       (yc lockbox secret add-version --payload …)"
 echo "    b) Adjust pg_hba on new primary to accept app traffic from"
 echo "       api.testcore.ru (62.217.181.157)"
 echo "    c) Adjust pg-firewall iptables on db-replica VPS to allow"
 echo "       app traffic, not just old replication CIDR"
 echo "    d) Restart api/worker containers on api.testcore.ru so they"
-echo "       pick up new DATABASE_URL via vault_agent at import time"
+echo "       re-compose DATABASE_URL from the new DB_HOST at startup"
 echo
 echo "  Phase 3 — When old primary is recoverable:"
 echo "    bash scripts/failback.sh"

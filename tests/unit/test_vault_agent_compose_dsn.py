@@ -29,11 +29,35 @@ def _scrub_env(monkeypatch):
     yield
 
 
-def test_compose_skips_when_password_missing(monkeypatch):
-    """No POSTGRES_PASSWORD → no-op. Pre-existing DATABASE_URL preserved."""
+def test_compose_raises_when_password_missing(monkeypatch):
+    """No POSTGRES_PASSWORD → RuntimeError.
+
+    Behavior change in R10 Phase 0-B PR-C (2026-05-31): the previous
+    silent-return-and-preserve-existing-DATABASE_URL fallback was
+    removed. After this PR, POSTGRES_PASSWORD is the only source of
+    truth — no composed-with-pwd DATABASE_URL entry exists in Lockbox
+    to fall back to. A missing component is a misconfiguration that
+    must surface immediately, not a state to silently accept.
+    See [[feedback_enterprise_grade]] fail-closed-by-default.
+    """
+    # Even with a pre-existing DATABASE_URL, the composer raises —
+    # because the pre-existing value cannot be trusted to match the
+    # current POSTGRES_PASSWORD (the R8-12 v1 SASL trap precisely).
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:1/d")
-    vault_agent._compose_database_urls_from_components()
-    assert os.environ["DATABASE_URL"] == "postgresql://x:y@h:1/d"
+    with pytest.raises(RuntimeError, match="POSTGRES_PASSWORD is empty"):
+        vault_agent._compose_database_urls_from_components()
+
+
+def test_compose_raises_with_both_unset(monkeypatch):
+    """Both POSTGRES_PASSWORD AND DATABASE_URL unset → RuntimeError.
+    The error message must point at the resolution path so the operator
+    can fix it without source-diving."""
+    with pytest.raises(RuntimeError) as exc_info:
+        vault_agent._compose_database_urls_from_components()
+    msg = str(exc_info.value)
+    assert "POSTGRES_PASSWORD" in msg, "error must name the missing var"
+    assert "Lockbox" in msg, "error must point at Lockbox configuration"
+    assert "LOCKBOX_ALLOWED_KEYS" in msg, "error must mention the allowlist gate"
 
 
 def test_compose_main_from_components_with_defaults(monkeypatch):
@@ -122,10 +146,3 @@ def test_compose_replica_password_falls_back_to_main(monkeypatch):
     monkeypatch.setenv("DB_HOST_REPLICA", "r.example.com")
     vault_agent._compose_database_urls_from_components()
     assert "shared-pwd" in os.environ["DATABASE_URL_REPLICA"]
-
-
-# (CI nudge — R10 Phase 0-B baseline drift required force-push;
-#  GitHub Actions appears to have dropped the pull_request:synchronize
-#  events from the force-pushes — adding a real-content delta to trigger
-#  a fresh CI run for the same logical change. This comment is harmless
-#  and will be cleaned up if CI passes.)
