@@ -1,0 +1,129 @@
+# R10 task #38 — operator-triggered E2E test of the alerting pipeline.
+#
+# Proves on a LIVE environment that:
+#   metric push → prometheus scrape → rule eval → alertmanager →
+#   telegram delivery
+# all work end-to-end. The third leg of the alert-quality trilogy:
+#   • PR #40 — promtool acceptance harness (logic gate, no live deps)
+#   • PR #60 — static lint metric→producer (catches phantom alerts at PR time)
+#   • #38 (this) — live pipeline trust (catches secret/route/connectivity drift)
+#
+# How it works:
+#   1. SSH to target VPS, exec backup container to push
+#      `sku_synthetic_alert_test_request_timestamp_seconds` via
+#      scripts/synthetic_alert_push.sh (curl → pushgateway).
+#   2. Wait 90s for prometheus to scrape + the rule to evaluate.
+#   3. Query Prometheus /api/v1/query for ALERTS{alertname="SyntheticAlertTest"}
+#      with alertstate="firing" — assert non-empty.
+#   4. Query Alertmanager /api/v2/alerts for the active alert — assert
+#      it was forwarded to AM (proves the prometheus.yml alertmanager
+#      block + AM-side routing config is wired).
+#   5. Print a notice telling the operator to check Telegram — the last
+#      leg (AM → Telegram bot) is the human-confirmation step.
+#
+# Cleanup: NONE NEEDED. The alert auto-resolves ~5 min after the push
+# (rule expression: `(time() - ts) < 300`). One Telegram message per
+# run (group_interval=5m, repeat_interval=6h in alertmanager.yml.tpl).
+#
+# Default target: staging. Production allowed via explicit input —
+# operators should expect ONE [E2E test] message in the Warning
+# Telegram thread when they trigger this on prod.
+
+name: Synthetic Alert E2E Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which environment to verify the alerting pipeline on'
+        type: choice
+        required: true
+        default: staging
+        options:
+          - staging
+          - production
+
+jobs:
+  synthetic-alert-test:
+    name: E2E alerting pipeline (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Configure SSH for ${{ inputs.target }}
+        env:
+          SSH_KEY: ${{ inputs.target == 'staging' && secrets.STAGING_SSH_PRIVATE_KEY || secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ inputs.target == 'staging' && secrets.STAGING_SSH_KNOWN_HOSTS || secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY"         > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Push synthetic metric to pushgateway
+        env:
+          HOST: ${{ inputs.target == 'staging' && secrets.STAGING_HOST || secrets.VPS_HOST }}
+          USER: ${{ inputs.target == 'staging' && secrets.STAGING_USER || secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # `docker exec` into backup container — it has curl + the
+          # pushgateway URL reachable on the docker_default network.
+          # The script itself does the push and is bind-mounted via the
+          # backup service's `../scripts:/scripts:ro` volume.
+          ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o ConnectTimeout=15 \
+              "$USER@$HOST" \
+              'docker exec docker-backup-1 sh /scripts/synthetic_alert_push.sh'
+
+      - name: Wait 90s for scrape + rule evaluation
+        run: |
+          echo "Waiting 90s for prometheus to scrape pushgateway + evaluate the rule…"
+          sleep 90
+
+      - name: Verify Prometheus has SyntheticAlertTest firing
+        env:
+          HOST: ${{ inputs.target == 'staging' && secrets.STAGING_HOST || secrets.VPS_HOST }}
+          USER: ${{ inputs.target == 'staging' && secrets.STAGING_USER || secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          QUERY='ALERTS%7Balertname%3D%22SyntheticAlertTest%22%2Calertstate%3D%22firing%22%7D'
+          OUT=$(ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+                    -o ConnectTimeout=15 \
+                    "$USER@$HOST" \
+                    "docker exec docker-prometheus-1 wget -qO- \"http://127.0.0.1:9090/api/v1/query?query=$QUERY\"")
+          echo "$OUT" | head -c 500 ; echo
+          if echo "$OUT" | grep -q '"alertname":"SyntheticAlertTest"'; then
+              echo "::notice::Prometheus reports SyntheticAlertTest as firing — leg 1 OK"
+          else
+              echo "::error::SyntheticAlertTest is NOT firing in prometheus — scrape or rule eval broken"
+              exit 1
+          fi
+
+      - name: Verify Alertmanager received the alert
+        env:
+          HOST: ${{ inputs.target == 'staging' && secrets.STAGING_HOST || secrets.VPS_HOST }}
+          USER: ${{ inputs.target == 'staging' && secrets.STAGING_USER || secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          OUT=$(ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+                    -o ConnectTimeout=15 \
+                    "$USER@$HOST" \
+                    'docker exec docker-alertmanager-1 wget -qO- "http://127.0.0.1:9093/api/v2/alerts?filter=alertname%3DSyntheticAlertTest"')
+          echo "$OUT" | head -c 500 ; echo
+          if echo "$OUT" | grep -q '"alertname":"SyntheticAlertTest"'; then
+              echo "::notice::Alertmanager has the alert active — leg 2 OK"
+          else
+              echo "::error::Alertmanager did NOT receive the alert — prometheus→AM link broken"
+              exit 1
+          fi
+
+      - name: Final notice (Telegram is the human-confirmation leg)
+        run: |
+          echo "::notice::══════════════════════════════════════════════════════════"
+          echo "::notice::E2E legs 1+2 verified. Now check the 'Alert System' Telegram"
+          echo "::notice::supergroup, Warning thread (id=37), for ONE [E2E test] message"
+          echo "::notice::within the next ~30s. That confirms leg 3 (AM → Telegram)."
+          echo "::notice::Alert auto-resolves ~5 min after the push; no cleanup needed."
+          echo "::notice::══════════════════════════════════════════════════════════"

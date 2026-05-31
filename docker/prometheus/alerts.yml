@@ -690,3 +690,42 @@ groups:
       # Loki ruler; see the NOTE at the top of this group. It is wired
       # to alertmanager via the ruler's alertmanager_url, not via this
       # file.)
+
+  # ── Synthetic E2E pipeline test (task #38) ───────────────────────
+  # The third leg of the alert-quality trilogy:
+  #   1. promtool acceptance harness (PR #40) — proves rule LOGIC is right
+  #   2. CI static lint (PR #60) — proves every sku_* metric has a producer
+  #   3. **THIS** — proves scrape → eval → alertmanager → Telegram routing
+  #      actually works end-to-end on the live infra
+  #
+  # Operator-triggered via .github/workflows/synthetic-alert-test.yml.
+  # The workflow SSHes to the target (staging by default; prod by
+  # explicit input), pushes sku_synthetic_alert_test_request_timestamp_seconds
+  # to pushgateway via scripts/synthetic_alert_push.sh, waits ~90s for
+  # prometheus to scrape + this alert to evaluate, then queries
+  # prometheus + alertmanager APIs to confirm the alert is firing and
+  # routed. Telegram delivery is the human-confirmation step.
+  #
+  # severity=`synthetic` is a NEW level distinct from critical/warning
+  # so it can be routed independently in alertmanager (currently it
+  # falls through to the warning thread, but the matcher in
+  # alertmanager.yml.tpl makes future routing to a dedicated test
+  # thread a one-line change).
+  - name: synthetic
+    rules:
+      - alert: SyntheticAlertTest
+        expr: |
+          (time() - sku_synthetic_alert_test_request_timestamp_seconds) < 300
+        # No `for:` window — fire on first eval. The metric's age is
+        # the firing condition; the alert auto-resolves ~5 min later
+        # when (time() - ts) crosses 300s. No manual cleanup needed.
+        labels:
+          severity: synthetic
+          team:     ops
+        annotations:
+          summary:     "[E2E test] scrape → AM → Telegram pipeline check"
+          description: |-
+            This alert is fired by .github/workflows/synthetic-alert-test.yml
+            to prove the alerting pipeline routes end-to-end. If you see
+            this message in Telegram, the pipeline is healthy. Auto-resolves
+            ~5 min after the workflow's push (no manual silence needed).

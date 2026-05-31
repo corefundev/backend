@@ -843,3 +843,43 @@ tests:
       - eval_time: 65m
         alertname: MirrorPruneStale
         exp_alerts: []
+
+  # ── SyntheticAlertTest (task #38) ───────────────────────────────
+  # Fires when (time() - sku_synthetic_alert_test_request_timestamp_seconds) < 300.
+  # Three behavioural cases: fresh push fires, stale push does NOT
+  # fire, absent metric does NOT fire (no absent() branch by design —
+  # the metric is operator-pushed on demand only).
+  - interval: 30s
+    name: "SyntheticAlertTest fires when push is fresh (<5 min)"
+    # Push at eval_time=0 carries a timestamp value of 0; promtool's
+    # time() at eval_time=2m returns 120, so (120 - 0) = 120 < 300 ✓
+    input_series:
+      - series: 'sku_synthetic_alert_test_request_timestamp_seconds{instance="sku-forecasting", job="synthetic_alert_test"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SyntheticAlertTest
+        exp_alerts:
+          - exp_labels: {instance: "sku-forecasting", job: "synthetic_alert_test", severity: synthetic, team: ops}
+            exp_annotations:
+              summary: "[E2E test] scrape → AM → Telegram pipeline check"
+              description: |-
+                This alert is fired by .github/workflows/synthetic-alert-test.yml to prove the alerting pipeline routes end-to-end. If you see this message in Telegram, the pipeline is healthy. Auto-resolves ~5 min after the workflow's push (no manual silence needed).
+
+  - interval: 1m
+    name: "SyntheticAlertTest does NOT fire after the 5 min window expires"
+    input_series:
+      - series: 'sku_synthetic_alert_test_request_timestamp_seconds{instance="sku-forecasting", job="synthetic_alert_test"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m       # time()-0 = 360s > 300s window → resolved
+        alertname: SyntheticAlertTest
+        exp_alerts: []
+
+  - interval: 1m
+    name: "SyntheticAlertTest does NOT fire when metric absent"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SyntheticAlertTest
+        exp_alerts: []

@@ -37,6 +37,21 @@ route:
         - severity = "warning"
       receiver: telegram-warning
 
+    # Synthetic (E2E pipeline test, alertname=SyntheticAlertTest) →
+    # warning thread for now (operators read it; the alert summary
+    # starts with "[E2E test]" so it's obvious it's not a real
+    # incident). Group_wait shortened so the workflow's verification
+    # poll catches the fire quickly. Repeat_interval long so a single
+    # E2E run produces one Telegram message, not a stream. The route
+    # exists as a distinct branch so a future move to a dedicated
+    # test thread is a one-line change here (no rule changes needed).
+    - matchers:
+        - severity = "synthetic"
+      receiver: telegram-warning
+      group_wait: 5s
+      group_interval: 5m
+      repeat_interval: 6h
+
 receivers:
   # 🔥 Critical — thread 6
   - name: telegram-critical
