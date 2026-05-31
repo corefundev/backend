@@ -55,6 +55,36 @@ def _stop_after_interval(stop_flag: list[bool], seconds: int) -> None:
         time.sleep(1)
 
 
+def _write_heartbeat(path: str) -> None:
+    """Record a liveness timestamp (epoch seconds) that the container
+    HEALTHCHECK reads.
+
+    Written after each SUCCESSFUL poll — so the file's mtime means "the
+    poller reached the Docker daemon and got a response this recently",
+    not merely "the proxy is listening". A wedged poller or an
+    unreachable proxy stops refreshing it, and the mtime-based
+    healthcheck flips to unhealthy.
+
+    Why mtime-of-a-file instead of the old
+    `python -c "import docker; ...ping()"` probe: on this 0.1-CPU
+    sidecar, a cold `import docker` (the full SDK + requests tree)
+    measured 5.6-6.5s — over the 5s healthcheck timeout — so the probe
+    failed EVERY interval even though the poller was healthy. A shell
+    `stat` of the heartbeat file is sub-second (no Python start, no SDK
+    import, no network) and tests the poller's actual liveness.
+
+    Best-effort: a heartbeat-write failure must NEVER crash the poller
+    (monitoring resilience must not break the thing it monitors). The
+    path lives on a tmpfs mount (`/run`) because the container is
+    `read_only: true` — see docker-compose.yml autoheal service.
+    """
+    try:
+        with open(path, "w") as fh:
+            fh.write(str(int(time.time())))
+    except OSError as e:  # pragma: no cover — defensive
+        _LOG.warning("heartbeat write to %s failed: %s", path, e)
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("AUTOHEAL_LOG_LEVEL", "INFO").upper(),
@@ -62,6 +92,9 @@ def main() -> int:
     )
     interval = int(os.environ.get("AUTOHEAL_INTERVAL", "30"))
     restart_timeout = int(os.environ.get("AUTOHEAL_TIMEOUT", "30"))
+    heartbeat_path = os.environ.get(
+        "AUTOHEAL_HEARTBEAT_FILE", "/run/autoheal.heartbeat"
+    )
     label_name, label_value = _parse_label(
         os.environ.get("AUTOHEAL_LABEL", "autoheal=true")
     )
@@ -75,6 +108,11 @@ def main() -> int:
         _LOG.error("can't reach Docker daemon (DOCKER_HOST=%s): %s",
                    os.environ.get("DOCKER_HOST", "<unset>"), e)
         return 1
+
+    # First heartbeat right after the startup ping succeeds, so the
+    # HEALTHCHECK has a fresh file to read before the first poll cycle
+    # completes (closes the cold-start window).
+    _write_heartbeat(heartbeat_path)
 
     _LOG.info(
         "started — polling every %ds for containers with label %s=%s "
@@ -97,6 +135,9 @@ def main() -> int:
             unhealthy = client.containers.list(
                 filters={"label": label_filter, "health": "unhealthy"},
             )
+            # Poll succeeded (reached the daemon, got a response) —
+            # refresh the liveness heartbeat the HEALTHCHECK reads.
+            _write_heartbeat(heartbeat_path)
             for c in unhealthy:
                 _LOG.warning("container %s (%s) unhealthy — restarting",
                              c.name, c.short_id)

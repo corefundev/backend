@@ -321,3 +321,85 @@ def test_autoheal_depends_on_proxy_healthy():
         f"autoheal must wait for proxy service_healthy, got "
         f"{proxy_dep.get('condition')!r}"
     )
+
+
+# ── (3) Heartbeat-based healthcheck (2026-06-01) ────────────────────
+#
+# The original HEALTHCHECK was `python -c "import docker;
+# docker.from_env(timeout=5).ping()"`. On the 0.1-CPU sidecar a cold
+# `import docker` (full SDK + requests tree) measured 5.6-6.5s — over
+# the 5s timeout — so the probe failed EVERY interval and the container
+# sat `unhealthy` despite a perfectly healthy poller (verified prod
+# 2026-05-31, FailingStreak 118). Replaced with a heartbeat file the
+# poller rewrites after each successful poll + a pure-shell stat probe.
+
+
+def test_autoheal_writes_a_heartbeat():
+    """The poller must refresh a liveness heartbeat so the (cheap,
+    shell-based) healthcheck has something fresh to stat. Without this
+    the new healthcheck would never pass."""
+    text = (_BACKEND / "scripts" / "autoheal.py").read_text(encoding="utf-8")
+    assert "_write_heartbeat" in text, (
+        "autoheal.py must define + call _write_heartbeat so the "
+        "container healthcheck can read a liveness timestamp"
+    )
+    assert "/run/autoheal.heartbeat" in text, (
+        "the default heartbeat path must be /run/autoheal.heartbeat "
+        "(a tmpfs mount — see test_autoheal_has_tmpfs_for_heartbeat)"
+    )
+
+
+def test_autoheal_healthcheck_is_shell_stat_not_docker_sdk():
+    """The HEALTHCHECK must NOT pay a cold `import docker` (5.6-6.5s on
+    0.1 CPU > the 5s timeout — the bug). It must be a pure-shell stat of
+    the heartbeat file."""
+    dockerfile = (_BACKEND / "docker" / "Dockerfile.autoheal").read_text(
+        encoding="utf-8"
+    )
+    # Find the HEALTHCHECK line(s). Crude but sufficient: the directive
+    # plus its line-continuations.
+    lines = dockerfile.splitlines()
+    hc_idx = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("HEALTHCHECK")),
+        None,
+    )
+    assert hc_idx is not None, "Dockerfile.autoheal must declare a HEALTHCHECK"
+    # Gather the directive + continuation lines.
+    block = []
+    i = hc_idx
+    while i < len(lines):
+        block.append(lines[i])
+        if not lines[i].rstrip().endswith("\\"):
+            break
+        i += 1
+    hc = "\n".join(block)
+    assert "/run/autoheal.heartbeat" in hc, (
+        "HEALTHCHECK must stat the heartbeat file /run/autoheal.heartbeat"
+    )
+    assert "import docker" not in hc, (
+        "HEALTHCHECK must NOT `import docker` — the cold SDK import (5.6-"
+        "6.5s on this 0.1-CPU sidecar) blows the 5s timeout, the exact "
+        "bug this change fixes. Use a shell stat of the heartbeat."
+    )
+    assert "stat" in hc, (
+        "HEALTHCHECK must use `stat` to read the heartbeat mtime/value"
+    )
+
+
+def test_autoheal_has_tmpfs_for_heartbeat_under_readonly():
+    """read_only:true makes the rootfs immutable, so the heartbeat needs
+    a writable tmpfs. /run must be tmpfs-mounted (in-memory — preserves
+    the read_only security posture)."""
+    s = _services(_BASE)
+    auto = s["autoheal"]
+    # read_only must stay true (the hardening) ...
+    assert auto.get("read_only") is True, (
+        "autoheal must remain read_only:true — the heartbeat uses tmpfs, "
+        "not a relaxation of read_only"
+    )
+    # ... and a tmpfs must cover /run for the heartbeat write.
+    tmpfs = auto.get("tmpfs") or []
+    assert any(str(t).startswith("/run") for t in tmpfs), (
+        f"autoheal must tmpfs-mount /run so the read_only container can "
+        f"write /run/autoheal.heartbeat; got tmpfs={tmpfs!r}"
+    )
