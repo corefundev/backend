@@ -1,0 +1,21 @@
+-- Record MLflow telemetry-logging failures on an OTHERWISE-SUCCESSFUL
+-- training run. R11 (2026-06-01).
+--
+-- Why a dedicated column (not the existing `error`):
+--   `error` means the RUN ITSELF FAILED — it's written on the status=failed
+--   path (task_queue._record_run_failed / reap_stale_runs) and a non-NULL
+--   `error` implies "no model produced".
+--   MLflow logging, by contrast, is best-effort TELEMETRY: when it fails the
+--   model is still trained + saved and forecasts are still generated, so the
+--   run is FINISHED/successful. But the failure must be OBSERVABLE, not
+--   silently swallowed — the R8-12 root cause was an invisibly-NULL
+--   mlflow_run_id with no signal that logging had degraded.
+--
+--   This column is NULL on a clean run and carries the error string
+--   ("<ExceptionType>: <message>") when MLflow logging degraded. It is
+--   surfaced by GET /clients/{id}/training-runs (SELECT * → TrainingRunRecord)
+--   so operators/UI can see which finished runs lack telemetry and why.
+--
+-- Idempotent: ADD COLUMN IF NOT EXISTS.
+ALTER TABLE sku_training_runs
+    ADD COLUMN IF NOT EXISTS mlflow_logging_error TEXT;

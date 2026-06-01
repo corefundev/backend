@@ -58,6 +58,9 @@ class TrainingRunRecord:
     model_path:    Optional[str]   = None
     mlflow_run_id: Optional[str]   = None
     error:         Optional[str]   = None
+    # R11: MLflow telemetry-logging failure on an otherwise-successful
+    # run (NULL = logged fine). Distinct from `error` (= run FAILED).
+    mlflow_logging_error: Optional[str] = None
 
 
 class PostgresTrainingRunsRegistry:
@@ -66,6 +69,7 @@ class PostgresTrainingRunsRegistry:
         "n_skus", "n_features", "n_rows",
         "wmape", "mase", "smape",
         "model_path", "mlflow_run_id", "error",
+        "mlflow_logging_error",
     }
 
     def __init__(self, database_url: str):
@@ -227,6 +231,7 @@ class PostgresTrainingRunsRegistry:
             model_path=row.get("model_path"),
             mlflow_run_id=row.get("mlflow_run_id"),
             error=row.get("error"),
+            mlflow_logging_error=row.get("mlflow_logging_error"),
         )
 
 

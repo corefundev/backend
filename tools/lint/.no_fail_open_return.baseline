@@ -13,14 +13,17 @@
 # pre-existing sites; R9-B item #14 closes the high-risk subset
 # (task_queue.py + train.py:301), the rest are triaged in R10.
 
-# ── R9-B item #2 — R8-12 MLflow architecture fix removes this site ──────
-src/pipeline/train.py:300  R9-T2-001 / T4-001 / T7-001 — R8-12 MLflow log swallow (best-effort telemetry; run_id stays None, handled downstream). -1 line after R11-M7 moved the temp-pkl unlink into a finally (2026-06-01)
+# ── R9-B item #2 — CLOSED 2026-06-01 (R11) ─────────────────────────────
+# train.py MLflow log swallow removed: extracted to _save_and_log_to_mlflow
+# which RETURNS explicit (run_id, error) state; the error is persisted to
+# sku_training_runs.mlflow_logging_error (migration 013) and surfaced in the
+# training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:737  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:742  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:750  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:770  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:741  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines after R11 _record_run_finished mlflow_logging_error persist, 2026-06-01)
+src/pipeline/task_queue.py:746  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
+src/pipeline/task_queue.py:754  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
+src/pipeline/task_queue.py:774  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,
@@ -29,8 +32,8 @@ src/pipeline/task_queue.py:770  R9-T4-001 — training fallback registry; closes
 src/pipeline/task_queue.py:199  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try
 src/pipeline/task_queue.py:213  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer
 src/pipeline/distributed_training.py:144  pre-R9 baseline; triage in R10 — Ray cluster start
-src/pipeline/train.py:89  pre-R9 baseline; triage in R10 — registry lookup in train pipeline
-src/pipeline/train.py:122  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline
+src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
+src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
 src/pipeline/streaming.py:197  pre-R9 baseline; triage in R10 — Kafka consumer poll
 src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
