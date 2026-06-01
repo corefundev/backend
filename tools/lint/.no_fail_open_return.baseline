@@ -67,11 +67,11 @@ src/api/routers/config.py:201  pre-R9 baseline; triage in R10 — config-reset w
 src/api/routers/ops.py:145  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. +4 lines after R11-H7 added logging + JSONResponse imports (2026-06-01)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
 src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics)
-src/api/routers/training.py:159  pre-R9 baseline; triage in R10 — trigger_training pre-check (lines +14 after R10-S1 gate)
-src/api/routers/training.py:168  pre-R9 baseline; triage in R10 — trigger_training pre-check (lines +14 after R10-S1 gate)
-src/api/routers/training.py:248  pre-R9 baseline; triage in R10 — trigger_training mid-flow (lines +14 after R10-S1 gate)
-src/api/routers/training.py:288  pre-R9 baseline; triage in R10 — trigger_training enqueue (lines +14 after R10-S1 gate)
-src/api/routers/training.py:301  pre-R9 baseline; triage in R10 — trigger_training fallback (lines +14 after R10-S1 gate)
+src/api/routers/training.py:171  pre-R9 baseline; triage in R10 — trigger_training pre-check (+12 lines after R11-H4 early-409 + import, 2026-06-02)
+src/api/routers/training.py:180  pre-R9 baseline; triage in R10 — trigger_training pre-check (+12 lines, R11-H4)
+src/api/routers/training.py:267  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+19 lines, R11-H4)
+src/api/routers/training.py:307  pre-R9 baseline; triage in R10 — trigger_training enqueue (+19 lines, R11-H4)
+src/api/routers/training.py:320  pre-R9 baseline; triage in R10 — trigger_training fallback (+19 lines, R11-H4)
 src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
 src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional

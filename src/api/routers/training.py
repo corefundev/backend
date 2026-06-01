@@ -48,6 +48,7 @@ from src.pipeline.task_queue import enqueue_training, get_job_status
 from src.plans.enforcement import PlanLimitExceeded, assert_sku_count_within_limit
 from src.plans.quota import (
     QuotaExceeded,
+    TrainingInProgress,
     check_training_quota,
     record_training_started,
 )
@@ -125,6 +126,17 @@ async def trigger_training(
     record   = registry.get(client_id)
     if record is None:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    # ── R11-H4 single-in-flight fast-fail (UX) ──────────────────────
+    # One training run per client at a time. The atomic gate in
+    # record_training_started is the race-safe enforcement; this early
+    # read avoids doing SKU/manifest work for an already-training client.
+    # (A dead claim self-heals after STALE_TRAINING_MINUTES — see the gate.)
+    if record.status == "training":
+        raise HTTPException(
+            status_code=409,
+            detail="A training run is already in progress for this client.",
+        )
 
     # ── Plan quota ──────────────────────────────────────────────────
     try:
@@ -224,10 +236,17 @@ async def trigger_training(
     #    race is lost here we surface 429 just like the entry-point check.
     try:
         record = record_training_started(registry, record)
+    except TrainingInProgress as e:
+        # R11-H4: lost the race to a concurrent start (the atomic gate's
+        # single-in-flight clause matched zero rows). 409, not 429.
+        raise HTTPException(status_code=409, detail=str(e))
     except QuotaExceeded as e:
         headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
         raise HTTPException(status_code=429, detail=str(e), headers=headers)
-    registry.update(client_id, status="training")
+    # NOTE: status='training' is set ATOMICALLY by the gate above
+    # (record_training_started → try_record_training_run). The previous
+    # separate, non-atomic `registry.update(status="training")` here was
+    # the R11-H4 clobber window — removed.
 
     # ── Pre-create training_runs row so the worker has something to
     #    update. Failure to write here must not block the actual run —

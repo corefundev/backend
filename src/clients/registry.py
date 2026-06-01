@@ -93,6 +93,13 @@ class ClientRecord:
     oauth_subject:  Optional[str] = None        # provider's stable user id
 
 
+# R11-H4 — a client may have at most ONE training run in flight. A claim
+# (status='training') older than this is treated as dead (worker
+# OOM/SIGKILL skips the in-process FAILED handler) so the gate self-heals
+# and the client is never permanently blocked. Matches reap_stale_runs(240).
+STALE_TRAINING_MINUTES = 240
+
+
 class ClientRegistry:
     """Abstract client registry interface."""
 
@@ -124,6 +131,14 @@ class ClientRegistry:
         now: datetime,
         month_start: datetime,
     ) -> Optional[dict]: ...
+
+    # R11-H4 — unstick clients left in a dead 'training' claim. Default
+    # no-op so non-DB registry variants don't break; Postgres + LocalFile
+    # override.
+    def reset_stuck_training_status(
+        self, stale_after_minutes: int = STALE_TRAINING_MINUTES
+    ) -> int:
+        return 0
 
 
 # ── R10-S2: column allowlist for update() ────────────────────────────
@@ -368,7 +383,8 @@ class PostgresClientRegistry(ClientRegistry):
                     THEN %s::timestamptz
                     ELSE training_runs_window_start
                 END,
-                last_trained_at = %s::timestamptz
+                last_trained_at = %s::timestamptz,
+                status = 'training'
             WHERE client_id = %s
               AND (
                   %s::int IS NULL
@@ -380,6 +396,15 @@ class PostgresClientRegistry(ClientRegistry):
                   %s::int IS NULL
                   OR last_trained_at IS NULL
                   OR last_trained_at < (%s::timestamptz - make_interval(hours => %s::int))
+              )
+              -- R11-H4: single in-flight training per client. Pass the gate
+              -- only if not already training, OR the existing claim is stale
+              -- (a dead run whose worker died before the FAILED handler) —
+              -- self-heals so a client is never permanently blocked.
+              AND (
+                  status <> 'training'
+                  OR last_trained_at IS NULL
+                  OR last_trained_at < (%s::timestamptz - make_interval(mins => %s::int))
               )
             RETURNING training_runs_this_month,
                       training_runs_window_start,
@@ -396,6 +421,7 @@ class PostgresClientRegistry(ClientRegistry):
                     client_id,                              # WHERE pk
                     cap, month_start_iso, cap,              # WHERE quota
                     cooldown_hours, now_iso, cooldown_hours,  # WHERE cooldown
+                    now_iso, STALE_TRAINING_MINUTES,        # WHERE in-flight (R11-H4)
                 ))
                 row = cur.fetchone()
             conn.commit()
@@ -406,6 +432,35 @@ class PostgresClientRegistry(ClientRegistry):
             "training_runs_window_start": str(row[1]) if row[1] is not None else None,
             "last_trained_at":            str(row[2]) if row[2] is not None else None,
         }
+
+    def reset_stuck_training_status(
+        self, stale_after_minutes: int = STALE_TRAINING_MINUTES
+    ) -> int:
+        """R11-H4 safety net — unstick clients left in status='training' by
+        a HARD worker death (OOM/SIGKILL skips the in-process FAILED
+        handler that normally flips status to 'failed'). Without this, the
+        single-in-flight gate would block such a client until the self-heal
+        window elapses AND the UI would show 'training' indefinitely.
+        Called at API startup alongside reap_stale_runs(240). Mirrors that
+        threshold."""
+        sql = """
+            UPDATE sku_clients
+               SET status = 'failed'
+             WHERE status = 'training'
+               AND (last_trained_at IS NULL
+                    OR last_trained_at < NOW() - make_interval(mins => %s::int))
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (stale_after_minutes,))
+                affected = cur.rowcount
+            conn.commit()
+        if affected:
+            logger.info(
+                "reset_stuck_training_status: unstuck %d client(s) from a dead "
+                "'training' claim (older than %d min)", affected, stale_after_minutes
+            )
+        return affected
 
     @staticmethod
     def _row_to_record(row: dict) -> ClientRecord:
@@ -584,6 +639,28 @@ class LocalFileRegistry(ClientRegistry):
             if row is None:
                 return None
 
+            # R11-H4: single in-flight training per client (self-healing).
+            # Mirrors the Postgres WHERE in-flight clause: reject if already
+            # 'training' unless the claim is stale (dead worker).
+            if row.get("status") == "training":
+                inflight_stale = True
+                last_inflight = row.get("last_trained_at")
+                if last_inflight:
+                    try:
+                        lt = datetime.fromisoformat(
+                            str(last_inflight).replace("Z", "+00:00")
+                        )
+                        if lt.tzinfo is None:
+                            lt = lt.replace(tzinfo=timezone.utc)
+                        from datetime import timedelta as _td_if
+                        inflight_stale = lt < (
+                            now - _td_if(minutes=STALE_TRAINING_MINUTES)
+                        )
+                    except ValueError:
+                        inflight_stale = True
+                if not inflight_stale:
+                    return None
+
             # Window reset check — mirror the SQL CASE expression.
             cur_window_iso = row.get("training_runs_window_start")
             cur_used = int(row.get("training_runs_this_month") or 0)
@@ -627,6 +704,7 @@ class LocalFileRegistry(ClientRegistry):
             row["training_runs_this_month"]   = new_used
             row["training_runs_window_start"] = new_window_iso
             row["last_trained_at"]            = now_iso
+            row["status"]                     = "training"   # R11-H4 claim
             data[client_id] = row
             self._save(data)
             return {
@@ -634,6 +712,36 @@ class LocalFileRegistry(ClientRegistry):
                 "training_runs_window_start": new_window_iso,
                 "last_trained_at":            now_iso,
             }
+
+    def reset_stuck_training_status(
+        self, stale_after_minutes: int = STALE_TRAINING_MINUTES
+    ) -> int:
+        """R11-H4 dev/test mirror of the Postgres reaper — unstick clients
+        left in a dead 'training' claim older than the window."""
+        from datetime import timedelta as _td_reap
+        cutoff = datetime.now(timezone.utc) - _td_reap(minutes=stale_after_minutes)
+        affected = 0
+        with self._lock:
+            data = self._load()
+            for cid, row in data.items():
+                if row.get("status") != "training":
+                    continue
+                last_iso = row.get("last_trained_at")
+                stale = True
+                if last_iso:
+                    try:
+                        lt = datetime.fromisoformat(str(last_iso).replace("Z", "+00:00"))
+                        if lt.tzinfo is None:
+                            lt = lt.replace(tzinfo=timezone.utc)
+                        stale = lt < cutoff
+                    except ValueError:
+                        stale = True
+                if stale:
+                    row["status"] = "failed"
+                    affected += 1
+            if affected:
+                self._save(data)
+        return affected
 
 
 def get_registry() -> ClientRegistry:
