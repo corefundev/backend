@@ -50,22 +50,6 @@ def _month_start(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def _next_month_start(dt: datetime) -> datetime:
-    """
-    First instant of the calendar month AFTER `dt`.
-
-    Avoids the `+ timedelta(days=32)` trick — that overshoots into
-    month+2 on end-of-month timestamps (e.g. May 31 + 32d = July 2,
-    which would round to July 1, skipping June entirely). Year
-    rollover is handled explicitly.
-    """
-    if dt.month == 12:
-        return dt.replace(year=dt.year + 1, month=1, day=1,
-                          hour=0, minute=0, second=0, microsecond=0)
-    return dt.replace(month=dt.month + 1, day=1,
-                      hour=0, minute=0, second=0, microsecond=0)
-
-
 # ── Public result types ───────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -91,6 +75,15 @@ class QuotaExceeded(Exception):
         super().__init__(reason)
         self.reason = reason
         self.retry_after_sec = retry_after_sec
+
+
+class TrainingInProgress(Exception):
+    """R11-H4 — raised when a client already has a training run in flight
+    (single-in-flight gate). Distinct from QuotaExceeded so the route can
+    map it to 409 Conflict (not 429 quota)."""
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 # ── Read-only status ──────────────────────────────────────────────────────────
@@ -149,18 +142,11 @@ def check_training_quota(record: ClientRecord) -> QuotaStatus:
             retry_after_sec=max(1, retry),
         )
 
-    if status.training_runs_remaining == 0:
-        # Monthly cap hit. See `_next_month_start` for why we can't
-        # just add 32 days and snap to day=1.
-        next_month_start = _next_month_start(_now())
-        retry = int((next_month_start - _now()).total_seconds())
-        raise QuotaExceeded(
-            f"Monthly training cap reached on plan '{status.plan}' "
-            f"({status.training_runs_used}/{status.training_runs_per_month}). "
-            f"Resets at {next_month_start.isoformat()}.",
-            retry_after_sec=max(1, retry),
-        )
-
+    # Monthly training limits were removed 2026-06-02 (early idea that
+    # didn't pan out — no plan caps monthly runs). The only training
+    # throttles are the per-plan cooldown above (Free=12h) and the
+    # single-in-flight guard (R11-H4, enforced atomically in
+    # record_training_started → try_record_training_run, all plans).
     return status
 
 
@@ -202,15 +188,21 @@ def record_training_started(
     )
 
     if result is None:
-        # Race window lost. Re-fetch + reuse the existing
-        # message-rendering path so the caller still gets a precise
-        # cooldown-vs-cap reason and the right Retry-After estimate.
+        # The atomic gate matched zero rows. Re-fetch to diagnose WHY so
+        # the route returns the right status code.
         fresh = registry.get(record.client_id)
+        # R11-H4: a live in-flight claim is the most likely cause (the gate
+        # now also enforces single-in-flight). Distinguish it from a quota
+        # denial → 409, not 429.
+        if fresh is not None and getattr(fresh, "status", None) == "training":
+            raise TrainingInProgress(
+                f"Client '{record.client_id}' already has a training run in "
+                "progress. Wait for it to finish before starting another."
+            )
         if fresh is not None:
-            # This either raises QuotaExceeded with a clean message
-            # OR returns the status (in which case the row really IS
-            # at the limit despite the check passing — that's the
-            # race we lost).
+            # Re-uses the message-rendering path so the caller gets a precise
+            # cooldown-vs-cap reason and the right Retry-After. Raises
+            # QuotaExceeded, or returns if the row really IS at the limit.
             check_training_quota(fresh)
         raise QuotaExceeded(
             f"Training quota gate denied client '{record.client_id}' "
@@ -225,5 +217,8 @@ def record_training_started(
             "last_trained_at":            result["last_trained_at"],
             "training_runs_this_month":   result["training_runs_this_month"],
             "training_runs_window_start": result["training_runs_window_start"],
+            # R11-H4: the atomic gate set status='training' in the DB; keep
+            # the returned in-memory record consistent.
+            "status":                     "training",
         }
     )

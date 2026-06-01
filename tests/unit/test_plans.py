@@ -16,7 +16,6 @@ from src.clients.registry import ClientRecord
 from src.plans.plans import Plan, PLAN_SPECS, all_specs_as_dicts, get_plan_spec
 from src.plans.quota import (
     QuotaExceeded, check_training_quota, get_status,
-    _next_month_start,
 )
 from src.plans.enforcement import (
     PlanDenied, PlanLimitExceeded,
@@ -63,7 +62,9 @@ def test_plan_limits_snapshot():
     assert free.max_skus == 30 and free.max_horizon_days == 7
     assert free.training_cooldown_hours == 12
     assert start.max_skus == 1500 and start.max_horizon_days == 30
-    assert start.training_runs_per_month == 15
+    # Monthly training limits removed 2026-06-02 — no plan caps monthly
+    # runs (Start, like Free + Business, is UNLIMITED).
+    assert start.training_runs_per_month is None
     assert biz.max_skus is None and biz.max_horizon_days == 90
     assert biz.training_runs_per_month is None
 
@@ -194,52 +195,23 @@ def test_business_has_no_cooldown():
     check_training_quota(rec)
 
 
-# ── Quota: monthly counter ─────────────────────────────────────────────────
+# ── Quota: NO monthly cap on any plan (removed 2026-06-02) ──────────────────
+# The per-month training cap was an early idea that didn't pan out. No plan
+# limits monthly runs anymore — the only training throttles are Free's 12h
+# cooldown and the single-in-flight guard (R11-H4). A high counter must NOT
+# block training on ANY plan (the counter column is now vestigial, pending
+# full removal).
 
-def test_start_counter_blocks_at_15():
-    now = datetime.now(timezone.utc)
+@pytest.mark.parametrize("plan", ["free", "start", "business"])
+def test_no_plan_caps_monthly_runs(plan):
     rec = _rec(
-        plan="start",
-        training_runs_this_month=15,
-        training_runs_window_start=_iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)),
+        plan=plan,
+        training_runs_this_month=9999,   # absurdly high — must not matter
+        last_trained_at=None,            # no cooldown in play
     )
-    with pytest.raises(QuotaExceeded, match="Monthly"):
-        check_training_quota(rec)
-
-
-def test_start_counter_at_14_passes():
-    now = datetime.now(timezone.utc)
-    rec = _rec(
-        plan="start",
-        training_runs_this_month=14,
-        training_runs_window_start=_iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)),
-    )
-    status = check_training_quota(rec)
-    assert status.training_runs_remaining == 1
-
-
-def test_start_counter_auto_resets_on_new_month():
-    # Window start from a month we've definitely rolled past.
-    old = datetime.now(timezone.utc).replace(year=2000, day=1, hour=0, minute=0, second=0, microsecond=0)
-    rec = _rec(
-        plan="start",
-        training_runs_this_month=15,
-        training_runs_window_start=_iso(old),
-    )
-    status = check_training_quota(rec)
-    assert status.training_runs_used == 0
-    assert status.training_runs_remaining == 15
-
-
-def test_free_counter_not_applied():
-    # FREE has no monthly cap; only cooldown. Even a high counter passes.
-    now = datetime.now(timezone.utc)
-    rec = _rec(
-        plan="free",
-        training_runs_this_month=9999,
-        last_trained_at=None,
-    )
-    check_training_quota(rec)
+    status = check_training_quota(rec)   # must NOT raise
+    # No plan exposes a monthly cap → remaining is unlimited (None).
+    assert status.training_runs_remaining is None
 
 
 # ── get_status snapshot ────────────────────────────────────────────────────
@@ -251,30 +223,6 @@ def test_get_status_shape_for_each_plan():
         assert st.model_display_name in {"Notus", "Aether", "Chronos"}
 
 
-# ── _next_month_start — regression for the +32d overshoot bug ─────────────
-#
-# Old impl `_month_start(_now() + timedelta(days=32)).replace(day=1)`
-# overshoots into month+2 on end-of-month timestamps and skips a calendar
-# month entirely. The audit on 2026-05-13 caught this; the fix uses
-# explicit month+1 arithmetic with year-rollover handling.
-
-@pytest.mark.parametrize(
-    "today,expected",
-    [
-        # Mid-month — old impl happened to be right by luck.
-        (datetime(2026, 5, 15, tzinfo=timezone.utc), datetime(2026, 6, 1, tzinfo=timezone.utc)),
-        # End-of-31-day month — the bug case. Old: +32d → Jul 2 → Jul 1.
-        # Should be Jun 1.
-        (datetime(2026, 5, 31, tzinfo=timezone.utc), datetime(2026, 6, 1, tzinfo=timezone.utc)),
-        # End-of-30-day month.
-        (datetime(2026, 4, 30, tzinfo=timezone.utc), datetime(2026, 5, 1, tzinfo=timezone.utc)),
-        # End-of-February (leap-year boundary handled by replace).
-        (datetime(2024, 2, 29, tzinfo=timezone.utc), datetime(2024, 3, 1, tzinfo=timezone.utc)),
-        # Year-rollover — December → next January.
-        (datetime(2026, 12, 15, tzinfo=timezone.utc), datetime(2027, 1, 1, tzinfo=timezone.utc)),
-        (datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
-         datetime(2027, 1, 1, tzinfo=timezone.utc)),
-    ],
-)
-def test_next_month_start_never_skips_a_month(today, expected):
-    assert _next_month_start(today) == expected
+# (test_next_month_start_never_skips_a_month removed 2026-06-02 with
+#  _next_month_start itself — that helper existed only to render the
+#  monthly-cap reset message, and monthly training limits were removed.)

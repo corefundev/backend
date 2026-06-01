@@ -174,6 +174,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("training_runs registry not reachable: %s", e)
 
+    # R11-H4 — companion reap on the CLIENT registry: a hard worker death
+    # leaves sku_clients.status='training' (the in-process FAILED handler
+    # never ran). Unstick it so the single-in-flight gate doesn't block
+    # the client and the UI doesn't show a phantom 'training'.
+    try:
+        from src.clients.registry import get_registry as _get_client_registry
+        _get_client_registry().reset_stuck_training_status(stale_after_minutes=240)
+    except Exception as e:
+        logger.warning("reset_stuck_training_status at startup failed: %s", e)
+
     # ── Lockbox SA-key rotation detection ────────────────────
     # Read the SA key id; compare against the most recent
     # secret_rotation event in audit_log. Emit a NEW event only when

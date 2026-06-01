@@ -132,8 +132,10 @@ def test_api_main_wraps_atomic_bump_with_429():
     )
     idx = text.find("record = record_training_started(registry, record)")
     assert idx > 0
-    # Window around the call must include both try and except QuotaExceeded.
-    window = text[max(0, idx - 400):idx + 400]
+    # Window around the call must include the try + both except arms.
+    # (Widened for R11-H4, which added the TrainingInProgress→409 arm
+    # ahead of the QuotaExceeded→429 arm + explanatory comments.)
+    window = text[max(0, idx - 500):idx + 900]
     assert "try:" in window and "record = record_training_started" in window, (
         "record_training_started call must be inside a try block (R4-16)"
     )
@@ -142,6 +144,13 @@ def test_api_main_wraps_atomic_bump_with_429():
     )
     assert "status_code=429" in window, (
         "race-lost path must surface HTTP 429 (matches fast-check shape)"
+    )
+    # R11-H4: an in-flight denial must map to 409 Conflict, not 429.
+    assert "except TrainingInProgress" in window, (
+        "must catch TrainingInProgress (R11-H4 single-in-flight gate)"
+    )
+    assert "status_code=409" in window, (
+        "in-flight-denied path must surface HTTP 409 (not 429)"
     )
 
 
@@ -237,16 +246,24 @@ def test_atomic_method_rejects_during_cooldown(file_reg):
     assert result is None, "cooldown active must block training"
 
 
-def test_concurrent_atomic_bumps_respect_cap(file_reg):
-    """Spin up 20 parallel threads against a cap of 5; exactly 5 must
-    succeed and 15 must be rejected. This is the actual TOCTOU
-    scenario R4-16 closes."""
+def test_concurrent_same_client_claims_serialized_to_one_by_h4(file_reg):
+    """R11-H4 (2026-06-01) SUPERSEDES the old R4-16 '5 of 20 concurrent
+    succeed' model. A client may now have at most ONE in-flight training,
+    so 20 concurrent claims for the SAME client serialize to exactly 1
+    success — the rest are blocked by the in-flight guard (status set to
+    'training' on the winning claim), not by the cap. The monthly cap is
+    still enforced, but over SEQUENTIAL runs — see
+    test_cap_respected_over_sequential_runs below.
+
+    (Pre-H4 this asserted 5/20; that scenario — 5 concurrent successful
+    runs for one client — is exactly the clobber H4 prevents.)"""
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     file_reg.update(
         "r4-16-test",
         training_runs_this_month=0,
         training_runs_window_start=month_start.isoformat(),
+        status="ready",
     )
 
     results = []
@@ -254,7 +271,7 @@ def test_concurrent_atomic_bumps_respect_cap(file_reg):
 
     def worker():
         r = file_reg.try_record_training_run(
-            "r4-16-test", cap=5, cooldown_hours=None,
+            "r4-16-test", cap=None, cooldown_hours=None,  # no monthly cap (removed)
             now=now, month_start=month_start,
         )
         with results_lock:
@@ -267,34 +284,31 @@ def test_concurrent_atomic_bumps_respect_cap(file_reg):
         t.join()
 
     successes = [r for r in results if r is not None]
-    rejections = [r for r in results if r is None]
-    assert len(successes) == 5, (
-        f"exactly 5 of 20 must succeed under cap=5 — got {len(successes)}"
+    assert len(successes) == 1, (
+        f"R11-H4 in-flight guard must serialize concurrent same-client "
+        f"claims to exactly 1 — got {len(successes)}"
     )
-    assert len(rejections) == 15, (
-        f"exactly 15 of 20 must be rejected — got {len(rejections)}"
-    )
-
-    # And the final stored counter is exactly the cap, not above.
-    from src.clients.registry import LocalFileRegistry
     rec = file_reg.get("r4-16-test")
-    assert rec.training_runs_this_month == 5
+    assert rec.training_runs_this_month == 1
+    assert rec.status == "training"
 
 
-def test_record_training_started_raises_quotaexceeded_when_atomic_denies(file_reg):
-    """End-to-end via the quota module: when the atomic method returns
-    None, record_training_started must raise QuotaExceeded so the API
-    layer maps it to 429."""
-    from src.clients.registry import ClientRecord
+def test_record_training_started_raises_quotaexceeded_on_cooldown(file_reg):
+    """End-to-end via the quota module: when the atomic gate denies for a
+    COOLDOWN reason (the only QuotaExceeded path left after monthly limits
+    were removed 2026-06-02), record_training_started must raise
+    QuotaExceeded so the API maps it to 429. (In-flight denials raise
+    TrainingInProgress → 409 — see test_r11_h4_inflight_guard.)"""
     from src.plans.quota import record_training_started, QuotaExceeded
 
     now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    # Fill the counter at cap on the START plan (15/month).
+    # Free plan = 12h cooldown. A recent last_trained_at + status NOT
+    # 'training' (a finished run) → the cooldown clause denies the gate.
     file_reg.update(
         "r4-16-test",
-        training_runs_this_month=15,
-        training_runs_window_start=month_start.isoformat(),
+        plan="free",
+        last_trained_at=now.isoformat(),
+        status="ready",
     )
     rec = file_reg.get("r4-16-test")
 

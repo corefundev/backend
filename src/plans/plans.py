@@ -151,7 +151,13 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_skus=1500,
         max_horizon_days=30,
         training_cooldown_hours=UNLIMITED,
-        training_runs_per_month=15,
+        # Monthly training limits removed 2026-06-02 — the per-month cap
+        # was an early idea that didn't pan out. No plan caps monthly
+        # runs now; the only training throttles are Free's 12h cooldown
+        # and the single-in-flight guard (R11-H4, all plans). The cap
+        # machinery is now dormant on every plan — scheduled for full
+        # removal (see the monthly-limit-machinery cleanup task).
+        training_runs_per_month=UNLIMITED,
         predict_requests_per_hour=5000,  # R2-10
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
