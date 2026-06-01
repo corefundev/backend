@@ -289,6 +289,7 @@ def run_training_pipeline(
     # ── MLflow logging ────────────────────────────────────────
     _progress(9, 9, "Запись эксперимента в MLflow")
     run_id = None
+    tmp_path = None
     try:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
@@ -296,10 +297,18 @@ def run_training_pipeline(
         if hasattr(final_model, "save"):
             final_model.save(tmp_path)
             run_id = log_to_mlflow(config, agg, final_model, tmp_path, client_id)
-        import os as _os
-        _os.unlink(tmp_path)
     except Exception as e:
         logger.warning(f"MLflow logging failed: {e}")
+    finally:
+        # R11-M7: unlink in finally so a failing save()/log_to_mlflow
+        # (e.g. MLflow down) doesn't leak a model-sized .pkl in the
+        # worker's /tmp on every failed run.
+        if tmp_path:
+            import os as _os
+            try:
+                _os.unlink(tmp_path)
+            except OSError:
+                pass
 
     elapsed = time.time() - t0
     logger.info(f"=== Training pipeline DONE in {elapsed:.1f}s ===")

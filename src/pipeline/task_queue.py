@@ -814,6 +814,15 @@ def get_job_status(job_id: str) -> dict:
         if not isinstance(meta, dict):
             meta = {}
         progress = meta.get("progress")
+        # R11-H5: NEVER return RQ's exc_info (full worker traceback —
+        # file paths, lib versions, sometimes data/DSN fragments) to the
+        # tenant. Log the full traceback server-side keyed by job_id and
+        # surface only a generic message (mirrors the trace_id discipline
+        # in inference.py).
+        error_msg = None
+        if job.is_failed:
+            logger.error("training job %s failed: %s", job_id, job.exc_info)
+            error_msg = "training job failed — contact support with this job_id"
         # Audit R3-1: client_id is stamped at enqueue time so the route
         # layer can authorise polls. Surfaced as `_client_id` (private
         # field — not part of the user-facing response shape).
@@ -821,7 +830,7 @@ def get_job_status(job_id: str) -> dict:
             "job_id":     job_id,
             "status":     status_str,
             "result":     job.result if job.is_finished else None,
-            "error":      str(job.exc_info) if job.is_failed else None,
+            "error":      error_msg,
             "enqueued":   _to_iso_utc(job.enqueued_at),
             "started":    _to_iso_utc(job.started_at),
             "ended":      _to_iso_utc(job.ended_at),
@@ -829,4 +838,6 @@ def get_job_status(job_id: str) -> dict:
             "_client_id": meta.get("client_id"),
         }
     except Exception as e:
-        return {"job_id": job_id, "status": "unknown", "error": str(e)}
+        # R11-H5: log the real error server-side; return a generic status.
+        logger.warning("get_job_status(%s) lookup error: %s", job_id, e)
+        return {"job_id": job_id, "status": "unknown", "error": "status lookup failed"}

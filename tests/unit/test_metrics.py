@@ -68,3 +68,20 @@ class TestAggregation:
             assert f"{metric}_mean" in agg
             assert f"{metric}_median" in agg
             assert f"{metric}_p90" in agg
+
+    def test_aggregate_metrics_all_nan_does_not_crash(self):
+        """R11-H6: an all-zero-sales catalog makes every per-SKU metric
+        NaN. After dropna() the column is empty and np.percentile([], 90)
+        used to raise IndexError, crashing the training run. The aggregate
+        must emit NaN instead of raising."""
+        df = pd.DataFrame({
+            "sku":   ["A", "B", "C"],
+            "mase":  [np.nan, np.nan, np.nan],
+            "wmape": [np.nan, np.nan, np.nan],
+            "smape": [np.nan, np.nan, np.nan],
+        })
+        agg = aggregate_metrics(df)  # must NOT raise IndexError
+        for metric in ["mase", "wmape", "smape"]:
+            assert np.isnan(agg[f"{metric}_mean"])
+            assert np.isnan(agg[f"{metric}_median"])
+            assert np.isnan(agg[f"{metric}_p90"])

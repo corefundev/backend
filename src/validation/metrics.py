@@ -107,6 +107,16 @@ def aggregate_metrics(
     agg: dict = {}
     for metric in ["mase", "wmape", "smape"]:
         vals = metrics_df[metric].dropna()
+        # R11-H6: an all-zero-sales catalog (or a fold where every SKU has
+        # sum(actual)==0) makes every per-SKU metric NaN → dropna() empties
+        # `vals` → np.percentile([], 90) raises IndexError, crashing the
+        # training run with an opaque error. Emit NaN ("no measurable
+        # demand") instead.
+        if len(vals) == 0:
+            agg[f"{metric}_mean"]   = float("nan")
+            agg[f"{metric}_median"] = float("nan")
+            agg[f"{metric}_p90"]    = float("nan")
+            continue
         agg[f"{metric}_mean"]   = float(vals.mean())
         agg[f"{metric}_median"] = float(vals.median())
         agg[f"{metric}_p90"]    = float(np.percentile(vals, 90))

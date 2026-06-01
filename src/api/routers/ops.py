@@ -19,9 +19,11 @@ that information).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.api.loaders import load_service_for_client
@@ -34,6 +36,8 @@ from src.audit import verify_chain
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
 from src.clients.registry import get_registry
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ops"])
 
@@ -139,7 +143,11 @@ async def readyz():
         conn.ping()
         checks["redis"] = {"ok": True}
     except Exception as e:
-        checks["redis"] = {"ok": False, "error": type(e).__name__}
+        # R11-H7: do NOT return the exception class to an unauthenticated
+        # probe (infra info disclosure). Log it server-side; the body
+        # carries only the boolean.
+        logger.warning("readyz: redis check failed: %s", type(e).__name__)
+        checks["redis"] = {"ok": False}
         overall_ok = False
 
     # Postgres (registry)
@@ -148,17 +156,20 @@ async def readyz():
         registry.list_clients()   # touches the DB
         checks["postgres"] = {"ok": True}
     except Exception as e:
-        checks["postgres"] = {"ok": False, "error": type(e).__name__}
+        logger.warning("readyz: postgres check failed: %s", type(e).__name__)
+        checks["postgres"] = {"ok": False}
         # Postgres is soft-required — the file fallback still lets the API
         # serve predictions. Don't fail readyz on it in file-mode.
         if os.environ.get("DATABASE_URL"):
             overall_ok = False
 
+    # R11-H7: JSONResponse serializes real JSON. The previous
+    # `str({...}).replace("'", '"')` emitted Python literals (False/None)
+    # → invalid JSON exactly in the failure case the probe exists for.
     status_code = 200 if overall_ok else 503
-    return Response(
-        content=str({"ready": overall_ok, "checks": checks}).replace("'", '"'),
+    return JSONResponse(
+        content={"ready": overall_ok, "checks": checks},
         status_code=status_code,
-        media_type="application/json",
     )
 
 
