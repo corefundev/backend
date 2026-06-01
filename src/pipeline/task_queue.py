@@ -248,6 +248,10 @@ def _record_run_finished(
                 smape=metrics.get("smape_global", metrics.get("smape_mean")),
                 model_path=result.get("model_path"),
                 mlflow_run_id=result.get("mlflow_run_id"),
+                # R11: persist MLflow telemetry-logging failure (NULL when
+                # it logged fine) so a degraded-but-successful run is
+                # observable, not silently swallowed.
+                mlflow_logging_error=result.get("mlflow_logging_error"),
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)

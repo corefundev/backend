@@ -53,6 +53,51 @@ def _progress(step: int, total: int, label: str) -> None:
         logger.debug(f"_progress save_meta skipped: {e}")
 
 
+def _save_and_log_to_mlflow(
+    config: dict,
+    agg: dict,
+    final_model: Any,
+    client_id: str,
+) -> tuple[str | None, str | None]:
+    """Serialize the trained model to a temp pkl and log it to MLflow.
+
+    Returns ``(mlflow_run_id, error)``:
+      - ``(run_id, None)``  — logged cleanly.
+      - ``(None, "<ExceptionType>: <msg>")`` — MLflow logging failed.
+      - ``(None, None)``    — model has no ``save`` (nothing to log).
+
+    MLflow logging is best-effort TELEMETRY: a failure here must NOT fail
+    the training run (the model is already trained + saved and forecasts
+    are generated). But — unlike the previous log-and-swallow that left
+    ``mlflow_run_id`` invisibly NULL (the R8-12 root cause) — the failure
+    is returned as EXPLICIT error state so the caller can persist it to
+    ``sku_training_runs.mlflow_logging_error`` (queryable + surfaced in
+    the training-runs API). The temp pkl is always cleaned up.
+    """
+    if not hasattr(final_model, "save"):
+        return None, None
+    import os as _os
+    import tempfile
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            tmp_path = tmp.name
+        final_model.save(tmp_path)
+        run_id = log_to_mlflow(config, agg, final_model, tmp_path, client_id)
+        return run_id, None
+    except Exception as e:
+        # Explicit error return (NOT a silent swallow): the caller
+        # persists this so the degraded run is observable.
+        logger.error("MLflow logging failed for client %s: %s", client_id, e)
+        return None, f"{type(e).__name__}: {e}"
+    finally:
+        if tmp_path:
+            try:
+                _os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
@@ -288,27 +333,9 @@ def run_training_pipeline(
 
     # ── MLflow logging ────────────────────────────────────────
     _progress(9, 9, "Запись эксперимента в MLflow")
-    run_id = None
-    tmp_path = None
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
-            tmp_path = tmp.name
-        if hasattr(final_model, "save"):
-            final_model.save(tmp_path)
-            run_id = log_to_mlflow(config, agg, final_model, tmp_path, client_id)
-    except Exception as e:
-        logger.warning(f"MLflow logging failed: {e}")
-    finally:
-        # R11-M7: unlink in finally so a failing save()/log_to_mlflow
-        # (e.g. MLflow down) doesn't leak a model-sized .pkl in the
-        # worker's /tmp on every failed run.
-        if tmp_path:
-            import os as _os
-            try:
-                _os.unlink(tmp_path)
-            except OSError:
-                pass
+    run_id, mlflow_logging_error = _save_and_log_to_mlflow(
+        config, agg, final_model, client_id
+    )
 
     elapsed = time.time() - t0
     logger.info(f"=== Training pipeline DONE in {elapsed:.1f}s ===")
@@ -320,6 +347,12 @@ def run_training_pipeline(
         "storage_backend": storage.backend.__class__.__name__,
         "metrics":         agg,
         "mlflow_run_id":   run_id,
+        # R11: best-effort MLflow telemetry — NULL when it logged fine,
+        # else the error string. Persisted by task_queue to
+        # sku_training_runs.mlflow_logging_error so a degraded run is
+        # observable (queryable + surfaced in the training-runs API)
+        # instead of silently swallowed (the R8-12 root cause).
+        "mlflow_logging_error": mlflow_logging_error,
         "n_skus":          df[sku_col].nunique(),
         "n_features":      len(feature_cols),
         "n_rows":          len(df),
