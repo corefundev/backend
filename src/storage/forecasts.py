@@ -22,7 +22,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.storage._dedup import dedup_last_wins
+
 logger = logging.getLogger(__name__)
+
+# R11-M6: hard ceiling on the unbounded all-SKU `list_for_client` read, so
+# a runaway Business catalog can't materialize an arbitrarily large result
+# into memory on the (async) request path. Generous — covers the Start
+# ceiling (1500×30=45 000) ~4×. Beyond this the read is truncated + logged
+# (NOT silent); real pagination for huge catalogs is the documented
+# follow-up. Override via env for an unusual tier.
+FORECASTS_LIST_HARD_CAP = int(os.environ.get("FORECASTS_LIST_HARD_CAP", "200000"))
 
 
 @dataclass
@@ -69,6 +79,10 @@ class PostgresForecastsRegistry:
         """
         if not rows:
             return 0
+        # R11-M5: dedup by (sku, forecast_date) before the INSERT — see
+        # src/storage/_dedup.py for the full rationale (intra-batch dup
+        # would roll back the whole replace, leaving stale forecasts).
+        rows = dedup_last_wins(rows, key=lambda r: (r[0], r[1]))
         ts = datetime.now(timezone.utc)
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -99,10 +113,17 @@ class PostgresForecastsRegistry:
         )
         return inserted
 
-    def list_for_client(self, client_id: str, sku: Optional[str] = None) -> list[dict]:
+    def list_for_client(
+        self, client_id: str, sku: Optional[str] = None,
+        limit: int = FORECASTS_LIST_HARD_CAP,
+    ) -> list[dict]:
         """
         Return rows for a client, optionally filtered by SKU. Sorted by
         (sku, forecast_date) so the caller can group easily.
+
+        R11-M6: bounded by `limit` (default FORECASTS_LIST_HARD_CAP) so the
+        all-SKU read can't grow without bound. A truncation is logged
+        (never silent). Per-SKU reads (`sku` set) are tiny and unaffected.
         """
         sql = (
             "SELECT sku, forecast_date, value, p10, p90, run_id, generated_at "
@@ -112,11 +133,18 @@ class PostgresForecastsRegistry:
         if sku:
             sql += " AND sku = %s"
             params.append(sku)
-        sql += " ORDER BY sku, forecast_date"
+        sql += " ORDER BY sku, forecast_date LIMIT %s"
+        params.append(limit)
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
+        if len(rows) >= limit:
+            logger.warning(
+                "sku_forecasts.list_for_client TRUNCATED at limit=%d for "
+                "client=%s sku=%s — result may be incomplete; paginate or "
+                "raise FORECASTS_LIST_HARD_CAP.", limit, client_id, sku or "<all>",
+            )
         out: list[dict] = []
         for r in rows:
             out.append({
