@@ -16,7 +16,7 @@
 #
 # Same Lockbox-fetch pattern as the backup container (Dockerfile.backup).
 
-FROM prom/alertmanager:v0.28.1 AS upstream
+FROM prom/alertmanager:v0.28.1@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba AS upstream
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
