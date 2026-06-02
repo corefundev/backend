@@ -24,6 +24,8 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.storage._dedup import dedup_last_wins
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,11 @@ class PostgresAnomaliesRegistry:
         run_id:    str,
         rows:      list[tuple[str, str, float]],   # (sku, anomaly_date, value)
     ) -> int:
+        # R11-M5: dedup by (sku, anomaly_date) before the INSERT — see
+        # src/storage/_dedup.py (intra-batch dup would roll back the whole
+        # replace, leaving the client's previous anomalies silently stale).
+        if rows:
+            rows = dedup_last_wins(rows, key=lambda r: (r[0], r[1]))
         ts = datetime.now(timezone.utc)
         with self._conn() as conn:
             with conn.cursor() as cur:
