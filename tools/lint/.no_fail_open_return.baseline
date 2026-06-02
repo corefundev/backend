@@ -70,9 +70,9 @@ src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegra
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
-src/api/routers/training.py:291  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+24 lines after R11-H3 fail-closed cap, 2026-06-02)
-src/api/routers/training.py:331  pre-R9 baseline; triage in R10 — trigger_training enqueue (+24 lines, R11-H3)
-src/api/routers/training.py:344  pre-R9 baseline; triage in R10 — trigger_training fallback (+24 lines, R11-H3)
+src/api/routers/training.py:293  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02)
+src/api/routers/training.py:333  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
+src/api/routers/training.py:346  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
 src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
 src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
