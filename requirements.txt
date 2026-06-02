@@ -13,10 +13,16 @@
 
 # ── Ядро ML ──────────────────────────────────────────
 lightgbm==4.6.0            # CVE-2024-43598 (RCE) fixed in 4.6
-catboost==1.2.10
+# (catboost removed 2026-06-03, R11-M15 — imported nowhere in src/ or
+#  tests/; a ~100MB native wheel pulled into every image for nothing.)
 pandas==2.2.2
 numpy==1.26.4
 scikit-learn==1.4.2
+# scipy: NOT a first-party import (grep src/ = 0). Pinned as a RESOLVER
+# CONSTRAINT — the scipy<2 wedge keeps evidently 0.5.0 + sklearn/shap
+# resolvable (R6-1, deferred by user 2026-05-18; re-trigger only on
+# evidently 0.6+ / a scipy CVE). Do NOT remove — dropping it lets the
+# resolver float scipy to 2.x and break evidently.
 scipy==1.13.0
 # Audit R4-19 (2026-05-17 Tier 6b finding): pyarrow 15.0.2 carried
 # PYSEC-2024-161 (CVE-2024-52338, buffer-overflow in RecordBatchRpcReader,
@@ -106,7 +112,9 @@ optuna==3.6.1
 # test_explain_row_direction_correct) covers the structural contract.
 shap==0.49.1
 holidays==0.46
-mapie==0.8.6
+# (mapie removed 2026-06-03, R11-M15 — imported nowhere; conformal
+#  intervals are implemented on sklearn IsotonicRegression in
+#  src/validation/calibration.py, not mapie.)
 
 # ── Data Versioning ───────────────────────────────────
 dvc==3.51.2

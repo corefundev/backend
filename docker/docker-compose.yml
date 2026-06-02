@@ -119,6 +119,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     command: ["python", "scripts/migrate.py"]
+    # R11-M14: bound the one-shot migrate job (escaped the R5-M9 resource
+    # sweep). Matches the api image's footprint; a runaway DDL can't OOM
+    # the host.
+    mem_limit: 512m
+    cpus: 1.0
     environment:
       <<: *common-env
     depends_on:
@@ -1105,7 +1110,17 @@ services:
     image: gcr.io/cadvisor/cadvisor:v0.49.1@sha256:3cde6faf0791ebf7b41d6f8ae7145466fed712ea6f252c935294d2608b1af388
     mem_limit: 256m
     cpus: 0.3
-    privileged: true        # cAdvisor needs CAP_SYS_PTRACE for /proc/N/ns
+    # R11-M12: dropped `privileged: true` (all-caps + device access — a
+    # host-wide blast radius on a cAdvisor CVE). cAdvisor's own docs run
+    # non-privileged with just CAP_SYS_PTRACE (for /proc/N/ns) + the
+    # /dev/kmsg device + the read-only host mounts below — which is
+    # exactly what our metric set (container lifecycle/resource +
+    # oom_event) needs. Verified post-deploy that container_* series
+    # still flow (the ContainerRestartLoop/OOM alerts depend on them).
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE]
+    security_opt:
+      - no-new-privileges:true
     devices:
       - /dev/kmsg:/dev/kmsg
     volumes:

@@ -9,7 +9,7 @@
 
 FROM minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 AS mc-stage
 
-FROM postgres:16-alpine
+FROM postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
 
 # Already in postgres:16-alpine: bash, busybox basics. Need extras for
 # lockbox_bootstrap (curl/jq/openssl) and wal_archive (mc + ca-certs).
