@@ -46,6 +46,7 @@ from src.auth.signup_rate_limit import client_ip
 from src.clients.registry import get_registry
 from src.pipeline.task_queue import enqueue_training, get_job_status
 from src.plans.enforcement import PlanLimitExceeded, assert_sku_count_within_limit
+from src.plans.plans import get_plan_spec
 from src.plans.quota import (
     QuotaExceeded,
     TrainingInProgress,
@@ -103,9 +104,11 @@ async def trigger_training(
     Storage path follows ТЗ §17.7: s3://bucket/{client_id}/...
 
     Plan enforcement:
-      • Training cooldown (FREE: 48h) and monthly counter (START: 15).
-      • SKU cap (FREE: 5, START: 100) — checked against the upload manifest
-        when `upload_id` is supplied.
+      • Training cooldown (FREE: 12h; START/BUSINESS: none). No monthly
+        run cap on any plan (removed 2026-06-02).
+      • Single in-flight training per client, all plans (R11-H4) → 409.
+      • SKU cap (FREE: 30, START: 1500; BUSINESS: unlimited) — fail-closed
+        against the upload manifest for capped plans (R11-H3).
     """
     require_client_access(client_id, auth)
 
@@ -145,40 +148,63 @@ async def trigger_training(
         headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
         raise HTTPException(status_code=429, detail=str(e), headers=headers)
 
-    # ── SKU cap (via upload manifest, if provided) ──────────────────
+    # ── SKU cap — FAIL-CLOSED (R11-H3) ──────────────────────────────
+    # The SKU cap is the ONLY enforcement of plan.max_skus. The previous
+    # code did `except → sku_count = 0; if sku_count > 0: assert(...)`,
+    # which SILENTLY SKIPPED the cap whenever the manifest was unreadable
+    # or reported 0 → a Free/Start client could train far beyond their
+    # max_skus. Now: for a capped plan, a processed upload MUST yield a
+    # readable manifest with a positive sku_count, else we refuse (rather
+    # than train past the limit). Unlimited plans (Business) have no cap,
+    # so they don't depend on the manifest here.
     if req.upload_id:
-        try:
-            from src.storage.upload_registry import get_upload_registry
-            from src.storage import zones as _zones
-            ur_reg  = get_upload_registry()
-            urec    = ur_reg.get(req.upload_id)
-            # Audit R4-7 — collapse "not found" + "cross-tenant" to the
-            # same 404 (mirrors R3-1's anti-enumeration). The upload-UUID
-            # space is otherwise probable via 403 vs 404 asymmetry.
-            if urec is None or urec.client_id != client_id:
-                raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
-            if urec.status != "processed":
-                raise HTTPException(
-                    409,
-                    detail=f"upload {req.upload_id} is not yet processed (status={urec.status})",
-                )
-            # Read manifest for sku_count; fall back to row_count
+        from src.storage.upload_registry import get_upload_registry
+        from src.storage import zones as _zones
+        urec = get_upload_registry().get(req.upload_id)
+        # Audit R4-7 — collapse "not found" + "cross-tenant" to the same
+        # 404 (anti-enumeration); 403-vs-404 asymmetry leaks the UUID space.
+        if urec is None or urec.client_id != client_id:
+            raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
+        if urec.status != "processed":
+            raise HTTPException(
+                409,
+                detail=f"upload {req.upload_id} is not yet processed (status={urec.status})",
+            )
+
+        if get_plan_spec(record.plan).max_skus is not None:
             proc = _zones.get_zone_backend(_zones.Zone.PROCESSED)
             manifest_key = _zones.processed_manifest_key(client_id, req.upload_id)
             try:
-                manifest = _json.loads(proc.download_bytes(manifest_key).decode("utf-8"))
+                manifest  = _json.loads(proc.download_bytes(manifest_key).decode("utf-8"))
                 sku_count = int(manifest.get("sku_count", 0))
-            except Exception:
-                sku_count = 0
-            if sku_count > 0:
-                try:
-                    assert_sku_count_within_limit(record, sku_count)
-                except PlanLimitExceeded as e:
-                    raise HTTPException(status_code=403, detail=str(e))
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning("upload manifest check failed: %s", e)
+            except Exception as e:
+                # Fail CLOSED: a processed upload should always have a
+                # manifest. If it doesn't, we cannot verify the plan limit
+                # → refuse rather than silently allow unlimited SKUs.
+                logger.error(
+                    "SKU-cap: manifest unreadable for upload %s (client=%s): %s",
+                    req.upload_id, client_id, e,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Could not verify the dataset's SKU count for plan-limit "
+                        "enforcement — the upload manifest is missing or unreadable. "
+                        "Re-process the upload and try again."
+                    ),
+                )
+            if sku_count <= 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Upload manifest reports an invalid SKU count ({sku_count}); "
+                        "cannot enforce the plan limit. Re-process the upload."
+                    ),
+                )
+            try:
+                assert_sku_count_within_limit(record, sku_count)
+            except PlanLimitExceeded as e:
+                raise HTTPException(status_code=403, detail=str(e))
 
     # ── Resolve effective data_path ─────────────────────────────────
     # If the caller passed an upload_id, ALWAYS resolve the s3:// URI
