@@ -99,6 +99,7 @@ class OtpStore:
     def create(self, email: str, purpose: str, code_hash: str) -> OtpCode: ...
     def find_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
     def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
+    def claim_by_id(self, otp_id: int) -> bool: ...
     def mark_used(self, otp_id: int) -> None: ...
     def increment_attempts(self, otp_id: int) -> int: ...
     def purge_old(self, older_than_hours: int = 24) -> int: ...
@@ -159,6 +160,28 @@ class PostgresOtpStore(OtpStore):
             with conn.cursor() as cur:
                 cur.execute(sql, (otp_id,))
             conn.commit()
+
+    def claim_by_id(self, otp_id: int) -> bool:
+        """R11-M2 — atomically mark a SPECIFIC OTP row used, returning
+        True iff THIS call did it (the row was still active).
+
+        Signup-verify can't use `claim_active` (that burns the latest
+        active OTP on any attempt, discarding the per-row attempt
+        counter). It instead verifies the code first, then calls this to
+        atomically claim the verified row: of two concurrent correct-code
+        requests, exactly one gets True and proceeds; the other gets
+        False (the row was already stamped) and is rejected. Closes the
+        find_active → verify → mark_used race window (single-use bypass)
+        while keeping the attempt-counter semantics.
+        """
+        sql = ("UPDATE sku_otp_codes SET used_at = NOW() "
+               "WHERE id = %s AND used_at IS NULL RETURNING id")
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (otp_id,))
+                claimed = cur.fetchone() is not None
+            conn.commit()
+        return claimed
 
     def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]:
         """
@@ -356,6 +379,21 @@ class LocalFileOtpStore(OtpStore):
                 if r["id"] == otp_id:
                     r["used_at"] = datetime.now(timezone.utc).isoformat()
             self._save(data)
+
+    def claim_by_id(self, otp_id: int) -> bool:
+        """R11-M2 — atomic claim of a specific OTP row (dev/test mirror of
+        PostgresOtpStore.claim_by_id). Returns True iff THIS call stamped
+        an as-yet-unused row. Serialized via the same RLock as load+save."""
+        with self._lock:
+            data = self._load()
+            for r in data["rows"]:
+                if r["id"] == otp_id:
+                    if r.get("used_at") is not None:
+                        return False
+                    r["used_at"] = datetime.now(timezone.utc).isoformat()
+                    self._save(data)
+                    return True
+            return False
 
     def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]:
         """File-backed analogue of PostgresOtpStore.claim_active.

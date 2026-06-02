@@ -535,6 +535,22 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         )
         raise HTTPException(status_code=429, detail="Too many attempts; request a new code")
 
+    # R11-M2: the code is valid — now atomically CLAIM this OTP row before
+    # any state mutation. Of two concurrent correct-code requests exactly
+    # one wins the claim and proceeds; the other gets False and is rejected.
+    # This closes the find_active → verify → mark_used race (single-use
+    # bypass) while preserving the per-row attempt counter above. (Login
+    # uses claim_active; signup needs claim-by-id because it must keep the
+    # attempt counter + its 3-record stash.)
+    if not store.claim_by_id(record.id):
+        record_event(
+            event_type=EVT_OTP_VERIFY, event_subtype="failure",
+            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
+            success=False,
+            metadata={"reason": "already_claimed", "purpose": "signup"},
+        )
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+
     desired_cid = cid_record.code_hash
     display_email = (display_record.code_hash if display_record else email)
 
@@ -569,7 +585,8 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     except ClientAlreadyExists:
         raise HTTPException(status_code=409, detail="Email or client_id already in use")
 
-    store.mark_used(record.id)
+    # record.id was already claimed atomically above (R11-M2); just clear
+    # the auxiliary cid/display stashes (gated by that claim → no race).
     store.mark_used(cid_record.id)
     if display_record:
         store.mark_used(display_record.id)
