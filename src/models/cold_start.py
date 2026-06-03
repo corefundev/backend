@@ -80,7 +80,6 @@ class ClusterBasedForecaster:
                 "std_sales":  np.std(s) + 1e-8,
                 "cv":         np.std(s) / (np.mean(s) + 1e-8),
                 "trend":      float(np.polyfit(np.arange(len(s)), s, 1)[0]),
-                "max_sales":  np.max(s),
             })
         prof_df = pd.DataFrame(profiles).set_index("sku")
         feat_cols = ["mean_sales", "std_sales", "cv", "trend"]

@@ -14,7 +14,7 @@ Usage in pipeline:
     def load_primary_model(storage):
         return storage.load_model()
 
-    preds = with_fallback(primary_model, fallback_model, X, history_df)
+    preds, source = with_fallback(primary_model, fallback_model, X)
 """
 from __future__ import annotations
 
