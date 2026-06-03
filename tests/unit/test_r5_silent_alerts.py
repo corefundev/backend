@@ -6,11 +6,20 @@ Same class of bug as the just-fixed RqWorkerSilent (commit 3c8c231):
 alert expressions referenced metrics that never existed, so the
 alerts silently never fired despite looking deployed.
 
-  R5-12: `ContainerOOMKilled` referenced `container_oom_events_total`.
-         cAdvisor only emits that series when the `oom_event`
-         collector is explicitly enabled — our `--disable_metrics=...`
-         block didn't include it, but neither did `--enable_metrics`.
-         Fix: add `--enable_metrics=oom_event` to cAdvisor command.
+  R5-12 (SUPERSEDED + REVERSED by R11-M12, 2026-06-03): the original
+         fix added `--enable_metrics=oom_event`, believing cAdvisor
+         only emitted `container_oom_events_total` when explicitly
+         enabled. On the pinned cAdvisor v0.49.1 that was wrong twice:
+         (a) oom_event is ON by default (verified), and (b)
+         `--enable_metrics` is an ALLOWLIST that REPLACES the default
+         set, so the flag collapsed collection to oom_event alone and
+         silently dropped container_memory_* / container_cpu_*. The
+         flag was removed; the live regression guard is now
+         test_r11_med_infra.py::test_cadvisor_command_does_not_collapse_metric_set
+         (asserts `--enable_metrics` stays OUT). The old R5-12
+         assertion was deleted from this file — it both enforced the
+         bug and, post-removal, only "passed" by substring-matching the
+         explanatory comment in the compose block.
 
   R5-13: `PgReplicaLagHigh` referenced `pg_replication_lag_seconds`,
          which standard `prometheuscommunity/postgres_exporter` does
@@ -30,24 +39,11 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
-# ── R5-12: cAdvisor OOM collector ────────────────────────────────────────
-
-def test_cadvisor_enables_oom_event_collector():
-    """cAdvisor command must pass `--enable_metrics=oom_event` so the
-    `container_oom_events_total` series exists and ContainerOOMKilled
-    can actually fire."""
-    text = (_BACKEND / "docker" / "docker-compose.yml").read_text()
-    # Locate the cadvisor block.
-    idx = text.find("  cadvisor:")
-    end = text.find("\n  ", idx + 5)
-    while end > 0 and not text[end + 1:].startswith("  node-exporter:"):
-        end = text.find("\n  ", end + 1)
-    block = text[idx:end] if end > idx else text[idx:idx + 2000]
-
-    assert "--enable_metrics=oom_event" in block, (
-        "cAdvisor must enable the oom_event collector — without it, "
-        "ContainerOOMKilled alert references a phantom metric (R5-12)"
-    )
+# ── R5-12: cAdvisor OOM collector — REVERSED by R11-M12 ──────────────────
+# The former test_cadvisor_enables_oom_event_collector was deleted: the
+# `--enable_metrics=oom_event` flag it pinned is exactly what R11-M12
+# removed (it collapsed cAdvisor's metric allowlist and dropped mem/cpu).
+# The replacement guard lives in test_r11_med_infra.py.
 
 
 # ── R5-13: postgres-exporter custom queries ──────────────────────────────
