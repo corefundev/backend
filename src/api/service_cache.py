@@ -41,8 +41,9 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     # Forward type-only import — avoids dragging the ML stack into
-    # the cache module at import time.
-    from src.services.forecasting_service import ForecastingService
+    # the cache module at import time. (R11-M68: corrected the path —
+    # the class lives in src.models.fallback; src.services never existed.)
+    from src.models.fallback import ForecastingService
 
 
 logger = logging.getLogger(__name__)

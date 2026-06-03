@@ -408,20 +408,28 @@ def _training_job(
         run_id=run_id,
     )
 
-    result = _run_pipeline_or_fail(
-        client_id=client_id,
-        effective_data_path=effective_data_path,
-        config_path=config_path,
-        runs=runs,
-        run_id=run_id,
-    )
+    # R11-M8: the merged-dataset temp parquet (only set on the
+    # extend_from_path retrain flow) must be cleaned up even if training
+    # raises — otherwise every failed incremental retrain leaks a
+    # full-dataset-sized /tmp parquet. `_run_pipeline_or_fail` records the
+    # failed run-status itself before raising; the `finally` only adds the
+    # unlink (it never swallows the exception).
+    try:
+        result = _run_pipeline_or_fail(
+            client_id=client_id,
+            effective_data_path=effective_data_path,
+            config_path=config_path,
+            runs=runs,
+            run_id=run_id,
+        )
 
-    _record_run_finished(runs, run_id, result, client_id)
-    _notify_finished_idempotent(client_id, run_id, result)
-    _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
-    _cleanup_merged(merged_cleanup)
+        _record_run_finished(runs, run_id, result, client_id)
+        _notify_finished_idempotent(client_id, run_id, result)
+        _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
 
-    return result
+        return result
+    finally:
+        _cleanup_merged(merged_cleanup)
 
 
 def _merge_datasets(

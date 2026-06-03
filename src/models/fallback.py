@@ -71,11 +71,23 @@ class SeasonalNaiveModel:
         self._last_season: np.ndarray | None = None
 
     def fit(self, y: np.ndarray) -> "SeasonalNaiveModel":
-        """Store the last `seasonality` values."""
-        if len(y) < self.seasonality:
-            self._last_season = np.full(self.seasonality, float(np.mean(y)))
+        """Store the last `seasonality` values.
+
+        R11-M11: guards empty / all-NaN input. `np.mean([])` is NaN and an
+        all-NaN window tiles NaN straight into the /predict response (the
+        downstream `np.clip` does NOT remove NaN). A series with no usable
+        observations → a flat zero season; sparse NaNs inside an otherwise
+        valid window are zero-filled.
+        """
+        y = np.asarray(y, dtype=float)
+        if y.size == 0 or np.all(np.isnan(y)):
+            self._last_season = np.zeros(self.seasonality, dtype=float)
+        elif len(y) < self.seasonality:
+            self._last_season = np.full(self.seasonality, float(np.nanmean(y)))
         else:
-            self._last_season = np.array(y[-self.seasonality:], dtype=float)
+            self._last_season = np.nan_to_num(
+                np.asarray(y[-self.seasonality:], dtype=float)
+            )
         return self
 
     def predict(self, horizon: int) -> np.ndarray:
@@ -83,7 +95,9 @@ class SeasonalNaiveModel:
         if self._last_season is None:
             raise RuntimeError("SeasonalNaiveModel not fitted")
         tiles = -(-horizon // self.seasonality)  # ceiling division
-        return np.tile(self._last_season, tiles)[:horizon]
+        # Defence-in-depth: fit() already guards NaN, but never let one
+        # reach a forecast consumer (R11-M11).
+        return np.nan_to_num(np.tile(self._last_season, tiles)[:horizon])
 
     # Mimic SKUForecaster.predict(X) interface for drop-in replacement
     def predict_from_X(self, X: pd.DataFrame) -> np.ndarray:
@@ -91,7 +105,7 @@ class SeasonalNaiveModel:
         if self._last_season is None:
             return np.zeros(n)
         tiles = -(-n // self.seasonality)
-        return np.clip(np.tile(self._last_season, tiles)[:n], 0, None)
+        return np.nan_to_num(np.clip(np.tile(self._last_season, tiles)[:n], 0, None))
 
 
 # ── with_fallback: wraps primary predict with fallback on error ───────────────
@@ -159,4 +173,9 @@ class ForecastingService:
         if self.primary is None:
             logger.warning("Primary model not loaded; using fallback directly")
             return self.fallback.predict_from_X(X), "fallback"
-        return with_fallback(self.primary, self.fallback, X)
+        # R11-M10: fail CLOSED on the serving path. If BOTH primary and
+        # fallback fail, raise instead of returning silent all-zeros tagged
+        # "zero" — a zero forecast is indistinguishable from real "no
+        # demand" and would be served to the tenant as fact. Better a 5xx
+        # the caller can detect than fabricated data.
+        return with_fallback(self.primary, self.fallback, X, raise_if_both_fail=True)
