@@ -1111,12 +1111,19 @@ services:
     mem_limit: 256m
     cpus: 0.3
     # R11-M12: dropped `privileged: true` (all-caps + device access — a
-    # host-wide blast radius on a cAdvisor CVE). cAdvisor's own docs run
+    # host-wide blast radius on a cAdvisor CVE). cAdvisor runs
     # non-privileged with just CAP_SYS_PTRACE (for /proc/N/ns) + the
-    # /dev/kmsg device + the read-only host mounts below — which is
-    # exactly what our metric set (container lifecycle/resource +
-    # oom_event) needs. Verified post-deploy that container_* series
-    # still flow (the ContainerRestartLoop/OOM alerts depend on them).
+    # /dev/kmsg device + the read-only host mounts below — verified on
+    # staging (2026-06-03) to emit the FULL container_* set
+    # (memory/cpu/oom/start_time) under exactly this cap set.
+    # NOTE: full container_* collection ALSO requires the host Docker to
+    # use the classic `overlay2` storage driver. cAdvisor v0.49.1 cannot
+    # read the containerd-snapshotter / `overlayfs` image layout (the
+    # Docker 29 default) — it fails the container read-write-layer-ID
+    # lookup and emits ZERO container metrics regardless of privilege
+    # (google/cadvisor#3860). prod + staging pin overlay2 via
+    # /etc/docker/daemon.json ({"storage-driver":"overlay2",
+    # "features":{"containerd-snapshotter":false}}) for this reason.
     cap_drop: [ALL]
     cap_add: [SYS_PTRACE]
     security_opt:
@@ -1137,14 +1144,16 @@ services:
       # Disable noisy collectors that produce no actionable signal —
       # we only want container-level lifecycle + resource metrics.
       - "--disable_metrics=disk,diskIO,tcp,udp,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl"
-      # R5-12 (2026-05-17) — opt-in to the `oom_event` collector so
-      # cAdvisor emits `container_oom_events_total`. Without this flag
-      # cAdvisor v0.47+ doesn't publish the OOM series and the
-      # `ContainerOOMKilled` alert in docker/alerts.yml is silently
-      # broken (same class as the just-fixed RqWorkerSilent —
-      # phantom-metric alert). Cost: negligible, the collector parses
-      # kernel /dev/kmsg events that are already streamed in.
-      - "--enable_metrics=oom_event"
+      # Do NOT add `--enable_metrics=oom_event`. In cAdvisor
+      # `--enable_metrics` is an ALLOWLIST that REPLACES the default
+      # metric set — passing `oom_event` alone collapses collection to
+      # that one collector and silently drops container_memory_* and
+      # container_cpu_* entirely (root-caused on v0.49.1, 2026-06-03:
+      # it was why mem/cpu series were missing even after the overlay2
+      # migration). `container_oom_events_total` is already ON by
+      # default in this version — it is NOT in the --disable_metrics
+      # denylist above — so the OOM alert works without the flag
+      # (verified: oom series present for all containers without it).
     restart: unless-stopped
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
