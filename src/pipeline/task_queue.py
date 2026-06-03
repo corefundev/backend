@@ -29,6 +29,7 @@ try:
 except Exception as _e:    # noqa: BLE001
     _early_logger.warning("worker bootstrap_secrets failed: %s", _e)
 
+import contextlib
 import logging
 import os
 from typing import Optional
@@ -371,6 +372,18 @@ def _cleanup_merged(merged_cleanup: Optional[str]) -> None:
         pass
 
 
+@contextlib.contextmanager
+def _merged_cleanup_guard(merged_cleanup: Optional[str]):
+    """Guarantee the merged temp parquet is removed even if the wrapped
+    training body raises (R11-M8). Keeping the try/finally HERE — not in
+    `_training_job` — lets the orchestrator stay try-free (R5-M5). Does not
+    swallow: the body's exception propagates after the unlink runs."""
+    try:
+        yield
+    finally:
+        _cleanup_merged(merged_cleanup)
+
+
 def _training_job(
     client_id: str,
     data_path: str,
@@ -408,20 +421,26 @@ def _training_job(
         run_id=run_id,
     )
 
-    result = _run_pipeline_or_fail(
-        client_id=client_id,
-        effective_data_path=effective_data_path,
-        config_path=config_path,
-        runs=runs,
-        run_id=run_id,
-    )
+    # R11-M8: the merged-dataset temp parquet (only set on the
+    # extend_from_path retrain flow) must be cleaned up even if training
+    # raises — otherwise every failed incremental retrain leaks a
+    # full-dataset-sized /tmp parquet. The try/finally lives in the
+    # `_merged_cleanup_guard` helper so the orchestrator stays try-free
+    # (R5-M5: error handling belongs in the helpers).
+    with _merged_cleanup_guard(merged_cleanup):
+        result = _run_pipeline_or_fail(
+            client_id=client_id,
+            effective_data_path=effective_data_path,
+            config_path=config_path,
+            runs=runs,
+            run_id=run_id,
+        )
 
-    _record_run_finished(runs, run_id, result, client_id)
-    _notify_finished_idempotent(client_id, run_id, result)
-    _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
-    _cleanup_merged(merged_cleanup)
+        _record_run_finished(runs, run_id, result, client_id)
+        _notify_finished_idempotent(client_id, run_id, result)
+        _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
 
-    return result
+        return result
 
 
 def _merge_datasets(

@@ -298,11 +298,14 @@ def run_standard_chaos_suite() -> list[FaultResult]:
         # Clean slate.
         invalidate("chaos-client-cached")
 
-        # Pre-warm the cache with a dummy "service".
+        # Pre-warm the cache with a dummy "service". The chaos sim
+        # deliberately caches a sentinel (not a real ForecastingService) to
+        # prove the cache-HIT path skips the factory — hence the type:ignore
+        # on this one factory (get_or_load's contract is correct elsewhere).
         sentinel = object()
         get_or_load(
             "chaos-client-cached",
-            load_factory=lambda _cid: sentinel,
+            load_factory=lambda _cid: sentinel,  # type: ignore[arg-type,return-value]
         )
         exp.observe("Pre-warmed cache for client 'chaos-client-cached'")
 
@@ -310,12 +313,12 @@ def run_standard_chaos_suite() -> list[FaultResult]:
         def _factory_raises(cid):
             raise RuntimeError("Postgres unavailable (chaos simulation)")
 
-        result = get_or_load(
+        cached = get_or_load(
             "chaos-client-cached",
             load_factory=_factory_raises,
         )
         exp.assert_steady_state(
-            result is sentinel,
+            cached is sentinel,
             "Cache hit served the pre-warmed sentinel — DB outage not reached"
         )
         # Cleanup

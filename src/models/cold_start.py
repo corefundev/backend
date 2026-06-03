@@ -61,6 +61,10 @@ class ClusterBasedForecaster:
     def __init__(self, n_neighbors: int = 5):
         self.n_neighbors = n_neighbors
         self._profiles: pd.DataFrame | None = None
+        # R11-M9: scaled feature matrix for KNN distance ONLY, kept
+        # separate from `_profiles` so the raw `mean_sales` column survives
+        # to be returned as the forecast (not a z-score).
+        self._feat_scaled: np.ndarray | None = None
         self._scaler   = StandardScaler()
 
     def fit(self, df: pd.DataFrame, sku_col: str, target_col: str) -> "ClusterBasedForecaster":
@@ -76,12 +80,15 @@ class ClusterBasedForecaster:
                 "std_sales":  np.std(s) + 1e-8,
                 "cv":         np.std(s) / (np.mean(s) + 1e-8),
                 "trend":      float(np.polyfit(np.arange(len(s)), s, 1)[0]),
-                "max_sales":  np.max(s),
             })
         prof_df = pd.DataFrame(profiles).set_index("sku")
         feat_cols = ["mean_sales", "std_sales", "cv", "trend"]
-        prof_df[feat_cols] = self._scaler.fit_transform(prof_df[feat_cols])
-        self._profiles = prof_df
+        # R11-M9: scale into a SEPARATE matrix used only for KNN distance.
+        # Do NOT overwrite prof_df[feat_cols] in place — that turned the
+        # `mean_sales` column (returned as the forecast in predict()) into a
+        # z-score (≈0 / negative), so every cold-start forecast was garbage.
+        self._feat_scaled = self._scaler.fit_transform(prof_df[feat_cols])
+        self._profiles = prof_df  # raw values retained; mean_sales stays real
         logger.info(f"ClusterBasedForecaster: profiled {len(profiles)} SKUs")
         return self
 
@@ -96,7 +103,7 @@ class ClusterBasedForecaster:
         """
         Find K nearest warm SKUs, return their mean recent sales as forecast.
         """
-        if self._profiles is None:
+        if self._profiles is None or self._feat_scaled is None:
             return np.zeros(horizon)
 
         s = cold_sku_history[target_col].values
@@ -108,8 +115,7 @@ class ClusterBasedForecaster:
         ]])
         cold_feat_scaled = self._scaler.transform(cold_feat)
 
-        feat_cols = ["mean_sales", "std_sales", "cv", "trend"]
-        warm_feat = self._profiles[feat_cols].values
+        warm_feat = self._feat_scaled  # scaled matrix (R11-M9), aligned with _profiles rows
         dists     = np.linalg.norm(warm_feat - cold_feat_scaled, axis=1)
         top_k_idx = np.argsort(dists)[: self.n_neighbors]
         neighbors = self._profiles.index[top_k_idx].tolist()

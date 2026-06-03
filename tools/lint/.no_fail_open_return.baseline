@@ -20,17 +20,17 @@
 # training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:741  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines after R11 _record_run_finished mlflow_logging_error persist, 2026-06-01)
-src/pipeline/task_queue.py:746  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
-src/pipeline/task_queue.py:754  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
-src/pipeline/task_queue.py:774  R9-T4-001 — training fallback registry; closes in item #14 (+4 lines, R11)
+src/pipeline/task_queue.py:760  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
+src/pipeline/task_queue.py:765  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:773  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:793  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,
 # convert the swallow into a persisted error, or document the fail-open
 # branch as deliberate (and then move out of "broad except" to a typed one).
-src/pipeline/task_queue.py:199  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try
-src/pipeline/task_queue.py:213  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer
+src/pipeline/task_queue.py:200  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
+src/pipeline/task_queue.py:214  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
 src/pipeline/distributed_training.py:144  pre-R9 baseline; triage in R10 — Ray cluster start
 src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
 src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
