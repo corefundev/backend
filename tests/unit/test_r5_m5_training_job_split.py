@@ -83,7 +83,13 @@ def test_orchestrator_is_a_thin_caller():
     must_call = (
         "_start_run", "_resolve_data_path", "_run_pipeline_or_fail",
         "_record_run_finished", "_notify_finished_idempotent",
-        "_post_training_artifacts", "_cleanup_merged",
+        "_post_training_artifacts",
+        # R11-M8: the merged-temp unlink is now wired through the
+        # `_merged_cleanup_guard` context manager (which owns the
+        # try/finally), instead of a bare trailing `_cleanup_merged()` —
+        # so the guarantee survives a training exception while the
+        # orchestrator stays try-free.
+        "_merged_cleanup_guard",
     )
     for h in must_call:
         assert h + "(" in executable, (
