@@ -65,6 +65,27 @@ def test_cadvisor_not_privileged():
     )
 
 
+def test_cadvisor_command_does_not_collapse_metric_set():
+    """R11-M12 follow-up (root-caused 2026-06-03): in cAdvisor
+    `--enable_metrics` is an ALLOWLIST that REPLACES the default metric
+    set — passing `oom_event` alone silently collapses collection to that
+    one collector and drops container_memory_* / container_cpu_* entirely.
+    `container_oom_events_total` is on by default (it is NOT in the
+    --disable_metrics denylist), so the flag must stay OUT."""
+    ca = _compose()["services"]["cadvisor"]
+    cmd = ca.get("command") or []
+    joined = " ".join(cmd)
+    assert "--enable_metrics" not in joined, (
+        "cAdvisor command must NOT use --enable_metrics — it is an "
+        "allowlist that collapses the metric set and drops mem/cpu series. "
+        "oom_event is default-on; no flag needed."
+    )
+    assert "--docker_only=true" in cmd, (
+        "cAdvisor should run with --docker_only=true (ignore non-container "
+        "cgroups)."
+    )
+
+
 # ── M14: migrate resource limits ────────────────────────────────────
 
 def test_migrate_has_resource_limits():

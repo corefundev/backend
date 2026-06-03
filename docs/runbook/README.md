@@ -18,6 +18,7 @@ to bottom in the moment** — each file follows the same shape:
 | Restore Postgres from S3 backup | [s3-backup-recovery.md](s3-backup-recovery.md) |
 | Yandex Lockbox SA-key rotation | [lockbox-rotation.md](lockbox-rotation.md) |
 | `audit_log` HMAC chain reports corruption | [audit-chain-corrupt.md](audit-chain-corrupt.md) |
+| cAdvisor emits no `container_*` metrics (Docker 29 containerd snapshotter) | [docker-storage-driver-overlay2.md](docker-storage-driver-overlay2.md) |
 
 ## What to grab before opening any playbook
 
