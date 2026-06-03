@@ -232,9 +232,13 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #   (Selectel can't self-expire → client-side prune) in the prod-only
     #   `backup-mirror` group → 30 shared + 9 prod-only = 39.
     #
+    # 2026-06-03 — +1 alert in PR #77 (R11-M12 audit): ContainerMetricsAbsent
+    #   (absent()-canary for cAdvisor emitting no container_* series) in the
+    #   shared `container-lifecycle` group → 32 shared + 9 prod-only = 41.
+    #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 40   # +1 task #38 SyntheticAlertTest (2026-05-31)
+    EXPECTED_TOTAL = 41   # +1 PR #77 ContainerMetricsAbsent (2026-06-03)
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (

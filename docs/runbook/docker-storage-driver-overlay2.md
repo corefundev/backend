@@ -42,14 +42,20 @@ fs, NOT in /var/lib/docker — they survive the switch).
 
 ## Procedure (per host, ~5 min stack downtime)
 
-`$COMPOSE` = the host's full compose file set, run from `/srv/backend/docker`
-after `set -a; . /srv/backend/.env; set +a`. (prod: 4 files; staging adds
-`-f docker-compose.staging.yml`.)
+`$COMPOSE` = the host's full compose file set (5 files), run from
+`/srv/backend/docker` after `set -a; . /srv/backend/.env; set +a`. The
+shared 4 are yml + prod + minimal + lockbox; the 5th is **per-env**:
+**prod** adds `docker-compose.replication.yml`, **staging** adds
+`docker-compose.staging.yml`. Read the exact set off a running container
+rather than trusting this doc:
+`docker inspect docker-api-1 --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'`.
 
 ```bash
 cd /srv/backend/docker
 set -a; . /srv/backend/.env; set +a
-COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.minimal.yml -f docker-compose.lockbox.yml"   # + staging.yml on staging
+# PROD (5 files — note replication.yml, NOT staging.yml):
+COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.minimal.yml -f docker-compose.lockbox.yml -f docker-compose.replication.yml"
+# STAGING swaps the last file: -f docker-compose.staging.yml (instead of replication.yml)
 
 # 1. Capture verification anchors
 docker exec docker-postgres-1 psql -U sku -d sku_forecasting -tA -c \
