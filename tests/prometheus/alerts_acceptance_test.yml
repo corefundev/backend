@@ -76,6 +76,40 @@ tests:
         exp_alerts: []
 
   # ──────────────────────────────────────────────────────────────
+  # ContainerMetricsAbsent — canary for cAdvisor emitting nothing
+  # (R11-M12 audit). absent()-guard so the silent-metric failure that
+  # killed ContainerRestartLoop / ContainerOOMKilled cannot recur
+  # undetected (containerd-snapshotter storage driver breaks cAdvisor).
+  # ──────────────────────────────────────────────────────────────
+  - interval: 1m
+    name: "ContainerMetricsAbsent fires when cAdvisor emits no container memory series"
+    input_series:
+      # cAdvisor target up but producing NO container_memory_usage_bytes —
+      # the exact containerd-snapshotter failure mode.
+      - series: 'up{job="cadvisor"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m       # for: 15m + 1m slack
+        alertname: ContainerMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: forecasting
+            exp_annotations:
+              summary: "cAdvisor is emitting no per-container metrics"
+              description: "No container_memory_usage_bytes{name=~\"docker-.+\"} for 15m — cAdvisor is up but collecting nothing, so ContainerRestartLoop + ContainerOOMKilled are blind. Most likely the host Docker storage driver reverted off overlay2 (the containerd snapshotter breaks cAdvisor v0.49.1). Fix: docs/runbook/docker-storage-driver-overlay2.md — re-apply the /etc/docker/daemon.json overlay2 pin + force-recreate cadvisor."
+
+  - interval: 1m
+    name: "ContainerMetricsAbsent does NOT fire when container metrics flow"
+    input_series:
+      - series: 'container_memory_usage_bytes{name="docker-api-1"}'
+        values: '350000000x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ContainerMetricsAbsent
+        exp_alerts: []
+
+  # ──────────────────────────────────────────────────────────────
   # BackupStale — success-side staleness with absent() defence.
   # ──────────────────────────────────────────────────────────────
   - interval: 1m

@@ -478,6 +478,27 @@ groups:
           summary:     "Container {{ $labels.name }} OOM-killed"
           description: "Out-of-memory kill in last 10m. Bump mem_limit or investigate leak."
 
+      # Canary for the two alerts above. cAdvisor can be UP + healthy yet
+      # emit ZERO container_* series — it happened (Docker 29's containerd
+      # snapshotter storage driver, which cAdvisor v0.49.1 cannot read;
+      # see docs/runbook/docker-storage-driver-overlay2.md). When that
+      # occurs, ContainerRestartLoop + ContainerOOMKilled reference
+      # phantom metrics and silently never fire. This absent()-guard is
+      # the canary: no per-container memory series for 15m ⇒ crash-loop /
+      # OOM detection is BLIND. Same phantom-metric class as R5-12/R5-13
+      # (R11-M12 audit, 2026-06-03). Fires on prod AND staging (both run
+      # cAdvisor), so it lives in the shared alerts.yml.
+      - alert: ContainerMetricsAbsent
+        expr: |
+          absent(container_memory_usage_bytes{name=~"docker-.+"})
+        for:   15m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "cAdvisor is emitting no per-container metrics"
+          description: "No container_memory_usage_bytes{name=~\"docker-.+\"} for 15m — cAdvisor is up but collecting nothing, so ContainerRestartLoop + ContainerOOMKilled are blind. Most likely the host Docker storage driver reverted off overlay2 (the containerd snapshotter breaks cAdvisor v0.49.1). Fix: docs/runbook/docker-storage-driver-overlay2.md — re-apply the /etc/docker/daemon.json overlay2 pin + force-recreate cadvisor."
+
   - name: monitoring-pipeline
     rules:
       # Pushgateway is a single point for all push-based metrics
