@@ -72,15 +72,24 @@ class TrainRequest(BaseModel):
             "limits by plan. Omit only for admin / legacy direct-path training."
         ),
     )
+    extend_from_history: bool = Field(
+        False,
+        description=(
+            "When true, retrain from scratch on the dedup-UNION of ALL this "
+            "client's processed uploads (oldest→newest) plus the current "
+            "upload — a full-history incremental retrain. Lets a customer add "
+            "fresh weeks/months without re-uploading or losing earlier data "
+            "(R11-#75, Вариант A)."
+        ),
+    )
     extend_from_upload_id: Optional[str] = Field(
         None,
         description=(
-            "Upload ID of a previously trained dataset. When set, the worker "
-            "concatenates that upload's processed data with the current "
-            "upload's data, deduplicates by (sku, date) preferring the new "
-            "values, and retrains the model from scratch on the combined "
-            "set. Lets a customer add fresh weeks/months without re-uploading "
-            "their full history."
+            "DEPRECATED (R11-#75) — kept for backward compatibility. Any "
+            "non-null value is now treated as `extend_from_history=true`: the "
+            "specific id is ignored and the retrain merges the client's FULL "
+            "processed history (the old single-prior merge lost history across "
+            "multiple returns). Use `extend_from_history` instead."
         ),
     )
 
@@ -221,39 +230,31 @@ async def trigger_training(
             raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
         effective_data_path = get_processed_path(urec)
 
-    # ── Resolve extend_from path (incremental retrain) ──────────────
-    extend_from_path: Optional[str] = None
-    if req.extend_from_upload_id:
+    # ── Resolve extend_from datasets (full-history incremental retrain) ──
+    # R11-#75 (Вариант A): when extending, merge the client's ENTIRE
+    # processed history — not a single picked prior (which silently lost
+    # data across multiple returns: a 3rd retrain extending from the 2nd
+    # upload only saw that one batch). `extend_from_upload_id` is accepted
+    # for backward compatibility — any value now means "extend from full
+    # history"; the specific id is ignored.
+    extend_from_paths: list[str] = []
+    if req.extend_from_history or req.extend_from_upload_id:
         from src.storage.upload_pipeline import get_processed_path
         from src.storage import upload_registry as ur
-        prev = ur.get_upload_registry().get(req.extend_from_upload_id)
-        if prev is None:
-            raise HTTPException(
-                404,
-                detail=f"extend_from_upload_id {req.extend_from_upload_id!r} not found",
-            )
-        # Audit R4-7 — cross-tenant case responds with the same 404
-        # shape as "not found" so an authenticated caller can't probe
-        # the upload-UUID space.
-        if prev.client_id != client_id:
-            raise HTTPException(
-                404,
-                detail=f"extend_from_upload_id {req.extend_from_upload_id!r} not found",
-            )
-        if prev.status != "processed":
-            raise HTTPException(
-                409,
-                detail=(
-                    f"extend_from upload is not processed "
-                    f"(status={prev.status})"
-                ),
-            )
-        if req.extend_from_upload_id == req.upload_id:
-            raise HTTPException(
-                422,
-                detail="extend_from_upload_id must differ from upload_id",
-            )
-        extend_from_path = get_processed_path(prev)
+        reg = ur.get_upload_registry()
+        # All PROCESSED uploads for this client EXCEPT the current one
+        # (the new data is appended by the worker as the newest source).
+        # Sorted oldest→newest so newer uploads win on (sku, date) overlap.
+        priors = [
+            u for u in reg.list_for_client(client_id, limit=500)
+            if u.status == ur.PROCESSED and u.upload_id != req.upload_id
+        ]
+        priors.sort(key=lambda u: u.created_at)
+        extend_from_paths = [get_processed_path(u) for u in priors]
+        logger.info(
+            "extend_from_history: client=%s merging %d prior processed upload(s)",
+            client_id, len(extend_from_paths),
+        )
 
     # ── Bump quota counters BEFORE enqueueing. The atomic conditional
     #    UPDATE inside record_training_started (R4-16) is the gate that
@@ -309,7 +310,7 @@ async def trigger_training(
             data_path=effective_data_path,
             config_path=CONFIG_PATH,
             run_id=run_id,
-            extend_from_path=extend_from_path,
+            extend_from_paths=extend_from_paths,
         )
     except Exception as enq_err:    # noqa: BLE001
         logger.warning(
