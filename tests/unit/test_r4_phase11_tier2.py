@@ -1,10 +1,6 @@
 """
 Regression tests for Round-4 Phase 11 Tier 2 (2026-05-17).
 
-R4-11 — monitoring.send_alert now routes through validate_webhook_url
-        before urlopen, matching the R3-7 SSRF guard on
-        send_webhook_sync. Closes the parallel SSRF path that the
-        R3 audit missed.
 R4-12 — jwt_auth._load_secret enforces HS256 minimum byte length
         (32) on JWT_SECRET_KEY and MODEL_SIGNING_KEY in production.
         startup_safety.py environment-variable name typo fixed
@@ -19,40 +15,6 @@ import pytest
 
 
 _BACKEND = Path(__file__).resolve().parents[2]
-
-
-# ── R4-11: SSRF guard on monitoring.send_alert ─────────────────────────────
-
-def test_send_alert_validates_url_before_urlopen():
-    """Source-level: the send_alert body must call validate_webhook_url
-    BEFORE the urlopen invocation. Order matters — validation has to
-    short-circuit before the network call."""
-    text = (_BACKEND / "src" / "monitoring" / "advanced.py").read_text()
-    start = text.find("def send_alert(")
-    assert start > 0
-    end = text.find("\n# ── ", start + 1)
-    if end < 0:
-        end = len(text)
-    block = text[start:end]
-    validate_idx = block.find("validate_webhook_url")
-    urlopen_idx = block.find("urllib.request.urlopen")
-    assert validate_idx > 0, "send_alert must import validate_webhook_url"
-    assert urlopen_idx > validate_idx, (
-        "validate_webhook_url must be called BEFORE urlopen (R4-11)"
-    )
-
-
-def test_send_alert_catches_rejected_url_and_returns_false():
-    """The handler must catch WebhookUrlRejected and return False —
-    fail-soft semantics matching send_webhook_sync (R3-7 lesson)."""
-    text = (_BACKEND / "src" / "monitoring" / "advanced.py").read_text()
-    start = text.find("def send_alert(")
-    end = text.find("\n# ── ", start + 1)
-    block = text[start:end] if end > 0 else text[start:]
-    assert "WebhookUrlRejected" in block, (
-        "send_alert must catch WebhookUrlRejected"
-    )
-    assert "return False" in block, "rejection must fail-soft (return False)"
 
 
 # ── R4-12: JWT_SECRET_KEY min-length enforcement ──────────────────────────

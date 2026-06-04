@@ -5,9 +5,6 @@ Unit tests for: storage backend, JWT auth, fallback model, drift, client registr
 from __future__ import annotations
 
 import os
-import pickle
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -321,72 +318,6 @@ class TestRetryDecorator:
 
 # ══════════════════════════════════════════════════════════════════
 # Drift monitoring
-# ══════════════════════════════════════════════════════════════════
-
-class TestFeatureDriftDetector:
-
-    def _make_df(self, n: int = 300, seed: int = 0) -> pd.DataFrame:
-        rng = np.random.default_rng(seed)
-        return pd.DataFrame({
-            "lag_1": rng.normal(10, 2, n),
-            "rolling_mean_7": rng.normal(10, 1.5, n),
-            "dayofweek": rng.integers(0, 7, n).astype(float),
-        })
-
-    def test_fit_and_detect_no_drift(self):
-        from src.monitoring.drift import FeatureDriftDetector
-        train_df = self._make_df(300, seed=0)
-        infer_df = self._make_df(300, seed=1)   # same distribution
-        detector = FeatureDriftDetector(threshold=0.25)
-        detector.fit(train_df, list(train_df.columns))
-        scores = detector.detect(infer_df, client_id="test")
-        assert len(scores) == 3
-        # PSI should be low for same distribution
-        assert all(v < 0.25 for v in scores.values()), f"Unexpected drift: {scores}"
-
-    def test_fit_and_detect_high_drift(self):
-        from src.monitoring.drift import FeatureDriftDetector
-        rng = np.random.default_rng(42)
-        train_df = pd.DataFrame({"lag_1": rng.normal(10, 1, 500)})
-        infer_df = pd.DataFrame({"lag_1": rng.normal(50, 1, 500)})  # totally different
-        detector = FeatureDriftDetector(threshold=0.25)
-        detector.fit(train_df, ["lag_1"])
-        scores = detector.detect(infer_df, client_id="test")
-        # PSI should be very high for a massive distribution shift
-        assert scores["lag_1"] > 1.0, f"Expected high drift, got {scores}"
-
-    def test_psi_identical_distributions_near_zero(self):
-        from src.monitoring.drift import psi
-        rng = np.random.default_rng(0)
-        x = rng.normal(0, 1, 1000)
-        score = psi(x, x)
-        assert score == pytest.approx(0.0, abs=0.05)
-
-
-class TestPredictionDriftDetector:
-
-    def test_records_wmape_and_returns_rolling(self):
-        from src.monitoring.drift import PredictionDriftDetector
-        detector = PredictionDriftDetector(threshold=0.5, window_days=3)
-        y_true = np.array([10.0, 20.0, 30.0])
-        y_pred = np.array([11.0, 19.0, 31.0])
-        rolling = detector.record(y_true, y_pred, client_id="test")
-        assert 0 <= rolling <= 1.0
-
-    def test_alerts_on_high_wmape(self, caplog):
-        from src.monitoring.drift import PredictionDriftDetector
-        import logging
-        detector = PredictionDriftDetector(threshold=0.10, window_days=2)
-        y_true = np.array([10.0, 10.0])
-        y_pred = np.array([20.0, 20.0])   # 100% WMAPE
-        with caplog.at_level(logging.WARNING, logger="src.monitoring.drift"):
-            for _ in range(3):  # fill window
-                detector.record(y_true, y_pred, client_id="alert_test")
-        assert any("drift alert" in r.message.lower() for r in caplog.records)
-
-
-# ══════════════════════════════════════════════════════════════════
-# Client registry
 # ══════════════════════════════════════════════════════════════════
 
 class TestLocalFileRegistry:

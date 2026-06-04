@@ -9,8 +9,7 @@ table). `sku_clients.status` stayed "training" forever after every
 RQ-mode (production default) job.
 
 Fix: `_training_job` now calls `registry.update(client_id,
-status="ready")` on success and `status="failed"` on failure —
-mirroring what `auto_retrain.run_auto_retrain` already does.
+status="ready")` on success and `status="failed"` on failure.
 
 Source-level pins.
 """
