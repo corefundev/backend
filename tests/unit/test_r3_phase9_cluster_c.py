@@ -30,27 +30,9 @@ _BACKEND = Path(__file__).resolve().parents[2]
 _FRONTEND = _BACKEND.parent / "frontend"
 
 
-# ── R3-16: dvc has no Python imports in src/ ──────────────────────────────
-
-def test_no_python_import_of_dvc():
-    """dvc / dvc-s3 are CLI tools used outside the Python codebase
-    (data versioning is a workflow concern, not a runtime concern).
-    A future `import dvc` would need an integration test + version
-    compat check — this guard makes the absence load-bearing."""
-    src = _BACKEND / "src"
-    offenders = []
-    for py in src.rglob("*.py"):
-        text = py.read_text(errors="ignore")
-        for line in text.splitlines():
-            stripped = line.lstrip()
-            if stripped.startswith(("import dvc", "from dvc")) \
-               and "# noqa: R3-16" not in line:
-                offenders.append(f"{py.relative_to(_BACKEND)}: {line.strip()}")
-    assert not offenders, (
-        "dvc has been imported in src/ — this needs an integration "
-        "test + version compat verification (audit R3-16):\n  "
-        + "\n  ".join(offenders)
-    )
+# (R3-16 test_no_python_import_of_dvc removed 2026-06-05, R11-#71 — dvc/
+#  dvc-s3 deps + their only consumer src/data/versioning.py are gone, so
+#  there is no longer a dvc surface to guard.)
 
 
 # ── R3-18: optuna TPESampler(seed=42) reproducibility ────────────────────

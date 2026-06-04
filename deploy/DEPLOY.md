@@ -1754,8 +1754,6 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up
 docker compose -f docker/docker-compose.yml up -d --scale worker=4
 ```
 
-Для настоящего autoscale'а — см. `k8s/` (Helm/Kustomize).
-
 ### 10.7. Disaster recovery — полный restore на новый VPS
 
 Сценарий: backend-VPS недоступен (диск сгорел, Beget прилёг, IP
