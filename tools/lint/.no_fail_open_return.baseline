@@ -31,10 +31,8 @@ src/pipeline/task_queue.py:793  R9-T4-001 — training fallback registry; closes
 # branch as deliberate (and then move out of "broad except" to a typed one).
 src/pipeline/task_queue.py:200  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
 src/pipeline/task_queue.py:214  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
-src/pipeline/distributed_training.py:144  pre-R9 baseline; triage in R10 — Ray cluster start
 src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
 src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
-src/pipeline/streaming.py:197  pre-R9 baseline; triage in R10 — Kafka consumer poll
 src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
@@ -46,10 +44,6 @@ src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — C
 src/features/engineering.py:76  pre-R9 baseline; triage in R10 — feature engineering optional step
 src/features/engineering.py:84  pre-R9 baseline; triage in R10 — feature engineering optional step
 src/features/engineering.py:92  pre-R9 baseline; triage in R10 — feature engineering optional step
-src/models/online_learning.py:196  pre-R9 baseline; triage in R10 — incremental update fallback
-src/models/shap_storage.py:122  pre-R9 baseline; triage in R10 — SHAP flush best-effort
-src/models/registry_gates.py:63  pre-R9 baseline; triage in R10 — MLflow registry promote
-src/models/registry_gates.py:160  pre-R9 baseline; triage in R10 — MLflow registry stage lookup
 src/storage/upload_pipeline.py:175  pre-R9 baseline; triage in R10 — scan-stage error capture
 src/storage/upload_pipeline.py:204  pre-R9 baseline; triage in R10 — scan-stage final
 src/storage/upload_pipeline.py:291  pre-R9 baseline; triage in R10 — process-stage error capture
@@ -73,7 +67,5 @@ src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegra
 src/api/routers/training.py:293  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02)
 src/api/routers/training.py:333  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
 src/api/routers/training.py:346  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
-src/monitoring/advanced.py:203  pre-R9 baseline; triage in R10 — PSI computation fallback
-src/monitoring/drift.py:212  pre-R9 baseline; triage in R10 — drift save best-effort
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 

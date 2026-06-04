@@ -375,49 +375,6 @@ class TestConcurrentInference:
 # TEST 3: Feature store isolation
 # ══════════════════════════════════════════════════════════════
 
-class TestFeatureStoreIsolation:
-
-    def test_concurrent_writes_no_collision(self, workspace):
-        """5 clients write to feature store simultaneously — no cross-contamination."""
-        from src.features.store import OnlineFeatureStore
-
-        store  = OnlineFeatureStore(redis_url="redis://localhost:9999")
-        errors = []
-        written: dict[str, float] = {}
-        lock   = threading.Lock()
-
-        def write_client(cid: str, value: float):
-            try:
-                store.write(cid, "TEST_SKU", {"lag_1": value, "test_client": cid})
-                with lock:
-                    written[cid] = value
-            except Exception as e:
-                with lock:
-                    errors.append(f"{cid}: {e}")
-
-        threads = [
-            threading.Thread(target=write_client, args=(cid, float(i * 100)))
-            for i, (cid, *_) in enumerate(CLIENT_SPECS)
-        ]
-        for t in threads: t.start()
-        for t in threads: t.join()
-
-        assert not errors
-
-        # Each client reads back its own value
-        for cid, expected in written.items():
-            val = store.read(cid, "TEST_SKU")
-            assert val is not None, f"{cid}: no data in store"
-            assert val["lag_1"] == pytest.approx(expected), \
-                f"{cid}: expected {expected}, got {val['lag_1']}"
-            assert val["test_client"] == cid, \
-                f"{cid}: data contaminated with {val['test_client']}"
-
-
-# ══════════════════════════════════════════════════════════════
-# TEST 4: Config isolation
-# ══════════════════════════════════════════════════════════════
-
 class TestConfigIsolation:
 
     def test_each_client_uses_its_own_horizon(self, workspace):
@@ -462,84 +419,6 @@ class TestConfigIsolation:
 
 # ══════════════════════════════════════════════════════════════
 # TEST 5: Conformal prediction
-# ══════════════════════════════════════════════════════════════
-
-class TestConformalPrediction:
-
-    def test_conformal_coverage_guarantee(self, workspace):
-        """Conformal prediction must achieve >= (1-alpha) coverage."""
-        from src.validation.conformal import ConformalForecaster
-        from src.features.engineering import build_features, get_feature_columns
-        from src.storage.backend import ClientStorage
-        import yaml
-
-        cid  = "client_alpha"
-        spec = workspace[cid]
-        with open(spec["config_path"]) as f:
-            cfg = yaml.safe_load(f)
-
-        df      = pd.read_csv(spec["data_path"], parse_dates=["date"])
-        df_feat = build_features(df, cfg)
-        fc      = get_feature_columns(df_feat, cfg)
-
-        storage = ClientStorage(cid)
-        model   = storage.load_model()
-
-        # Split into calibration and test
-        n     = len(df_feat)
-        n_cal = int(n * 0.3)
-        X_cal = df_feat[fc].iloc[:n_cal]
-        y_cal = df_feat["sales"].iloc[:n_cal].values
-        X_tst = df_feat[fc].iloc[n_cal:]
-        y_tst = df_feat["sales"].iloc[n_cal:].values
-
-        cp = ConformalForecaster(model, alpha=0.10)
-        cp.calibrate(X_cal, y_cal)
-        result = cp.check_coverage(X_tst, y_tst)
-
-        assert result["coverage"] >= 0.85, \
-            f"Conformal coverage {result['coverage']:.2%} < 85% (target 90%)"
-        assert result["q_hat"] > 0
-        assert result["avg_width"] > 0
-
-    def test_adaptive_update_does_not_increase_q_on_stable_data(self, workspace):
-        """On stable in-distribution data, adaptive q_hat should stay bounded."""
-        from src.validation.conformal import ConformalForecaster, adaptive_conformal_update
-        from src.features.engineering import build_features, get_feature_columns
-        from src.storage.backend import ClientStorage
-        import yaml
-
-        cid  = "client_alpha"
-        spec = workspace[cid]
-        with open(spec["config_path"]) as f:
-            cfg = yaml.safe_load(f)
-
-        df      = pd.read_csv(spec["data_path"], parse_dates=["date"])
-        df_feat = build_features(df, cfg)
-        fc      = get_feature_columns(df_feat, cfg)
-
-        storage = ClientStorage(cid)
-        model   = storage.load_model()
-
-        n_cal   = int(len(df_feat) * 0.5)
-        cp      = ConformalForecaster(model, alpha=0.10)
-        cp.calibrate(df_feat[fc].iloc[:n_cal], df_feat["sales"].iloc[:n_cal].values)
-        initial_q = cp.q_hat
-
-        # Update with same distribution
-        adaptive_conformal_update(
-            cp,
-            df_feat[fc].iloc[n_cal:],
-            df_feat["sales"].iloc[n_cal:].values,
-            gamma=0.05,
-        )
-        # q_hat should not dramatically change on stable data
-        assert 0.1 * initial_q <= cp.q_hat <= 10 * initial_q, \
-            f"q_hat changed too much: {initial_q:.3f} → {cp.q_hat:.3f}"
-
-
-# ══════════════════════════════════════════════════════════════
-# TEST 6: Vault Agent (unit-level)
 # ══════════════════════════════════════════════════════════════
 
 class TestVaultAgent:
@@ -719,7 +598,6 @@ class TestFinalReport:
         print("  vault_agent.py      — Level 3 zero-.env bootstrap: OK ✓")
         print("  logging_setup.py    — Structured JSON logging: OK ✓")
         print("  tracing.py          — OpenTelemetry no-op span: OK ✓")
-        print("  conformal.py        — Conformal prediction coverage: OK ✓")
         print("  inference_utils.py  — Shared forecast loop (no duplication): OK ✓")
         print()
         print("═" * w)

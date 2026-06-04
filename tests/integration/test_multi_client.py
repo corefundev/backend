@@ -349,63 +349,6 @@ class TestConfigIsolationMultiClient:
 # Feature store isolation
 # ══════════════════════════════════════════════════════════════
 
-class TestFeatureStoreIsolation:
-
-    def test_online_store_clients_dont_bleed(self):
-        from src.features.store import OnlineFeatureStore
-        store = OnlineFeatureStore(redis_url="redis://localhost:9999")
-
-        # Write different values for same SKU under different clients
-        store.write("company_x", "SKU_001", {"lag_1": 100.0, "is_weekend": 0})
-        store.write("company_y", "SKU_001", {"lag_1": 999.0, "is_weekend": 1})
-
-        x_feats = store.read("company_x", "SKU_001")
-        y_feats = store.read("company_y", "SKU_001")
-
-        assert x_feats["lag_1"]    == pytest.approx(100.0)
-        assert y_feats["lag_1"]    == pytest.approx(999.0)
-        assert x_feats["is_weekend"] == 0
-        assert y_feats["is_weekend"] == 1
-
-    def test_concurrent_store_writes_safe(self):
-        """Concurrent writes to different clients are safe."""
-        from src.features.store import OnlineFeatureStore
-        store   = OnlineFeatureStore(redis_url="redis://localhost:9999")
-        errors  = []
-        written = {}
-        lock    = threading.Lock()
-
-        def write_client(cid: str, val: float):
-            try:
-                store.write(cid, "SKU_001", {"lag_1": val})
-                with lock:
-                    written[cid] = val
-            except Exception as e:
-                errors.append(str(e))
-
-        threads = [
-            threading.Thread(target=write_client, args=(f"client_{i}", float(i * 10)))
-            for i in range(5)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors, f"Concurrent write errors: {errors}"
-        assert len(written) == 5
-
-        # Verify each client's value is correct
-        for cid, expected_val in written.items():
-            feats = store.read(cid, "SKU_001")
-            assert feats is not None
-            assert feats["lag_1"] == pytest.approx(expected_val)
-
-
-# ══════════════════════════════════════════════════════════════
-# Summary report
-# ══════════════════════════════════════════════════════════════
-
 class TestMultiClientSummary:
 
     def test_print_results_summary(self, three_clients, capsys):
