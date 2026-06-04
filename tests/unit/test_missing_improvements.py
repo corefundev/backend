@@ -50,7 +50,6 @@ def _cfg(horizon=7) -> dict:
                       "price": True, "promo": True, "stock": True,
                       "weather": {"enabled": False},
                       "holidays": {"enabled": False}},
-        "online_learning": {"full_retrain_every_n_updates": 5},
         "cold_start": {"min_history_days": 28, "n_neighbors": 2},
         "anomaly_detection": {"enabled": False},
         "hpo": {"enabled": False},
