@@ -102,8 +102,3 @@ api:
   rate_limiting:
     enabled: true
     default_tier: pro
-
-monitoring:
-  drift_threshold: 0.15
-  alert_wmape_threshold: 0.30
-  psi_threshold: 0.25
