@@ -134,32 +134,36 @@ def _mark_run_failed(runs, run_id: Optional[str], error: str) -> None:
 
 def _resolve_data_path(
     data_path: str,
-    extend_from_path: Optional[str],
+    extend_from_paths: Optional[list[str]],
     config_path: str,
     runs,
     run_id: Optional[str],
 ):
     """Resolve the effective parquet path the training pipeline reads.
 
+    `extend_from_paths`: the client's prior processed datasets (oldest→
+    newest) to merge with the new upload for a full-history retrain
+    (R11-#75). Empty/None → no merge, train on `data_path` alone.
+
     Returns `(effective_data_path, cleanup_path_or_None)`:
       - effective_data_path: what `run_training_pipeline` should read.
-      - cleanup_path_or_None: temp file to unlink after training; None
-        when no merge was performed.
+      - cleanup_path_or_None: temp merged file to unlink after training;
+        None when no merge was performed.
 
     Failure during merge writes training_runs FAILED and re-raises so
     the orchestrator's outer behaviour stays "merge fail → job fail".
     """
-    if not extend_from_path:
+    if not extend_from_paths:
         return data_path, None
     try:
         merged = _merge_datasets(
-            base_path=extend_from_path,
+            base_paths=extend_from_paths,
             new_path=data_path,
             config_path=config_path,
         )
         logger.info(
-            "extend_from: merged %s + %s → %s",
-            extend_from_path, data_path, merged,
+            "extend_from: merged %d prior dataset(s) + %s → %s",
+            len(extend_from_paths), data_path, merged,
         )
         return merged, merged
     except Exception as e:    # noqa: BLE001
@@ -390,7 +394,7 @@ def _training_job(
     config_path: str = "configs/config.yaml",
     storage_backend: str = "local",
     run_id: Optional[str] = None,
-    extend_from_path: Optional[str] = None,
+    extend_from_paths: Optional[list[str]] = None,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.
@@ -399,11 +403,11 @@ def _training_job(
     training_runs registry so the API can serve a "training history"
     independent of RQ's 24h result_ttl.
 
-    If `extend_from_path` is supplied, the worker concatenates the
-    parquet at that path with the new dataset at `data_path`,
-    deduplicates by (sku, date) preferring new values, and trains
-    the model from scratch on the combined set. This is the
-    "продолжить обучение свежими данными" flow.
+    If `extend_from_paths` is supplied, the worker merges those prior
+    processed datasets (oldest→newest) with the new dataset at
+    `data_path`, deduplicates by (sku, date) preferring newer values,
+    and trains the model from scratch on the combined full-history set.
+    This is the "продолжить обучение свежими данными" flow (R11-#75).
 
     R5-M5 (2026-05-17) — orchestrator only; concerns split into
     named helpers above (see comment block before `_now_iso`).
@@ -415,7 +419,7 @@ def _training_job(
 
     effective_data_path, merged_cleanup = _resolve_data_path(
         data_path=data_path,
-        extend_from_path=extend_from_path,
+        extend_from_paths=extend_from_paths,
         config_path=config_path,
         runs=runs,
         run_id=run_id,
@@ -444,21 +448,25 @@ def _training_job(
 
 
 def _merge_datasets(
-    base_path:   str,
+    base_paths:  list[str],
     new_path:    str,
     config_path: str,
 ) -> str:
     """
-    Concatenate two processed parquet files into a single dataset
-    used for full retraining. Rules:
-      - sort by (sku_col, date_col)
-      - drop duplicate (sku, date) rows, keeping the value from the
-        NEWER dataset (so re-sent days override older history)
-      - written to /tmp as a fresh parquet; caller is responsible
-        for cleanup once training reads it
+    Merge the client's prior processed datasets (`base_paths`, ordered
+    OLDEST→NEWEST) with the new upload (`new_path`) into one dataset for
+    full-history retraining from scratch (R11-#75, Вариант A). Rules:
+      - concat order = [*base_paths (oldest→newest), new_path]; on a
+        (sku, date) collision `keep='last'` retains the value from the
+        NEWEST source — the current upload wins, and among priors the
+        newer upload wins. This is what makes accumulation correct across
+        multiple client returns (the old two-dataset merge lost history).
+      - drop duplicate (sku, date) rows; sort by (sku, date).
+      - written to /tmp as a fresh parquet; caller cleans up after
+        training reads it.
 
-    Both input paths can be local or s3:// — load_data already handles
-    both. Schema mismatches (different sku/date column names) raise.
+    All paths can be local or s3:// — load_data handles both. A schema
+    mismatch (missing sku/date column in any source) raises.
     """
     import pandas as _pd
     import tempfile, os as _os
@@ -468,27 +476,23 @@ def _merge_datasets(
     sku_col  = config["data"]["sku_col"]
     date_col = config["data"]["date_col"]
 
-    base = load_data(base_path, config)
-    new  = load_data(new_path,  config)
+    frames = []
+    for p in (*base_paths, new_path):
+        df = load_data(p, config)
+        for col in (sku_col, date_col):
+            if col not in df.columns:
+                raise ValueError(f"dataset {p!r} missing column {col!r}")
+        df[date_col] = _pd.to_datetime(df[date_col])
+        frames.append(df)
 
-    for col in (sku_col, date_col):
-        if col not in base.columns:
-            raise ValueError(f"base dataset missing column {col!r}")
-        if col not in new.columns:
-            raise ValueError(f"new dataset missing column {col!r}")
-
-    base[date_col] = _pd.to_datetime(base[date_col])
-    new[date_col]  = _pd.to_datetime(new[date_col])
-
-    # `new` last in the concat → keep='last' on duplicates retains
-    # rows from the new dataset when the (sku, date) collides.
-    combined = _pd.concat([base, new], ignore_index=True)
+    combined = _pd.concat(frames, ignore_index=True)
     before   = len(combined)
     combined = combined.drop_duplicates(subset=[sku_col, date_col], keep="last")
     combined = combined.sort_values([sku_col, date_col]).reset_index(drop=True)
     after    = len(combined)
     if before != after:
-        logger.info("merge: removed %d duplicate (sku,date) rows", before - after)
+        logger.info("merge: %d sources → removed %d duplicate (sku,date) rows",
+                    len(frames), before - after)
 
     fd, out_path = tempfile.mkstemp(suffix=".parquet", prefix="merged-")
     _os.close(fd)
@@ -710,7 +714,7 @@ def enqueue_training(
     storage_backend: str | None = None,
     timeout: int = 7200,          # 2 hours max
     run_id: Optional[str] = None,
-    extend_from_path: Optional[str] = None,
+    extend_from_paths: Optional[list[str]] = None,
 ) -> Optional[str]:
     """
     Enqueue a training job. Returns rq job_id.
@@ -719,9 +723,10 @@ def enqueue_training(
     `run_id` is the training_runs registry row created upstream. The
     worker uses it to update lifecycle status — see `_training_job`.
 
-    `extend_from_path` is the parquet of a prior dataset that should
-    be merged with `data_path` before training (full retrain on the
-    union, deduped by sku+date with the new file winning on overlap).
+    `extend_from_paths` are the client's prior processed datasets
+    (oldest→newest) merged with `data_path` before training — a full
+    retrain on the union of all the client's history, deduped by
+    (sku, date) with newer uploads winning on overlap (R11-#75).
     """
     backend = storage_backend or os.environ.get("STORAGE_BACKEND", "local")
     try:
@@ -734,7 +739,7 @@ def enqueue_training(
                 config_path=config_path,
                 storage_backend=backend,
                 run_id=run_id,
-                extend_from_path=extend_from_path,
+                extend_from_paths=extend_from_paths,
             ),
             job_timeout=timeout,
             result_ttl=86400,       # keep result 24h

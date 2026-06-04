@@ -20,17 +20,17 @@
 # training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:760  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
+src/pipeline/task_queue.py:770  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
 src/pipeline/task_queue.py:765  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:773  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
-src/pipeline/task_queue.py:793  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:778  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:798  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,
 # convert the swallow into a persisted error, or document the fail-open
 # branch as deliberate (and then move out of "broad except" to a typed one).
-src/pipeline/task_queue.py:200  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
-src/pipeline/task_queue.py:214  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
+src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
+src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
 src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
 src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
 src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
@@ -64,8 +64,8 @@ src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegra
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
-src/api/routers/training.py:293  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02)
-src/api/routers/training.py:333  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
-src/api/routers/training.py:346  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
+src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02)
+src/api/routers/training.py:334  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
+src/api/routers/training.py:347  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 
