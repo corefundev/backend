@@ -15,8 +15,8 @@ cp .env.example .env && nano .env
 python3 -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_hex(32))"
 python3 -c "import secrets; print('API_KEY=' + secrets.token_urlsafe(32))"
 
-# 3. Запустить
-cd docker && docker compose -f docker-compose.beget.yml up -d
+# 3. Запустить (базовый стек; продакшен разворачивается через CD — см. deploy/DEPLOY.md)
+cd docker && docker compose up -d
 
 # 4. Проверить
 curl http://localhost:8000/health
