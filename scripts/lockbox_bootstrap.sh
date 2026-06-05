@@ -84,7 +84,13 @@ SIGNATURE_B64=$(printf '%s' "$SIGNING_INPUT" \
 JWT="${SIGNING_INPUT}.${SIGNATURE_B64}"
 
 # ── 3. Exchange JWT → IAM token ────────────────────────────────────
-IAM_RESP=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+# Bounded retry on transient faults only: --retry covers 408/429/5xx and
+# network errors, --retry-connrefused adds connection-refused/unreachable;
+# -f keeps deterministic 4xx (bad JWT) failing fast. Mirrors the Python
+# bootstrap's retry policy (src/auth/lockbox_agent.py::_urlopen_json).
+CURL_RETRY="--retry 5 --retry-delay 1 --retry-max-time 30 --retry-connrefused --connect-timeout 10 --max-time 25"
+# shellcheck disable=SC2086  # CURL_RETRY is intentionally word-split into flags
+IAM_RESP=$(curl -fsS $CURL_RETRY -X POST -H 'Content-Type: application/json' \
     -d "{\"jwt\":\"$JWT\"}" \
     https://iam.api.cloud.yandex.net/iam/v1/tokens)
 IAM_TOKEN=$(printf '%s' "$IAM_RESP" | jq -r '.iamToken')
@@ -96,7 +102,8 @@ if [ -z "$IAM_TOKEN" ] || [ "$IAM_TOKEN" = "null" ]; then
 fi
 
 # ── 4. Fetch Lockbox payload ───────────────────────────────────────
-PAYLOAD_JSON=$(curl -fsS \
+# shellcheck disable=SC2086  # CURL_RETRY is intentionally word-split into flags
+PAYLOAD_JSON=$(curl -fsS $CURL_RETRY \
     -H "Authorization: Bearer $IAM_TOKEN" \
     "https://payload.lockbox.api.cloud.yandex.net/lockbox/v1/secrets/$YC_LOCKBOX_SECRET_ID/payload")
 unset IAM_TOKEN

@@ -126,7 +126,59 @@ def _build_jwt(sa_key: dict, now: int) -> str:
     return (signing_in + b"." + _b64url(sig)).decode("ascii")
 
 
-# ── HTTP helpers ─────────────────────────────────────────────────────────
+# ── HTTP helpers (bounded retry on transient failures) ──────────────────
+#
+# A transient network blip — a Yandex egress hiccup, an IAM/Lockbox 5xx —
+# must NOT fail the secret bootstrap. If it did, a brief outage would break
+# a CD deploy or, far worse, leave every container without secrets after a
+# reboot that lands during the blip (fail-closed → the whole stack refuses
+# to start). So we retry with exponential backoff, but ONLY on transient
+# errors (connection/timeout, HTTP 5xx). Deterministic 4xx (bad SA key,
+# wrong secret id, missing IAM role) fail FAST — retrying a 403 is pointless.
+# Once the attempt budget is exhausted we still raise: fail-closed is
+# preserved, merely made resilient to a short-lived network fault.
+
+_RETRY_ATTEMPTS     = max(1, int(os.environ.get("YC_LOCKBOX_RETRY_ATTEMPTS", "5")))
+_RETRY_BACKOFF_BASE = float(os.environ.get("YC_LOCKBOX_RETRY_BACKOFF", "0.5"))
+_RETRY_BACKOFF_CAP  = 8.0
+
+
+def _sleep_backoff(attempt: int) -> None:
+    """Exponential backoff before retry `attempt` (1-based): base·2^(attempt-1), capped."""
+    time.sleep(min(_RETRY_BACKOFF_BASE * (2 ** (attempt - 1)), _RETRY_BACKOFF_CAP))
+
+
+def _urlopen_json(req: urllib.request.Request, timeout: int, what: str) -> dict:
+    """urlopen + JSON-decode with bounded retry on transient errors.
+
+    Retries connection/timeout failures and HTTP 5xx; raises immediately on
+    HTTP 4xx (deterministic). Raises LockboxError once the attempt budget is
+    spent — fail-closed, just resilient to a brief outage.
+    """
+    last: Exception | None = None
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:       # subclass of URLError — catch first
+            body_text = e.read().decode(errors="replace")
+            if e.code < 500 or attempt == _RETRY_ATTEMPTS:
+                raise LockboxError(f"{what} → {e.code}: {body_text}") from e
+            last = e
+            logger.warning("%s → %d (transient, attempt %d/%d) — retrying",
+                           what, e.code, attempt, _RETRY_ATTEMPTS)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            reason = getattr(e, "reason", e)
+            if attempt == _RETRY_ATTEMPTS:
+                raise LockboxError(f"{what} failed: {reason}") from e
+            last = e
+            logger.warning("%s failed: %s (attempt %d/%d) — retrying",
+                           what, reason, attempt, _RETRY_ATTEMPTS)
+        _sleep_backoff(attempt)
+    # The loop always returns or raises on the final attempt; this is a
+    # defensive fail-closed backstop so no code path can fall through silently.
+    raise LockboxError(f"{what} failed after {_RETRY_ATTEMPTS} attempts: {last}")
+
 
 def _post_json(url: str, body: dict, headers: dict | None = None, timeout: int = 10) -> dict:
     req = urllib.request.Request(
@@ -135,26 +187,12 @@ def _post_json(url: str, body: dict, headers: dict | None = None, timeout: int =
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode(errors="replace")
-        raise LockboxError(f"POST {url} → {e.code}: {body_text}") from e
-    except urllib.error.URLError as e:
-        raise LockboxError(f"POST {url} failed: {e.reason}") from e
+    return _urlopen_json(req, timeout, f"POST {url}")
 
 
 def _get_json(url: str, headers: dict | None = None, timeout: int = 10) -> dict:
     req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode(errors="replace")
-        raise LockboxError(f"GET {url} → {e.code}: {body_text}") from e
-    except urllib.error.URLError as e:
-        raise LockboxError(f"GET {url} failed: {e.reason}") from e
+    return _urlopen_json(req, timeout, f"GET {url}")
 
 
 # ── Public API ───────────────────────────────────────────────────────────
