@@ -12,9 +12,24 @@ present + their feature/target verified live.
 
 ## Fresh-VPS bootstrap
 
-| Script | When to run | Notes |
-|---|---|---|
-| `scripts/deploy_vps.sh` | **Once**, on a brand-new clean VPS (Ubuntu 22.04 / Debian 12) before the first CD deploy. Installs Docker, clones the stack, lays down directory structure + bind-mount dirs, primes `/srv/backend`. | After this, all subsequent deploys go through GitHub Actions CD (`scripts/cd_deploy.sh`). This script is the one-time provisioning step CD assumes has already happened. Re-running on an existing VPS is NOT idempotent for all steps — read before re-use. |
+The legacy one-shot `scripts/deploy_vps.sh` provisioner was **removed
+2026-06-06 (R11-#72 / L13)**: it composed against the dormant
+`docker-compose.beget.yml` — a single-file legacy stack that no longer
+matched the live CD compose set (`docker-compose.yml` + `prod` + `minimal`
++ `lockbox` + `replication`) — and shipped `:latest` tags + a `…-change-me`
+Grafana admin password.
+
+Provisioning a brand-new backend VPS today is a **manual** step until the
+Ansible scaffold lands (tracked as R11-#74):
+
+1. Install Docker, then pin the `overlay2` storage driver in
+   `/etc/docker/daemon.json` — see
+   [`docker-storage-driver-overlay2.md`](../runbook/docker-storage-driver-overlay2.md)
+   (required for cAdvisor metrics).
+2. Lay down `/srv/backend` with the repo's `docker/` configs, the bind-mount
+   directories, and `secrets/yc-sa-key.json` (the Lockbox SA key).
+3. Run the migrate job, then let GitHub Actions CD (`scripts/cd_deploy.sh`)
+   take over all subsequent deploys.
 
 ## Lockbox secret provisioning (run with `yc` CLI authenticated to the right folder)
 
