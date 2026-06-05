@@ -110,6 +110,13 @@ SKIPPED=0
 while [ "$i" -lt "$N" ]; do
     K=$(printf '%s' "$PAYLOAD_JSON" | jq -r ".entries[$i].key")
     V=$(printf '%s' "$PAYLOAD_JSON" | jq -r ".entries[$i].textValue // empty")
+    # R11-L11: the key NAME reaches `eval`/`export` below — keys are trusted
+    # today, but a shell metacharacter in a name would be an injection
+    # vector. Skip anything that isn't a plain env-var identifier.
+    case "$K" in
+        ''|[0-9]*|*[!A-Za-z0-9_]*)
+            SKIPPED=$((SKIPPED + 1)); i=$((i + 1)); continue ;;
+    esac
     if [ -n "$ALLOWED" ]; then
         # Allowlist gate — skip keys not in $LOCKBOX_ALLOWED_KEYS.
         case " $ALLOWED " in

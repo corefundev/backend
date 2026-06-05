@@ -56,7 +56,7 @@ src/audit/log.py:257  R9-T4-004 — audit replica fallback; close as part of T6-
 src/audit/log.py:446  pre-R9 baseline; triage in R10 — list_for_client read fallback (+61 lines after R10 phantom-metric Counter)
 src/audit/log.py:486  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter)
 src/audit/log.py:556  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines after R10 phantom-metric Counter)
-src/api/routers/auth.py:369  pre-R9 baseline; triage in R10 — signup OAuth race retry
+src/api/routers/auth.py:362  pre-R9 baseline; triage in R10 — signup OAuth race retry
 src/api/routers/config.py:201  pre-R9 baseline; triage in R10 — config-reset write fallback
 src/api/routers/ops.py:145  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. +4 lines after R11-H7 added logging + JSONResponse imports (2026-06-01)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback

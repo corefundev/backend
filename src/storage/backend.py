@@ -54,8 +54,25 @@ _SIG_MAGIC = b"SKUSIG1"
 _SIG_LEN   = 32   # SHA-256 digest length
 
 
+_warned_jwt_fallback = False
+
+
 def _signing_key() -> bytes | None:
-    key = os.environ.get("MODEL_SIGNING_KEY") or os.environ.get("JWT_SECRET_KEY")
+    global _warned_jwt_fallback
+    key = os.environ.get("MODEL_SIGNING_KEY")
+    if not key:
+        key = os.environ.get("JWT_SECRET_KEY")
+        if key and not _warned_jwt_fallback:
+            # R11-L7: reusing the JWT secret as the model-signing key shares
+            # one secret across two HMAC domains (auth tokens + model
+            # tamper-evidence). Fine as a dev fallback; in production
+            # provision a DISTINCT MODEL_SIGNING_KEY in Lockbox. Warn once.
+            _warned_jwt_fallback = True
+            logger.warning(
+                "MODEL_SIGNING_KEY unset — falling back to JWT_SECRET_KEY for "
+                "model signing (key reuse across HMAC domains). Provision a "
+                "distinct MODEL_SIGNING_KEY in production."
+            )
     if not key:
         return None
     # Allow hex-encoded keys too (common output of secrets.token_hex).
