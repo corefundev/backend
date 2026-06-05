@@ -561,7 +561,9 @@ def verify_chain(*, limit: int = 10_000) -> ChainVerifyResult:
     for r in rows:
         checked += 1
         actual_prev = r.get("prev_signature") or _GENESIS_SIGNATURE
-        if actual_prev != expected_prev:
+        # R11-L6: constant-time compare on the HMAC chain (defence-in-depth;
+        # this is an offline operator check, no remote timing oracle).
+        if not hmac.compare_digest(str(actual_prev), str(expected_prev)):
             return ChainVerifyResult(
                 ok=False, rows_checked=checked, first_bad_id=int(r["id"]),
                 reason="prev_signature_mismatch",
@@ -583,7 +585,7 @@ def verify_chain(*, limit: int = 10_000) -> ChainVerifyResult:
             metadata=r.get("metadata") or {},
         )
         expected_sig = _compute_signature(key, actual_prev, canonical)
-        if expected_sig != r["signature"]:
+        if not hmac.compare_digest(str(expected_sig), str(r["signature"])):
             return ChainVerifyResult(
                 ok=False, rows_checked=checked, first_bad_id=int(r["id"]),
                 reason="signature_mismatch",

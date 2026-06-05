@@ -260,19 +260,11 @@ app = FastAPI(
 #   prod:   FRONTEND_ORIGINS=https://web.example.com
 # ══════════════════════════════════════════════════════════════════
 from fastapi.middleware.cors import CORSMiddleware
-
-def _parse_origins() -> list[str]:
-    raw = os.environ.get("FRONTEND_ORIGINS", "")
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
-    if not origins:
-        # Dev fallback — NEVER falls back to "*" because we send Authorization
-        # headers; a wildcard origin would be refused by browsers anyway.
-        origins = ["http://localhost:5173"]
-    return origins
+from src.api._origins import parse_frontend_origins  # R11-L14 — shared helper
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_parse_origins(),
+    allow_origins=parse_frontend_origins(),
     allow_credentials=False,                       # JWT in header, no cookies
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "x-api-key", "X-Request-ID"],

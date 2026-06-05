@@ -76,17 +76,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["auth"])
 
 
-def _parse_origins() -> list[str]:
-    """Mirror of main.py's CORS helper — used here to validate that
-    `FRONTEND_OAUTH_RETURN_URL` (OAuth post-callback redirect) points
-    to one of the trusted frontend origins (open-redirect guard).
-    Keeping a local copy avoids importing main.py back into a router
-    (which would cycle on app startup)."""
-    raw = os.environ.get("FRONTEND_ORIGINS", "")
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
-    if not origins:
-        origins = ["http://localhost:5173"]
-    return origins
+# R11-L14: _parse_origins() deduped into src.api._origins.parse_frontend_origins
+# (the OAuth open-redirect guard below validates FRONTEND_OAUTH_RETURN_URL
+# against the same trusted-origin set the CORS middleware uses).
+from src.api._origins import parse_frontend_origins
 
 class TokenRequest(BaseModel):
     # Length bounds: client_id matches our generated id format
@@ -925,7 +918,7 @@ def _frontend_return_url() -> str:
         raise RuntimeError(f"FRONTEND_OAUTH_RETURN_URL missing host: {raw!r}")
     # Must match one of the trusted frontend origins
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    allowed = _parse_origins()
+    allowed = parse_frontend_origins()
     if origin not in allowed:
         raise RuntimeError(
             f"FRONTEND_OAUTH_RETURN_URL origin {origin!r} is not in "
@@ -1218,7 +1211,13 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
         qs["api_key"] = plain_api_key
 
     import urllib.parse as _up
-    final_url = f"{return_url}?{_up.urlencode(qs)}"
+    # R11-L1: deliver the token / api_key in the URL FRAGMENT (#…), not the
+    # query string (?…). A fragment is never sent to the server (stays out
+    # of nginx/access logs and the Referer header on the next request) — the
+    # query string would leak the JWT + api_key into history, logs and any
+    # third-party request the return page makes. The frontend reads
+    # window.location.hash and immediately history.replaceState()-scrubs it.
+    final_url = f"{return_url}#{_up.urlencode(qs)}"
 
     response = RedirectResponse(final_url, status_code=302)
     # Defence-in-depth: a misbehaving proxy or browser cache must not

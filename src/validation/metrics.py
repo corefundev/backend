@@ -144,10 +144,17 @@ def aggregate_metrics(
                 naive_errors.append(float(np.mean(np.abs(np.diff(tv)))))
                 mae_errors.append(float(np.mean(np.abs(yt - yp))))
             if naive_errors:
-                pooled_mae   = float(np.mean(mae_errors))
-                pooled_naive = float(np.mean(naive_errors))
+                # R11-L16: MASE is a per-SKU ratio — average the per-SKU MASE
+                # values, NOT (mean MAE)/(mean naive). The old ratio-of-means
+                # was a biased estimator (dominated by high-volume SKUs whose
+                # absolute MAE/naive dwarf the rest).
+                per_sku_mase = [
+                    mae / naive
+                    for mae, naive in zip(mae_errors, naive_errors)
+                    if naive > 1e-10
+                ]
                 agg["mase_global"] = (
-                    pooled_mae / pooled_naive if pooled_naive > 1e-10 else float("nan")
+                    float(np.mean(per_sku_mase)) if per_sku_mase else float("nan")
                 )
             else:
                 agg["mase_global"] = float("nan")
