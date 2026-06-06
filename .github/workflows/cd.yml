@@ -201,6 +201,20 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
+      - name: Guard — refuse a commit older than what's live (staging)
+        # R11-#79: blocks a stale rerun / long-pending CD run from rsyncing
+        # an OLD commit's config tree onto the host (2026-06-06 WAL outage).
+        # Runs BEFORE the sync so the obsolete configs never land.
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+        run: |
+          set -euo pipefail
+          THIS_TS=$(git show -s --format=%ct "$GITHUB_SHA")
+          MARKER=$(ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${USER}@${HOST}" 'cat /srv/backend/.deployed_commit 2>/dev/null || true')
+          bash scripts/cd_guard_not_older.sh "$THIS_TS" "$MARKER"
+
       - name: Sync configs to staging /srv/backend
         env:
           HOST: ${{ secrets.STAGING_HOST }}
@@ -253,8 +267,10 @@ jobs:
           # then run it via plain ssh with env-vars passed on the command line.
           scp -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
               ./scripts/cd_deploy.sh "${USER}@${HOST}:/tmp/cd_deploy.sh"
+          DEPLOY_COMMIT_TS=$(git show -s --format=%ct "$GITHUB_SHA")
           ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
               env GHCR_USER="${GHCR_USER}" GHCR_PW="${GHCR_PW}" \
+                  DEPLOY_COMMIT_SHA="${GITHUB_SHA}" DEPLOY_COMMIT_TS="${DEPLOY_COMMIT_TS}" \
                   bash /tmp/cd_deploy.sh staging "${TAG}"
 
   smoke-staging:
@@ -339,6 +355,19 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
+      - name: Guard — refuse a commit older than what's live (prod)
+        # R11-#79: same older-commit guard as staging — never let a stale
+        # rerun revert prod's config tree. Runs BEFORE the sync.
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          THIS_TS=$(git show -s --format=%ct "$GITHUB_SHA")
+          MARKER=$(ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
+              "${USER}@${HOST}" 'cat /srv/backend/.deployed_commit 2>/dev/null || true')
+          bash scripts/cd_guard_not_older.sh "$THIS_TS" "$MARKER"
+
       - name: Sync configs to prod /srv/backend
         env:
           HOST: ${{ secrets.VPS_HOST }}
@@ -376,8 +405,10 @@ jobs:
           echo "  TAG-prefix=${TAG::5}  HOST=${HOST}  USER=${USER}"
           scp -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts \
               ./scripts/cd_deploy.sh "${USER}@${HOST}:/tmp/cd_deploy.sh"
+          DEPLOY_COMMIT_TS=$(git show -s --format=%ct "$GITHUB_SHA")
           ssh -i ~/.ssh/id_ed25519 -o UserKnownHostsFile=~/.ssh/known_hosts "${USER}@${HOST}" \
               env GHCR_USER="${GHCR_USER}" GHCR_PW="${GHCR_PW}" \
+                  DEPLOY_COMMIT_SHA="${GITHUB_SHA}" DEPLOY_COMMIT_TS="${DEPLOY_COMMIT_TS}" \
                   bash /tmp/cd_deploy.sh production "${TAG}"
 
   smoke-prod:
