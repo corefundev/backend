@@ -466,4 +466,16 @@ docker image prune -af --filter "until=72h" 2>&1 \
     | tail -5 \
     || true
 
+# ── Record the deployed commit (CD older-commit guard, R11-#79) ───────
+# Written ONLY here — after the image-identity assertions above pass, i.e.
+# on a fully successful deploy. The NEXT deploy's preflight
+# (scripts/cd_guard_not_older.sh) reads this marker and refuses any commit
+# OLDER than the epoch recorded here, blocking a stale rerun from rsyncing
+# an obsolete config tree onto the host (root cause of the 2026-06-06
+# staging WAL-archive outage). See feedback_old_cd_run_reverts_configs.
+if [ -n "${DEPLOY_COMMIT_SHA:-}" ] && [ -n "${DEPLOY_COMMIT_TS:-}" ]; then
+    printf '%s %s\n' "$DEPLOY_COMMIT_SHA" "$DEPLOY_COMMIT_TS" > /srv/backend/.deployed_commit
+    echo "  recorded deployed commit ${DEPLOY_COMMIT_SHA:0:12} (epoch ${DEPLOY_COMMIT_TS})"
+fi
+
 echo "  $ENVIRONMENT deploy complete @ $TAG"
