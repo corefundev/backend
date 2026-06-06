@@ -36,3 +36,28 @@ pg_replication_lag:
     - seconds:
         usage: "GAUGE"
         description: "Replication apply lag in seconds (replica-side; 0 on primary)"
+
+# ─────────────────────────────────────────────────────────────────────────
+# R11-#80 (2026-06-06) — WAL-archiving ENABLED gauge.
+#
+# WalArchiveFailing keys on `pg_stat_archiver_failed_count` and WalArchiveStale
+# on archive age + write activity. BOTH stay quiet when archive_mode is simply
+# OFF — nothing archives, so nothing fails and nothing ages. A stale-config
+# deploy set archive_mode=off on 2026-06-06 and both WAL alerts FALSE-RESOLVED
+# while the WAL→S3 stream was dead (a silent PITR/durability gap).
+#
+# This emits `pg_archive_mode_enabled` = 1 when archiving is on, 0 otherwise;
+# alert PostgresArchiveModeOff fires on 0. master:true → primary only (a
+# standby's archive_mode is irrelevant). Naming: `pg_archive_mode` + column
+# `enabled` → metric `pg_archive_mode_enabled`.
+# ─────────────────────────────────────────────────────────────────────────
+
+pg_archive_mode:
+  query: |
+    SELECT CASE WHEN setting = 'on' THEN 1 ELSE 0 END AS enabled
+    FROM pg_settings WHERE name = 'archive_mode'
+  master: true
+  metrics:
+    - enabled:
+        usage: "GAUGE"
+        description: "1 if postgres archive_mode=on (WAL archiving to S3 enabled), else 0"
