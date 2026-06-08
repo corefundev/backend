@@ -47,16 +47,23 @@ pg_replication_lag:
 # while the WAL→S3 stream was dead (a silent PITR/durability gap).
 #
 # This emits `pg_archive_mode_enabled` = 1 when archiving is on, 0 otherwise;
-# alert PostgresArchiveModeOff fires on 0. master:true → primary only (a
-# standby's archive_mode is irrelevant). Naming: `pg_archive_mode` + column
+# alert PostgresArchiveModeOff fires on 0. Naming: `pg_archive_mode` + column
 # `enabled` → metric `pg_archive_mode_enabled`.
+#
+# master: false — MUST match the working pg_replication_lag query above. With
+# this exporter's config `master: true` is NOT honored and the query silently
+# never runs (verified live 2026-06-08: pg_replication_lag_seconds[master:false]
+# emitted while a master:true pg_archive_mode emitted nothing). The query runs
+# on every scraped server; the alert filters job="postgres" so it keys on the
+# PRIMARY only (a standby's pg_archive_mode_enabled{job="postgres-replica"} is
+# ignored by the rule).
 # ─────────────────────────────────────────────────────────────────────────
 
 pg_archive_mode:
   query: |
     SELECT CASE WHEN setting = 'on' THEN 1 ELSE 0 END AS enabled
     FROM pg_settings WHERE name = 'archive_mode'
-  master: true
+  master: false
   metrics:
     - enabled:
         usage: "GAUGE"
