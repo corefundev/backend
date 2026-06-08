@@ -7,7 +7,9 @@
 # Это позволяет pip разрешить конфликты автоматически.
 #
 # Проверенные совместимые комбинации:
-#   mlflow 3.11.1 + pyarrow 17.0.0 (mlflow 3.x supports pyarrow 17/18/19)
+#   mlflow 3.13.0 + pyarrow 23.0.1 (mlflow 3.13 allows pyarrow<25,>=4;
+#     mlflow 3.13 also caps numpy<3 / scipy<2 / sklearn<2 / pandas<3,
+#     so the existing pins + the scipy<2 evidently wedge all hold)
 #   evidently 0.5.0 + opentelemetry-api>=1.25.0
 # ══════════════════════════════════════════════════════
 
@@ -24,13 +26,15 @@ scikit-learn==1.4.2
 # evidently 0.6+ / a scipy CVE). Do NOT remove — dropping it lets the
 # resolver float scipy to 2.x and break evidently.
 scipy==1.13.0
-# Audit R4-19 (2026-05-17 Tier 6b finding): pyarrow 15.0.2 carried
-# PYSEC-2024-161 (CVE-2024-52338, buffer-overflow in RecordBatchRpcReader,
-# HIGH per trivy/GHSA). Fix landed in 17.0.0. Bumped sandbox's
-# requirements-sandbox.txt in LOCKSTEP so the parquet IPC format stays
-# consistent across the sandbox-write → main-pipeline-read boundary
-# (R3-3 lesson: pyarrow version skew silently breaks deserialization).
-pyarrow==17.0.0            # 17.x: совместим с mlflow 3.x, закрывает PYSEC-2024-161
+# Audit R4-19 (2026-05-17): pyarrow 15.0.2 → 17.0.0 closed PYSEC-2024-161
+# (CVE-2024-52338). R11-#81 (2026-06-08): 17.0.0 → 23.0.1 closes
+# CVE-2026-25087 (apache-arrow C++ DoS, HIGH per trivy; first fixed in
+# 23.0.1). Required bumping mlflow 3.11.1 → 3.13.0 (3.11 capped pyarrow≤19;
+# 3.13 allows pyarrow<25). Bumped sandbox's requirements-sandbox.txt in
+# LOCKSTEP so the parquet IPC format stays consistent across the
+# sandbox-write → main-pipeline-read boundary (R3-3 lesson: pyarrow version
+# skew silently breaks deserialization).
+pyarrow==23.0.1           # 23.0.1: closes CVE-2026-25087; within mlflow 3.13's pyarrow<25
 
 # ── API ───────────────────────────────────────────────
 # Bumped past 0.118 because Starlette 0.40 caught CVE-2025-62727
@@ -73,7 +77,11 @@ great-expectations==0.18.15
 # command execution, CVE-2025-11200 auth bypass, etc).
 # Client API (start_run / log_metric / log_artifact) is unchanged
 # from 2.x; the major-version bump is mostly server-side.
-mlflow==3.11.1
+# R11-#81 (2026-06-08): 3.11.1 → 3.13.0 — 3.11 capped pyarrow≤19, blocking
+# the pyarrow 23.0.1 bump needed for CVE-2026-25087. 3.13 widens to
+# pyarrow<25 while keeping numpy<3 / scipy<2 / sklearn<2 / pandas<3, so
+# every existing pin (incl. the scipy<2 evidently wedge) still resolves.
+mlflow==3.13.0
 
 # ── Очередь задач ─────────────────────────────────────
 redis==5.0.4

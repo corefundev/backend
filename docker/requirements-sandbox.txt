@@ -17,16 +17,17 @@
 #     "pip install --no-cache-dir pandas==2.2.2 pyarrow==17.0.0 openpyxl==3.1.2 && \
 #      pip freeze > /out/requirements-sandbox.txt"
 #
-# Audit R4-19 (2026-05-17): pyarrow bumped 15.0.2 → 17.0.0 to close
-# PYSEC-2024-161 (CVE-2024-52338, buffer-overflow in RecordBatchRpcReader).
-# MUST be bumped in lockstep with main requirements.txt — sandbox writes
-# parquet that the main training pipeline reads, so pyarrow IPC format
-# skew silently breaks deserialization (R3-3 lesson).
+# Audit R4-19 (2026-05-17): pyarrow 15.0.2 → 17.0.0 closed PYSEC-2024-161.
+# R11-#81 (2026-06-08): 17.0.0 → 23.0.1 closes CVE-2026-25087 (apache-arrow
+# DoS) — lockstep with the main requirements.txt bump (mlflow 3.13.0 there).
+# MUST stay in lockstep — sandbox writes parquet that the main training
+# pipeline reads, so pyarrow IPC format skew silently breaks
+# deserialization (R3-3 lesson).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── Direct deps ──────────────────────────────────────────────────────────
 pandas==2.2.2
-pyarrow==17.0.0
+pyarrow==23.0.1
 openpyxl==3.1.2
 
 # ── Transitives (pinned for reproducibility + scan visibility) ──────────
