@@ -238,7 +238,8 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 41   # +1 PR #77 ContainerMetricsAbsent (2026-06-03)
+    EXPECTED_TOTAL = 42   # +1 PR #77 ContainerMetricsAbsent (2026-06-03);
+    #                       +1 R11-#80 PostgresArchiveModeOff (2026-06-06)
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (
