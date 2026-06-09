@@ -91,3 +91,31 @@ def test_run_baseline_forces_local_storage(monkeypatch, tmp_path):
     out = runner.run_baseline(data_path=str(data), holdout_days=1)
     assert out == "RESULT"
     assert os.environ.get("STORAGE_BACKEND") == "local"   # forced override
+
+
+def test_isolated_config_points_mlflow_at_local_file_store(tmp_path):
+    base = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"},
+            "mlflow": {"tracking_uri": "http://mlflow:5000", "experiment_name": "prod"}}
+    cfg = runner._isolated_config(base, str(tmp_path), tier="free")
+    # a backtest must NEVER log to the production mlflow server / S3 bucket
+    assert cfg["mlflow"]["tracking_uri"].startswith("file://")
+    assert str(tmp_path) in cfg["mlflow"]["tracking_uri"]
+    assert cfg["mlflow"]["experiment_name"] == "backtest-free"
+    # original config object is untouched (deep copy)
+    assert base["mlflow"]["tracking_uri"] == "http://mlflow:5000"
+
+
+def test_isolated_config_applies_tier_objective_and_hpo(tmp_path):
+    base = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}}
+    free = runner._isolated_config(base, str(tmp_path), tier="free")
+    biz = runner._isolated_config(base, str(tmp_path), tier="business")
+    assert free["model"]["objective"] == "mse" and free["hpo"]["enabled"] is False
+    assert biz["model"]["objective"] == "ensemble"
+    assert biz["hpo"]["enabled"] is True and biz["hpo"]["n_trials"] == 30
+
+
+def test_run_baseline_rejects_unknown_tier(tmp_path):
+    data = tmp_path / "d.csv"
+    pd.DataFrame({"sku": ["A"], "date": ["2024-01-01"], "sales": [1]}).to_csv(data, index=False)
+    with pytest.raises(ValueError, match="tier"):
+        runner.run_baseline(data_path=str(data), tier="enterprise")
