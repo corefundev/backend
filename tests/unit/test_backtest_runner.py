@@ -75,12 +75,14 @@ def test_train_fn_uses_isolated_backtest_client_and_loads_model(monkeypatch, tmp
     assert seen["data_path"].endswith(".csv")
 
 
-def test_run_baseline_defaults_to_local_storage(monkeypatch, tmp_path):
+def test_run_baseline_forces_local_storage(monkeypatch, tmp_path):
     # tiny dataset on disk so pd.read_csv works without the real fixture
     data = tmp_path / "d.csv"
     pd.DataFrame({"sku": ["A"], "date": ["2024-01-01"], "sales": [1]}).to_csv(data, index=False)
 
-    monkeypatch.delenv("STORAGE_BACKEND", raising=False)
+    # even if the env says s3 (as the prod worker does), a backtest must FORCE
+    # local so it never writes its throwaway model to the production S3 store.
+    monkeypatch.setenv("STORAGE_BACKEND", "s3")
     monkeypatch.setattr(runner, "load_config",
                         lambda *a, **k: {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}})
     # short-circuit the actual backtest — we only assert the isolation side-effect
@@ -88,4 +90,4 @@ def test_run_baseline_defaults_to_local_storage(monkeypatch, tmp_path):
 
     out = runner.run_baseline(data_path=str(data), holdout_days=1)
     assert out == "RESULT"
-    assert os.environ.get("STORAGE_BACKEND") == "local"
+    assert os.environ.get("STORAGE_BACKEND") == "local"   # forced override

@@ -84,9 +84,12 @@ def run_baseline(
 ) -> BacktestResult:
     """Train on the pre-cutoff slice, serve the holdout through the real path,
     score against actuals. Returns the BacktestResult (also see .as_dict())."""
-    # Isolate artifacts to local storage under artifacts/backtest/ (never S3,
-    # never a real client). Honour an externally-set STORAGE_BACKEND if present.
-    os.environ.setdefault("STORAGE_BACKEND", "local")
+    # Isolate artifacts to local storage under artifacts/backtest/ (never a real
+    # client). FORCE local (not setdefault): the worker's env has
+    # STORAGE_BACKEND=s3, and a backtest must never write its throwaway model to
+    # the production S3 model store. train_fn always trains a FRESH model and
+    # loads it right back in-process, so a local temp store is always correct.
+    os.environ["STORAGE_BACKEND"] = "local"
 
     config = load_config(config_path)
     df = pd.read_csv(data_path)
