@@ -37,34 +37,11 @@ pg_replication_lag:
         usage: "GAUGE"
         description: "Replication apply lag in seconds (replica-side; 0 on primary)"
 
-# ─────────────────────────────────────────────────────────────────────────
-# R11-#80 (2026-06-06) — WAL-archiving ENABLED gauge.
-#
-# WalArchiveFailing keys on `pg_stat_archiver_failed_count` and WalArchiveStale
-# on archive age + write activity. BOTH stay quiet when archive_mode is simply
-# OFF — nothing archives, so nothing fails and nothing ages. A stale-config
-# deploy set archive_mode=off on 2026-06-06 and both WAL alerts FALSE-RESOLVED
-# while the WAL→S3 stream was dead (a silent PITR/durability gap).
-#
-# This emits `pg_archive_mode_enabled` = 1 when archiving is on, 0 otherwise;
-# alert PostgresArchiveModeOff fires on 0. Naming: `pg_archive_mode` + column
-# `enabled` → metric `pg_archive_mode_enabled`.
-#
-# master: false — MUST match the working pg_replication_lag query above. With
-# this exporter's config `master: true` is NOT honored and the query silently
-# never runs (verified live 2026-06-08: pg_replication_lag_seconds[master:false]
-# emitted while a master:true pg_archive_mode emitted nothing). The query runs
-# on every scraped server; the alert filters job="postgres" so it keys on the
-# PRIMARY only (a standby's pg_archive_mode_enabled{job="postgres-replica"} is
-# ignored by the rule).
-# ─────────────────────────────────────────────────────────────────────────
-
-pg_archive_mode:
-  query: |
-    SELECT CASE WHEN setting = 'on' THEN 1 ELSE 0 END AS enabled
-    FROM pg_settings WHERE name = 'archive_mode'
-  master: false
-  metrics:
-    - enabled:
-        usage: "GAUGE"
-        description: "1 if postgres archive_mode=on (WAL archiving to S3 enabled), else 0"
+# NOTE (R11-#80b, 2026-06-08): a pg_archive_mode custom query was tried here
+# to detect archive_mode=off, but postgres_exporter v0.15.0's deprecated
+# --extend.query-path silently does NOT emit custom-query metrics (verified
+# live — the file loads with a DEPRECATED warning but no metric appears;
+# pg_replication_lag_seconds above is a built-in collector metric, not from
+# this file on the primary). The archive_mode signal is produced instead by
+# scripts/archive_mode_check.sh → pushgateway (pg_archive_mode_enabled),
+# driving PostgresArchiveModeOff / PostgresArchiveModeCheckStale. See R11-#80.
