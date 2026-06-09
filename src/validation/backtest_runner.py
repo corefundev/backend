@@ -22,10 +22,13 @@ dev box (see project_ml_test_failures_unverified). Invoke on staging with:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import tempfile
 from typing import Callable
+
+import yaml
 
 import pandas as pd
 
@@ -76,30 +79,76 @@ def _make_serve_fn(config_path: str) -> Callable[..., pd.DataFrame]:
     return serve_fn
 
 
+# Tier overrides matching src/plans/plans.py (verified 2026-06-09): Free =
+# objective mse, HPO off; Business = objective ensemble (3× MIMO blend), HPO 30
+# trials. RU regressors stay at the config default (off) to match the original
+# 60-feature business baseline (the +RU 81-feature run was a separate study).
+_TIER_OVERRIDES = {
+    "free":     {"objective": "mse",      "hpo_enabled": False, "hpo_n_trials": 0},
+    "business": {"objective": "ensemble", "hpo_enabled": True,  "hpo_n_trials": 30},
+}
+
+
+def _isolated_config(base_config: dict, workdir: str, tier: str) -> dict:
+    """Deep-copy the base config and isolate it for a backtest:
+
+    - MLflow tracking → a LOCAL file store under workdir (NEVER the production
+      mlflow server / S3 artifact bucket — a backtest must not pollute either).
+    - apply the tier's objective + HPO (Free vs Business).
+    """
+    cfg = copy.deepcopy(base_config)
+    cfg.setdefault("mlflow", {})
+    cfg["mlflow"]["tracking_uri"] = "file://" + os.path.join(workdir, "mlflow")
+    cfg["mlflow"]["experiment_name"] = f"backtest-{tier}"
+
+    ov = _TIER_OVERRIDES[tier]
+    cfg.setdefault("model", {})["objective"] = ov["objective"]
+    cfg.setdefault("hpo", {})["enabled"] = ov["hpo_enabled"]
+    cfg["hpo"]["n_trials"] = ov["hpo_n_trials"]
+    return cfg
+
+
 def run_baseline(
     data_path: str = "data/test/sample_start.csv",
     config_path: str = "configs/config.yaml",
     holdout_days: int = 14,
     label: str = "baseline",
+    tier: str = "free",
 ) -> BacktestResult:
     """Train on the pre-cutoff slice, serve the holdout through the real path,
     score against actuals. Returns the BacktestResult (also see .as_dict())."""
-    # Isolate artifacts to local storage under artifacts/backtest/ (never a real
-    # client). FORCE local (not setdefault): the worker's env has
+    if tier not in _TIER_OVERRIDES:
+        raise ValueError(f"tier must be one of {sorted(_TIER_OVERRIDES)}, got {tier!r}")
+
+    # FORCE local model storage (not setdefault): the worker's env has
     # STORAGE_BACKEND=s3, and a backtest must never write its throwaway model to
-    # the production S3 model store. train_fn always trains a FRESH model and
-    # loads it right back in-process, so a local temp store is always correct.
+    # the production S3 model store. train_fn trains a FRESH model and loads it
+    # right back in-process, so a local temp store is always correct.
     os.environ["STORAGE_BACKEND"] = "local"
 
-    config = load_config(config_path)
+    base_config = load_config(config_path)
     df = pd.read_csv(data_path)
+    # The pipeline parses dates on load, but the harness slices the in-memory df
+    # straight into serve_fn → build_features, which needs datetime (.dt). Parse
+    # once here so train + serve see the same datetime column.
+    date_col = base_config["data"]["date_col"]
+    df[date_col] = pd.to_datetime(df[date_col])
 
     with tempfile.TemporaryDirectory(prefix="backtest-") as workdir:
+        # isolate model artifacts to a writable temp dir (the worker's
+        # ARTIFACTS_DIR=/data/artifacts is not writable from a bare exec).
+        os.environ["ARTIFACTS_DIR"] = os.path.join(workdir, "artifacts")
+
+        iso_config = _isolated_config(base_config, workdir, tier)
+        iso_config_path = os.path.join(workdir, "backtest_config.yaml")
+        with open(iso_config_path, "w") as f:
+            yaml.safe_dump(iso_config, f)
+
         return run_backtest(
             df,
-            config,
-            train_fn=_make_train_fn(config_path, workdir),
-            serve_fn=_make_serve_fn(config_path),
+            iso_config,
+            train_fn=_make_train_fn(iso_config_path, workdir),
+            serve_fn=_make_serve_fn(iso_config_path),
             holdout_days=holdout_days,
             label=label,
         )
@@ -111,10 +160,11 @@ def main() -> None:
     p.add_argument("--config", default="configs/config.yaml")
     p.add_argument("--holdout-days", type=int, default=14)
     p.add_argument("--label", default="baseline")
+    p.add_argument("--tier", choices=sorted(_TIER_OVERRIDES), default="free")
     args = p.parse_args()
 
-    res = run_baseline(args.data, args.config, args.holdout_days, args.label)
-    print(json.dumps(res.as_dict(), indent=2, default=str))
+    res = run_baseline(args.data, args.config, args.holdout_days, args.label, args.tier)
+    print(json.dumps({**res.as_dict(), "tier": args.tier}, indent=2, default=str))
 
 
 if __name__ == "__main__":
