@@ -24,7 +24,17 @@
 # guessed value. (A genuinely-down DB is already covered by PostgresDown.)
 set -u
 
-: "${DATABASE_URL:?archive_mode_check: DATABASE_URL not set (Lockbox bootstrap missing?)}"
+# DATABASE_URL is NOT a direct Lockbox key — it is composed from the injected
+# components (POSTGRES_PASSWORD + DB_HOST + DB_PORT + DB_NAME + DB_USER). The
+# backup/base_backup/audit cron jobs get it via cron_wrapper.sh; this job runs
+# WITHOUT cron_wrapper (like wal_mirror), so it composes its own DSN here using
+# the SAME canonical helper — keeps the composition rules in one place
+# (mirrors cron_wrapper.sh; see compose_database_url.sh).
+if [ -z "${DATABASE_URL:-}" ] && [ -f /scripts/compose_database_url.sh ]; then
+    . /scripts/compose_database_url.sh
+    compose_database_url || true
+fi
+: "${DATABASE_URL:?archive_mode_check: DATABASE_URL unset and could not be composed — POSTGRES_PASSWORD missing from Lockbox? (fail-loud; PostgresArchiveModeCheckStale will fire)}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://pushgateway:9091}"
 
 ENABLED=$(psql "$DATABASE_URL" -tAc \
