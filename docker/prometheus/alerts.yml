@@ -437,25 +437,46 @@ groups:
           summary:     "Postgres WAL archive idle >30 min while DB has WRITE activity"
           description: "No new WAL segment archived in 30 min AND `sku_forecasting` saw >10 row writes (inserted+updated+deleted) in the same window — archive_command may be stuck retrying. Inspect: `docker exec docker-postgres-1 psql -U sku -d postgres -c 'SELECT * FROM pg_stat_archiver'`. If failed_count > 0, switch to WalArchiveFailing for the canonical diagnosis. If failed_count = 0 but archive is genuinely stale on a write-active DB, suspect S3 outage / Beget key rotation / Lockbox SA expiry. Quiet-DB AND read-only-DB false positives can no longer fire here (R5-17 enterprise fix iteration 2, 2026-05-18)."
 
-      # R11-#80 (2026-06-06) — direct archive-DISABLED detector. WalArchiveFailing
+      # R11-#80 — direct archive-DISABLED detector. WalArchiveFailing
       # (failed_count) and WalArchiveStale (age + writes) BOTH stay quiet when
       # archive_mode is simply OFF: nothing archives, so nothing fails or ages.
       # On 2026-06-06 a stale-config deploy reverted docker-compose.staging.yml
       # and postgres came up archive_mode=off — both WAL alerts FALSE-RESOLVED
-      # while WAL→S3 was dead. This fires on the archive_mode gauge itself,
-      # independent of any counter. Keyed purely on ==0 (no absent() arm) so it
-      # cannot storm before postgres-exporter picks up the new query; exporter-
-      # down stays covered by WalArchiveFailing's absent() arm.
+      # while WAL→S3 was dead. The signal comes from scripts/archive_mode_check.sh
+      # (a 5-min cron in the backup container) → pushgateway, NOT postgres-exporter
+      # (its v0.15.0 --extend.query-path silently drops custom queries — R11-#80b).
+      # Keyed purely on ==0 (no absent() arm) so it cannot storm before the first
+      # push; a DEAD checker (stale ==1 masking a real off) is caught by the
+      # sibling PostgresArchiveModeCheckStale below.
       - alert: PostgresArchiveModeOff
         expr: |
-          pg_archive_mode_enabled{job="postgres"} == 0
-        for:   5m
+          pg_archive_mode_enabled{job="archive_mode_check"} == 0
+        for:   10m
         labels:
           severity: critical
           team:     forecasting
         annotations:
           summary:     "Postgres WAL archiving is DISABLED (archive_mode != on)"
           description: "pg_archive_mode_enabled=0 — postgres is NOT archiving WAL to S3, so there is NO PITR coverage and a silent durability gap, even though WalArchiveFailing/WalArchiveStale stay quiet (nothing archives, so nothing fails or ages). Most likely a stale-config deploy reverted docker-compose.*.yml. Inspect: `docker exec docker-postgres-1 psql -U sku -d postgres -c 'SHOW archive_mode'`; verify host configs match main (`sha256sum /srv/backend/docker/docker-compose*.yml`). See R11-#79 + feedback_old_cd_run_reverts_configs."
+
+      # R11-#80 — freshness guard for the archive_mode probe. Without it, a dead
+      # archive_mode_check cron would freeze pg_archive_mode_enabled at its last
+      # value: a stale "1" would silently mask a real archive_mode=off. Fires if
+      # the probe hasn't pushed in 30 min (or never). 5-min push cadence << for:15m
+      # so absent() is storm-safe on a fresh pushgateway (the metric reappears
+      # within one cron tick, well inside the for: window). Sibling *CronSilent
+      # alerts catch a fully-dead crond.
+      - alert: PostgresArchiveModeCheckStale
+        expr: |
+          time() - pg_archive_mode_check_timestamp_seconds{job="archive_mode_check"} > 1800
+          or absent(pg_archive_mode_check_timestamp_seconds{job="archive_mode_check"})
+        for:   15m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "Postgres archive_mode probe is stale (>30m) — archive-off detection is BLIND"
+          description: "scripts/archive_mode_check.sh has not pushed pg_archive_mode_check_timestamp_seconds in 30m (or never). PostgresArchiveModeOff is now blind — a frozen pg_archive_mode_enabled could mask a real archive_mode=off. Check the backup container's archive_mode_check cron + /var/log/archive_mode_check.log, and that pushgateway is reachable."
 
   - name: container-lifecycle
     rules:
