@@ -32,6 +32,7 @@ import yaml
 
 import pandas as pd
 
+from src.clients.registry import ClientRecord, get_registry
 from src.data.loader import load_config
 from src.features.engineering import build_features, get_feature_columns
 from src.pipeline.inference_utils import forecast_all_skus, load_model_any_format
@@ -79,33 +80,50 @@ def _make_serve_fn(config_path: str) -> Callable[..., pd.DataFrame]:
     return serve_fn
 
 
-# Tier overrides matching src/plans/plans.py (verified 2026-06-09): Free =
-# objective mse, HPO off; Business = objective ensemble (3× MIMO blend), HPO 30
-# trials. RU regressors stay at the config default (off) to match the original
-# 60-feature business baseline (the +RU 81-feature run was a separate study).
-_TIER_OVERRIDES = {
-    "free":     {"objective": "mse",      "hpo_enabled": False, "hpo_n_trials": 0},
-    "business": {"objective": "ensemble", "hpo_enabled": True,  "hpo_n_trials": 30},
+# Tier config matching src/plans/plans.py (verified 2026-06-09): Free = objective
+# mse, HPO off; Business = ensemble (3× MIMO blend), HPO 30. RU regressors forced
+# OFF (the +RU 81-feature run was a separate study; the 60-feature business
+# baseline had them off). This goes into a REGISTERED "backtest" client config so
+# run_training_pipeline's plan-tier defaults see user_set_* = True and leave it
+# alone — without a client record the pipeline applies plan=free defaults and
+# clobbers objective=ensemble back to mse (the bug the first business run hit).
+_TIER_CLIENT_CONFIG = {
+    "free": {
+        "model":    {"objective": "mse"},
+        "hpo":      {"enabled": False, "n_trials": 0},
+        "features": {"external_regressors_ru": {"enabled": False}},
+    },
+    "business": {
+        "model":    {"objective": "ensemble"},
+        "hpo":      {"enabled": True, "n_trials": 30},
+        "features": {"external_regressors_ru": {"enabled": False}},
+    },
 }
 
 
 def _isolated_config(base_config: dict, workdir: str, tier: str) -> dict:
-    """Deep-copy the base config and isolate it for a backtest:
-
-    - MLflow tracking → a LOCAL file store under workdir (NEVER the production
-      mlflow server / S3 artifact bucket — a backtest must not pollute either).
-    - apply the tier's objective + HPO (Free vs Business).
-    """
+    """Deep-copy the base config and point MLflow at a LOCAL file store under
+    workdir — a backtest must NEVER log to the production mlflow server / S3
+    artifact bucket. Tier objective/HPO come from the registered client config
+    (see _register_backtest_client), not here."""
     cfg = copy.deepcopy(base_config)
     cfg.setdefault("mlflow", {})
     cfg["mlflow"]["tracking_uri"] = "file://" + os.path.join(workdir, "mlflow")
     cfg["mlflow"]["experiment_name"] = f"backtest-{tier}"
-
-    ov = _TIER_OVERRIDES[tier]
-    cfg.setdefault("model", {})["objective"] = ov["objective"]
-    cfg.setdefault("hpo", {})["enabled"] = ov["hpo_enabled"]
-    cfg["hpo"]["n_trials"] = ov["hpo_n_trials"]
     return cfg
+
+
+def _register_backtest_client(tier: str) -> None:
+    """Register a 'backtest' client (in the ISOLATED local-file registry — see
+    run_baseline) whose config explicitly carries the tier's objective/HPO/
+    regressors, so run_training_pipeline's plan-tier defaults treat them as
+    user-set and don't override. plan=<tier> for caps/display parity."""
+    get_registry().register(ClientRecord(
+        client_id="backtest",
+        config=copy.deepcopy(_TIER_CLIENT_CONFIG[tier]),
+        storage_path="backtest",
+        plan=tier,
+    ))
 
 
 def run_baseline(
@@ -117,13 +135,11 @@ def run_baseline(
 ) -> BacktestResult:
     """Train on the pre-cutoff slice, serve the holdout through the real path,
     score against actuals. Returns the BacktestResult (also see .as_dict())."""
-    if tier not in _TIER_OVERRIDES:
-        raise ValueError(f"tier must be one of {sorted(_TIER_OVERRIDES)}, got {tier!r}")
+    if tier not in _TIER_CLIENT_CONFIG:
+        raise ValueError(f"tier must be one of {sorted(_TIER_CLIENT_CONFIG)}, got {tier!r}")
 
-    # FORCE local model storage (not setdefault): the worker's env has
-    # STORAGE_BACKEND=s3, and a backtest must never write its throwaway model to
-    # the production S3 model store. train_fn trains a FRESH model and loads it
-    # right back in-process, so a local temp store is always correct.
+    # FORCE local model storage: the worker env has STORAGE_BACKEND=s3, and a
+    # backtest must never write its throwaway model to the production S3 store.
     os.environ["STORAGE_BACKEND"] = "local"
 
     base_config = load_config(config_path)
@@ -135,9 +151,15 @@ def run_baseline(
     df[date_col] = pd.to_datetime(df[date_col])
 
     with tempfile.TemporaryDirectory(prefix="backtest-") as workdir:
-        # isolate model artifacts to a writable temp dir (the worker's
-        # ARTIFACTS_DIR=/data/artifacts is not writable from a bare exec).
+        # Full isolation under the temp workdir: model artifacts (the worker's
+        # /data/artifacts is not writable from a bare exec), and the client
+        # registry (force the local-file registry off the production clients DB
+        # so registering 'backtest' can't pollute it / write sku_training_runs).
         os.environ["ARTIFACTS_DIR"] = os.path.join(workdir, "artifacts")
+        os.environ.pop("DATABASE_URL", None)
+        os.environ["REGISTRY_PATH"] = os.path.join(workdir, "registry.json")
+
+        _register_backtest_client(tier)
 
         iso_config = _isolated_config(base_config, workdir, tier)
         iso_config_path = os.path.join(workdir, "backtest_config.yaml")
@@ -160,7 +182,7 @@ def main() -> None:
     p.add_argument("--config", default="configs/config.yaml")
     p.add_argument("--holdout-days", type=int, default=14)
     p.add_argument("--label", default="baseline")
-    p.add_argument("--tier", choices=sorted(_TIER_OVERRIDES), default="free")
+    p.add_argument("--tier", choices=sorted(_TIER_CLIENT_CONFIG), default="free")
     args = p.parse_args()
 
     res = run_baseline(args.data, args.config, args.holdout_days, args.label, args.tier)
