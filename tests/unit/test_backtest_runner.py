@@ -85,12 +85,15 @@ def test_run_baseline_forces_local_storage(monkeypatch, tmp_path):
     monkeypatch.setenv("STORAGE_BACKEND", "s3")
     monkeypatch.setattr(runner, "load_config",
                         lambda *a, **k: {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}})
-    # short-circuit the actual backtest — we only assert the isolation side-effect
+    # short-circuit the actual backtest + client registration — we only assert
+    # the isolation side-effects here.
     monkeypatch.setattr(runner, "run_backtest", lambda *a, **k: "RESULT")
+    monkeypatch.setattr(runner, "_register_backtest_client", lambda tier: None)
 
     out = runner.run_baseline(data_path=str(data), holdout_days=1)
     assert out == "RESULT"
     assert os.environ.get("STORAGE_BACKEND") == "local"   # forced override
+    assert os.environ.get("DATABASE_URL") is None         # forced off the prod DB
 
 
 def test_isolated_config_points_mlflow_at_local_file_store(tmp_path):
@@ -105,13 +108,29 @@ def test_isolated_config_points_mlflow_at_local_file_store(tmp_path):
     assert base["mlflow"]["tracking_uri"] == "http://mlflow:5000"
 
 
-def test_isolated_config_applies_tier_objective_and_hpo(tmp_path):
-    base = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}}
-    free = runner._isolated_config(base, str(tmp_path), tier="free")
-    biz = runner._isolated_config(base, str(tmp_path), tier="business")
-    assert free["model"]["objective"] == "mse" and free["hpo"]["enabled"] is False
-    assert biz["model"]["objective"] == "ensemble"
-    assert biz["hpo"]["enabled"] is True and biz["hpo"]["n_trials"] == 30
+def test_register_backtest_client_carries_tier_config(monkeypatch):
+    # the tier's objective/HPO must reach the pipeline via a REGISTERED client
+    # config (so plan-tier defaults see user_set_* and don't clobber it — the
+    # bug the first business run hit). Capture what gets registered.
+    captured = {}
+
+    class _FakeReg:
+        def register(self, record):
+            captured["record"] = record
+
+    monkeypatch.setattr(runner, "get_registry", lambda: _FakeReg())
+
+    runner._register_backtest_client("business")
+    rec = captured["record"]
+    assert rec.client_id == "backtest" and rec.plan == "business"
+    assert rec.config["model"]["objective"] == "ensemble"
+    assert rec.config["hpo"] == {"enabled": True, "n_trials": 30}
+    assert rec.config["features"]["external_regressors_ru"]["enabled"] is False
+
+    runner._register_backtest_client("free")
+    rec = captured["record"]
+    assert rec.plan == "free" and rec.config["model"]["objective"] == "mse"
+    assert rec.config["hpo"]["enabled"] is False
 
 
 def test_run_baseline_rejects_unknown_tier(tmp_path):
