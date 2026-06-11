@@ -68,4 +68,6 @@ src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:334  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
 src/api/routers/training.py:347  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
+src/pipeline/inference_utils.py:351  R11-#59 — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
+src/pipeline/inference_utils.py:406  R11-#59 — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
 
