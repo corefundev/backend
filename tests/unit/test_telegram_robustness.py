@@ -33,8 +33,12 @@ class _FakeRedisGetDel:
 
 
 def test_consume_link_token_uses_single_atomic_getdel(monkeypatch):
+    # Patch the PUBLIC redis factory (R5-M7 forbids monkeypatching
+    # private `_xxx` module attrs); telegram._redis delegates to it.
+    import src.pipeline.task_queue as task_queue
+
     fake = _FakeRedisGetDel(b"client-a")
-    monkeypatch.setattr(tg, "_redis", lambda: fake)
+    monkeypatch.setattr(task_queue, "get_redis_connection", lambda: fake)
     assert tg.consume_link_token("tok") == "client-a"
     assert fake.getdel_calls == 1
     # second consume of the same token must miss — single-use held

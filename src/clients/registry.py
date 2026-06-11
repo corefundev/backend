@@ -125,18 +125,6 @@ class ClientRegistry:
     ) -> bool:
         raise NotImplementedError
 
-
-def _merge_subtree_inplace(cfg: dict, path: tuple[str, ...], patch: dict) -> None:
-    """Walk/create `path` of dicts inside cfg, then update the leaf with patch."""
-    node = cfg
-    for key in path:
-        nxt = node.get(key)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            node[key] = nxt
-        node = nxt
-    node.update(patch)
-
     # Audit R4-16 — atomic conditional UPDATE for the training quota.
     # Closes the TOCTOU window between check_training_quota (read) and
     # record_training_started (write): two parallel requests used to
@@ -165,6 +153,22 @@ def _merge_subtree_inplace(cfg: dict, path: tuple[str, ...], patch: dict) -> Non
         self, stale_after_minutes: int = STALE_TRAINING_MINUTES
     ) -> int:
         return 0
+
+
+def _merge_subtree_inplace(cfg: dict, path: tuple[str, ...], patch: dict) -> None:
+    """Walk/create `path` of dicts inside cfg, then update the leaf with patch.
+
+    Shared by both merge_config_subtree implementations (R12-#87); the
+    caller is responsible for holding the row/registry lock.
+    """
+    node = cfg
+    for key in path:
+        nxt = node.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[key] = nxt
+        node = nxt
+    node.update(patch)
 
 
 # ── R10-S2: column allowlist for update() ────────────────────────────
