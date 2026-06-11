@@ -104,6 +104,17 @@ else
     echo "mlflow_entrypoint: WARN S3_MLFLOW_BUCKET unset — artifacts will use whatever compose passes (or local FS fallback)." >&2
 fi
 
+# R12-#86 — the root phase ends here: root was only needed so
+# lockbox_bootstrap.sh could read the bind-mounted SA key. Drop to the
+# dedicated system user before exec'ing the server (env, including the
+# Lockbox-injected secrets, is inherited through gosu's exec).
+if [ "$(id -u)" = "0" ]; then
+    # gosu keeps the environment — point HOME at the dropped user's
+    # own dir so any ~/.cache/expanduser write by mlflow's libs works.
+    export HOME=/home/mlflow
+    set -- gosu mlflow:mlflow "$@"
+fi
+
 # Append the URIs as the last args. compose `command:` MUST NOT include
 # its own --backend-store-uri or --artifacts-destination (would create
 # duplicate-arg CLI errors). The compose definition keeps host, port,

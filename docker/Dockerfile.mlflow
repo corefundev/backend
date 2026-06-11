@@ -18,6 +18,12 @@
 
 FROM ghcr.io/mlflow/mlflow:v3.11.1@sha256:6cb0a22c0d4d722a793c2e93d89ba28b10b6b27d4c1e60ab2533a8e081ffca2d
 
+# Image USER stays root, but ONLY for the entrypoint's bootstrap phase
+# (lockbox_bootstrap must read the bind-mounted SA key, deploy-owned
+# mode 644). R12-#86 — gosu + a dedicated system user let the
+# entrypoint drop privileges before exec'ing the mlflow server, so the
+# network-facing process never runs as root. Compose pairs this with
+# cap_drop ALL + SETUID/SETGID + no-new-privileges.
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -26,7 +32,10 @@ RUN apt-get update \
         openssl \
         coreutils \
         ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+        gosu \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 990 --user-group --create-home --home-dir /home/mlflow \
+            --shell /usr/sbin/nologin mlflow
 
 # The official ghcr.io/mlflow/mlflow image ships intentionally skinny —
 # only the core mlflow venv. Anything beyond file-backed sqlite needs

@@ -616,6 +616,16 @@ services:
     logging: *log-rotation
     mem_limit: 2g
     cpus: 1.0
+    # R12-#86 — the entrypoint's root phase only reads the SA key, then
+    # gosu-drops to the dedicated `mlflow` user. SETUID/SETGID are the
+    # caps gosu needs for that drop; everything else is off the table.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
     ports:
       - "5000:5000"
     # NB R8-12 / R10 Phase 0 — `--backend-store-uri` AND `--artifacts-
@@ -1403,6 +1413,17 @@ services:
     image: docker-grafana:custom
     mem_limit: 256m    # R5-M9
     cpus: 0.3        # R5-M9
+    # R12-#86 — the entrypoint's root phase reads the SA key + re-owns
+    # the data volume, then su-exec-drops to grafana's UID 472. CHOWN
+    # covers the one-time volume migration; SETUID/SETGID the drop.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
     ports:
       - "3000:3000"
     environment:
