@@ -296,6 +296,123 @@ def recursive_forecast(
     return rows
 
 
+def direct_forecast(
+    model,
+    history:       pd.DataFrame,
+    feature_cols:  list[str],
+    horizon:       int,
+    sku:           str,
+    sku_col:       str = "sku",
+    date_col:      str = "date",
+    target_col:    str = "sales",
+) -> list[dict]:
+    """
+    DIRECT multi-step forecast for a single SKU (R11-#59 / H2 fix).
+
+    MIMO/Ensemble train one model per horizon step: head h predicts target[t+h]
+    from features[t]. The honest way to serve them is to take the LAST REAL
+    feature vector once and read off all H heads — `predict_next(X_last)`. Error
+    does NOT compound across the horizon (unlike `recursive_forecast`, which
+    feeds the h=1 prediction back as lag_1 and recurses, wasting heads 2..H and
+    drifting badly — measured 2026-06-11: serve-MASE 2.93 vs the model's true
+    0.99 on the Free baseline).
+
+    `horizon` must be ≤ the model's trained horizon (the caller — serve_forecast
+    — guarantees this; beyond it the model has no direct head). Same output
+    contract as recursive_forecast: [{sku, date, predicted_sales, p10, p90,
+    step, source}].
+    """
+    rows: list[dict] = []
+    if history.empty:
+        return rows
+
+    h = history.sort_values(date_col).reset_index(drop=True)
+    last_date = pd.Timestamp(h[date_col].iloc[-1])
+
+    # Last real feature vector. Mirror recursive_forecast's guard: missing
+    # feature cols default present, NaN → 0 so predict never crashes / returns
+    # NaN (audit M4). Keep sku_col so EnsembleForecaster can pick blend weights.
+    x_last = h.iloc[[-1]].copy()
+    for c in feature_cols:
+        if c not in x_last.columns:
+            x_last[c] = 0.0
+    x_last[feature_cols] = x_last[feature_cols].fillna(0.0)
+
+    preds = np.clip(np.asarray(model.predict_next(x_last), dtype=float).ravel(), 0, None)
+
+    p10_row = p90_row = None
+    try:
+        if hasattr(model, "predict_quantiles"):
+            q = model.predict_quantiles(x_last)
+            if q.get("p10") is not None:
+                p10_row = np.clip(np.asarray(q["p10"], dtype=float)[0].ravel(), 0, None)
+            if q.get("p90") is not None:
+                p90_row = np.clip(np.asarray(q["p90"], dtype=float)[0].ravel(), 0, None)
+    except Exception as e:    # noqa: BLE001
+        logger.debug("direct_forecast quantiles failed for sku=%s: %s", sku, e)
+
+    n = min(int(horizon), len(preds))
+    for step in range(1, n + 1):
+        i = step - 1
+        p10_val = float(p10_row[i]) if p10_row is not None and i < len(p10_row) else None
+        p90_val = float(p90_row[i]) if p90_row is not None and i < len(p90_row) else None
+        if p10_val is not None and p90_val is not None and p10_val > p90_val:
+            p10_val, p90_val = p90_val, p10_val
+        rows.append({
+            sku_col:           sku,
+            date_col:          last_date + pd.Timedelta(days=step),
+            "predicted_sales": float(preds[i]),
+            "p10":             p10_val,
+            "p90":             p90_val,
+            "step":            step,
+            "source":          "primary",
+        })
+    return rows
+
+
+def serve_forecast(
+    model,
+    history:       pd.DataFrame,
+    feature_cols:  list[str],
+    horizon:       int,
+    sku:           str,
+    sku_col:       str = "sku",
+    date_col:      str = "date",
+    target_col:    str = "sales",
+    predict_fn=None,
+) -> list[dict]:
+    """
+    Serve-path dispatcher (R11-#59 / H2). Use the model's DIRECT heads for
+    MIMO/Ensemble (no recursive compounding); fall back to recursive_forecast
+    for a true single-step model, or when the requested horizon exceeds the
+    model's trained horizon (no direct head past it — horizon-alignment is a
+    separate follow-up), or if direct prediction errors.
+
+    Note: the API path passes `predict_fn` (the fallback-aware service.predict
+    wrapper) — that only applies on the recursive path. Direct prediction is the
+    primary model itself; if it raises we drop to recursive, which carries the
+    SeasonalNaive fallback via predict_fn.
+    """
+    is_direct = getattr(model, "is_mimo", False) or getattr(model, "is_ensemble", False)
+    model_h = int(getattr(model, "horizon", 0) or 0)
+
+    if is_direct and model_h and int(horizon) <= model_h:
+        try:
+            rows = direct_forecast(model, history, feature_cols, horizon, sku,
+                                   sku_col, date_col, target_col)
+            if rows:
+                return rows
+            logger.warning("direct_forecast empty for sku=%s — recursive fallback", sku)
+        except Exception as e:    # noqa: BLE001
+            logger.warning("direct_forecast failed for sku=%s (%s) — recursive fallback", sku, e)
+    elif is_direct and model_h and int(horizon) > model_h:
+        logger.debug("serve horizon %d > model horizon %d (sku=%s) — recursive "
+                     "until horizon-alignment", horizon, model_h, sku)
+
+    return recursive_forecast(model, history, feature_cols, horizon, sku,
+                              sku_col, date_col, target_col, predict_fn)
+
+
 def forecast_all_skus(
     model,
     df:           pd.DataFrame,
@@ -331,7 +448,7 @@ def forecast_all_skus(
         if max_skus is not None and processed >= max_skus:
             break
         history = group.sort_values(date_col).copy()
-        rows    = recursive_forecast(
+        rows    = serve_forecast(            # R11-#59: direct for MIMO/Ensemble
             model=model,
             history=history,
             feature_cols=feature_cols,

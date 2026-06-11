@@ -411,11 +411,13 @@ async def predict(
         df_feat      = build_features(df, config)
         feature_cols = get_feature_columns(df_feat, config)
 
-        # Use the shared recursive_forecast helper — it knows how to
-        # update lag/rolling/calendar features at each step. Without
-        # this, the loop produces a flat line because the model sees
-        # the same input vector at every horizon step.
-        from src.pipeline.inference_utils import recursive_forecast
+        # Shared serve dispatcher (R11-#59 / H2): for MIMO/Ensemble it reads
+        # the model's direct heads (no recursive compounding); for a true
+        # single-step model — or a horizon past the model's trained one, or if
+        # direct prediction errors — it drops to recursive_forecast, which
+        # recomputes lag/rolling/calendar per step and carries the SeasonalNaive
+        # fallback via predict_fn below.
+        from src.pipeline.inference_utils import serve_forecast
 
         model_source = "primary"
 
@@ -427,13 +429,13 @@ async def predict(
                 FALLBACK_COUNT.labels(client_id=client_id).inc()
             return preds, source
 
-        forecast_rows = recursive_forecast(
-            model=None,
+        forecast_rows = serve_forecast(
+            model=service.primary,     # direct path uses the loaded MIMO/Ensemble
             history=df_feat,
             feature_cols=feature_cols,
             horizon=horizon,
             sku=req.sku,
-            predict_fn=_wrap_predict,
+            predict_fn=_wrap_predict,  # recursive-path fallback (single-step / overflow / direct-fail)
         )
 
         forecasts      = [round(float(r["predicted_sales"]), 4) for r in forecast_rows]
