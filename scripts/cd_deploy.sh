@@ -217,6 +217,66 @@ echo "  ensuring /srv/backend/sandbox-staging exists (tolerant)"
 mkdir -p /srv/backend/sandbox-staging 2>/dev/null || true
 chmod 1777 /srv/backend/sandbox-staging 2>/dev/null || true
 
+# ── R12-#88 — verify cosign signatures BEFORE running the pulled images ──
+# cd.yml signs every pushed image digest keylessly (GitHub OIDC, R4-17);
+# until now nothing on the host CHECKED those signatures, so the signing
+# was write-only — an attacker with GHCR write access could push a
+# malicious image under the expected tag and the deploy would run it.
+# Fail-closed: api/worker images whose digest lacks a valid signature
+# from THIS repo's cd.yml on main abort the deploy. The sandbox image
+# keeps its tolerated-pull semantics: absent → skip (pull already
+# warned), present → must verify.
+#
+# cosign binary is pinned by version + sha256 and self-installed into
+# /srv/backend/bin on first run (deploy-owned; no sudo needed). The
+# identity regexp is anchored to cd.yml@refs/heads/main — release.yml
+# or fork workflows do NOT satisfy the gate.
+COSIGN_BIN=/srv/backend/bin/cosign
+COSIGN_VERSION=v3.1.1
+COSIGN_SHA256=ae1ecd212663f3693ad9edf8b1a183900c9a52d3155ba6e354237f9a0f6463fc
+COSIGN_IDENTITY_RE='^https://github\.com/corefundev/backend/\.github/workflows/cd\.yml@refs/heads/main$'
+COSIGN_ISSUER=https://token.actions.githubusercontent.com
+
+ensure_cosign() {
+    if [ -x "$COSIGN_BIN" ] \
+       && echo "$COSIGN_SHA256  $COSIGN_BIN" | sha256sum -c - >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "  installing cosign $COSIGN_VERSION (pinned sha256)..."
+    mkdir -p "$(dirname "$COSIGN_BIN")"
+    curl -fsSL --retry 3 -o "$COSIGN_BIN.tmp" \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+    echo "$COSIGN_SHA256  $COSIGN_BIN.tmp" | sha256sum -c -
+    chmod +x "$COSIGN_BIN.tmp"
+    mv "$COSIGN_BIN.tmp" "$COSIGN_BIN"
+}
+
+verify_image_signature() {
+    _img="$1"
+    # cosign must verify the DIGEST we actually pulled — verifying the
+    # tag would re-resolve it at the registry and a tag-move between
+    # pull and verify could slip a different image past the gate.
+    _digest_ref="$(docker inspect --format '{{index .RepoDigests 0}}' "$_img")"
+    if [ -z "$_digest_ref" ]; then
+        echo "FATAL: cannot resolve pulled digest for $_img — refusing unverified image" >&2
+        exit 7
+    fi
+    echo "  cosign verify: $_digest_ref"
+    "$COSIGN_BIN" verify "$_digest_ref" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_RE" \
+        --certificate-oidc-issuer "$COSIGN_ISSUER" \
+        > /dev/null
+}
+
+ensure_cosign
+verify_image_signature "$EXPECTED_API"
+verify_image_signature "$EXPECTED_WORKER"
+if docker image inspect "$EXPECTED_SANDBOX" >/dev/null 2>&1; then
+    verify_image_signature "$EXPECTED_SANDBOX"
+else
+    echo "::warning::sandbox image absent — signature check skipped alongside the tolerated pull failure"
+fi
+
 echo "  running migrations..."
 docker compose $COMPOSE_ARGS run --rm migrate
 
