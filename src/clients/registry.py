@@ -111,6 +111,20 @@ class ClientRegistry:
     def list_clients(self) -> list[ClientRecord]: ...
     def delete(self, client_id: str) -> None: ...
 
+    # R12-#87 — atomic deep-merge of a patch into config at `path`.
+    # update(config=...) rewrites the WHOLE config column from a
+    # caller-side snapshot (read-modify-write → last-write-wins under
+    # concurrency). Writers that own only a subtree (e.g. telegram
+    # linking owns notifications.telegram) must use this instead:
+    # implementations hold a row lock (PG: SELECT … FOR UPDATE) or the
+    # registry lock (file) across the read-merge-write, so concurrent
+    # merges of sibling subtrees never clobber each other.
+    # Returns False when the client does not exist.
+    def merge_config_subtree(
+        self, client_id: str, path: tuple[str, ...], patch: dict
+    ) -> bool:
+        raise NotImplementedError
+
     # Audit R4-16 — atomic conditional UPDATE for the training quota.
     # Closes the TOCTOU window between check_training_quota (read) and
     # record_training_started (write): two parallel requests used to
@@ -139,6 +153,22 @@ class ClientRegistry:
         self, stale_after_minutes: int = STALE_TRAINING_MINUTES
     ) -> int:
         return 0
+
+
+def _merge_subtree_inplace(cfg: dict, path: tuple[str, ...], patch: dict) -> None:
+    """Walk/create `path` of dicts inside cfg, then update the leaf with patch.
+
+    Shared by both merge_config_subtree implementations (R12-#87); the
+    caller is responsible for holding the row/registry lock.
+    """
+    node = cfg
+    for key in path:
+        nxt = node.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[key] = nxt
+        node = nxt
+    node.update(patch)
 
 
 # ── R10-S2: column allowlist for update() ────────────────────────────
@@ -328,6 +358,38 @@ class PostgresClientRegistry(ClientRegistry):
             with conn.cursor() as cur:
                 cur.execute(sql, values)
             conn.commit()
+
+    def merge_config_subtree(
+        self, client_id: str, path: tuple[str, ...], patch: dict
+    ) -> bool:
+        # R12-#87 — read-merge-write inside ONE transaction with the row
+        # locked (FOR UPDATE), so two concurrent merges serialize instead
+        # of clobbering each other. Single short transaction → safe under
+        # pgbouncer transaction pooling.
+        if not path or not all(isinstance(p, str) and p for p in path):
+            raise ValueError("merge_config_subtree: path must be non-empty strings")
+        with self._conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT config FROM sku_clients WHERE client_id = %s FOR UPDATE",
+                        (client_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        conn.rollback()
+                        return False
+                    cfg = row[0] or {}
+                    _merge_subtree_inplace(cfg, path, patch)
+                    cur.execute(
+                        "UPDATE sku_clients SET config = %s WHERE client_id = %s",
+                        (self._extras.Json(cfg), client_id),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return True
 
     def list_clients(self) -> list[ClientRecord]:
         with self._conn() as conn:
@@ -606,6 +668,24 @@ class LocalFileRegistry(ClientRegistry):
             if client_id in data:
                 data[client_id].update(fields)
                 self._save(data)
+
+    def merge_config_subtree(
+        self, client_id: str, path: tuple[str, ...], patch: dict
+    ) -> bool:
+        # R12-#87 — mirror of the Postgres semantics: the whole
+        # read-merge-write happens under the registry lock.
+        if not path or not all(isinstance(p, str) and p for p in path):
+            raise ValueError("merge_config_subtree: path must be non-empty strings")
+        with self._lock:
+            data = self._load()
+            rec = data.get(client_id)
+            if rec is None:
+                return False
+            cfg = rec.get("config") or {}
+            _merge_subtree_inplace(cfg, path, patch)
+            rec["config"] = cfg
+            self._save(data)
+            return True
 
     def list_clients(self) -> list[ClientRecord]:
         with self._lock:

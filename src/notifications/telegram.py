@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -75,8 +76,15 @@ def bot_username() -> str:
 
 # ── Outbound ────────────────────────────────────────────────────────
 
+# R12-#87 — bounded retry so a transient network blip / Telegram 5xx /
+# rate-limit doesn't silently drop a notification (the pre-fix path was
+# one-shot). Mirrors the backup.sh metric-push pattern. Permanent API
+# rejections (400 bad chat, 403 bot blocked, …) are NOT retried.
+_SEND_RETRY_DELAYS = (0.0, 2.0, 5.0)
+
+
 def send_message(chat_id: int | str, text: str) -> bool:
-    """POST /sendMessage. Returns True on success, False on any error."""
+    """POST /sendMessage with bounded retry. Returns True on success."""
     tok = _token()
     if not tok:
         logger.warning("TELEGRAM_BOT_TOKEN not set; skipping send")
@@ -88,19 +96,33 @@ def send_message(chat_id: int | str, text: str) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            body = json.loads(r.read())
-            if not body.get("ok"):
-                logger.warning("Telegram send_message not ok: %s", body)
-                return False
+    attempts = len(_SEND_RETRY_DELAYS)
+    for attempt, delay in enumerate(_SEND_RETRY_DELAYS, start=1):
+        if delay:
+            time.sleep(delay)
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = json.loads(r.read())
+        except Exception as e:    # noqa: BLE001 — transient network/5xx class; bounded retry above
+            logger.warning(
+                "Telegram send_message attempt %d/%d failed: %s", attempt, attempts, e
+            )
+            continue
+        if body.get("ok"):
             return True
-    except Exception as e:    # noqa: BLE001
-        logger.warning("Telegram send_message failed: %s", e)
+        if body.get("error_code") == 429:
+            logger.warning(
+                "Telegram send_message rate-limited (attempt %d/%d): %s",
+                attempt, attempts, body,
+            )
+            continue
+        logger.warning("Telegram send_message rejected (no retry): %s", body)
         return False
+    logger.warning("Telegram send_message gave up after %d attempts", attempts)
+    return False
 
 
 def _client_telegram(client_id: str) -> tuple[Optional[int], bool]:
@@ -227,10 +249,12 @@ def consume_link_token(token: str) -> Optional[str]:
     """
     r = _redis()
     key = _LINK_PREFIX + token
-    raw = r.get(key)
+    # R12-#87 — GETDEL is a single atomic command: two concurrent
+    # /start with the same token can never both consume it (the old
+    # separate get→delete pair had a double-consume window).
+    raw = r.getdel(key)
     if raw is None:
         return None
-    r.delete(key)
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     return str(raw)
@@ -322,7 +346,6 @@ async def poll_loop() -> None:
             # Make sure no webhook is set, but only call it once per
             # leader-acquisition (deleteWebhook is cheap but pointless
             # to spam on every iteration).
-            import time
             if time.time() - last_webhook_clear > 300:
                 try:
                     await asyncio.to_thread(
@@ -408,21 +431,19 @@ def handle_update(update: dict) -> None:
             )
             return
         # Persist chat_id into client config under notifications.telegram.
+        # R12-#87 — merge ONLY that subtree atomically at the registry
+        # level: the old read-modify-write of the whole config dict was
+        # last-write-wins against any concurrent config save.
         try:
             from src.clients.registry import get_registry
-            registry = get_registry()
-            rec = registry.get(client_id)
-            if rec is None:
+            linked = get_registry().merge_config_subtree(
+                client_id,
+                ("notifications", "telegram"),
+                {"chat_id": int(chat_id), "training_complete": True},
+            )
+            if not linked:
                 send_message(chat_id, "⚠ Аккаунт не найден.")
                 return
-            cfg = dict(rec.config or {})
-            notifs = dict(cfg.get("notifications") or {})
-            tg = dict(notifs.get("telegram") or {})
-            tg["chat_id"] = int(chat_id)
-            tg["training_complete"] = True
-            notifs["telegram"] = tg
-            cfg["notifications"] = notifs
-            registry.update(client_id, config=cfg)
         except Exception as e:    # noqa: BLE001
             logger.warning("telegram link store failed: %s", e)
             send_message(chat_id, "⚠ Не удалось сохранить привязку, попробуйте ещё раз.")
