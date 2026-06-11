@@ -57,4 +57,15 @@ if [ "${GF_SECURITY_ADMIN_PASSWORD}" = "admin" ]; then
     exit 3
 fi
 
+# R12-#86 — the root phase ends here: root was only needed so
+# lockbox_bootstrap.sh could read the bind-mounted SA key. Re-own the
+# data volume (pre-#86 boots wrote it as root) and drop to grafana's
+# upstream UID/GID before exec'ing the server. The owner check keeps
+# the chown -R a one-time migration cost, not an every-boot tax.
+if [ "$(id -u)" = "0" ]; then
+    if [ "$(stat -c %u /var/lib/grafana 2>/dev/null || echo 472)" != "472" ]; then
+        chown -R 472:472 /var/lib/grafana
+    fi
+    exec su-exec 472:472 /run.sh "$@"
+fi
 exec /run.sh "$@"

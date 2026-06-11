@@ -9,25 +9,29 @@ FROM grafana/grafana:10.4.2@sha256:7d5faae481a4c6f436c99e98af11534f7fd5e8d3e3521
 # Grafana's image is alpine-based. apk add the few extras the Lockbox
 # shell loader needs (curl + jq + openssl + ca-certificates). coreutils
 # is required by lockbox_bootstrap.sh's `mktemp -d` + base64 usage.
+# su-exec (R12-#86) lets the entrypoint drop from the root bootstrap
+# phase to grafana's upstream UID before exec'ing the server.
 USER root
 RUN apk add --no-cache \
         curl \
         jq \
         openssl \
         coreutils \
-        ca-certificates
+        ca-certificates \
+        su-exec
 
 COPY scripts/lockbox_bootstrap.sh   /usr/local/bin/lockbox_bootstrap.sh
 COPY scripts/grafana_entrypoint.sh  /usr/local/bin/grafana_entrypoint.sh
 RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
              /usr/local/bin/grafana_entrypoint.sh
 
-# Stay as root — same trade-off as Dockerfile.alertmanager / backup.
+# Image USER stays root, but ONLY for the entrypoint's bootstrap phase:
 # lockbox_bootstrap reads the bind-mounted SA key (mode 644 owned by
-# deploy:deploy; grafana's default UID 472 can't read it). The SA key's
-# actual protection is the parent-dir 700 mode (see
-# docker-compose.lockbox.yml notes). Upstream's /run.sh handles the
-# grafana-server start regardless of UID.
+# deploy:deploy; grafana's default UID 472 can't read it). R12-#86 —
+# after the bootstrap the entrypoint re-owns /var/lib/grafana and
+# `exec su-exec 472:472 /run.sh`, so grafana-server itself never runs
+# as root. Compose pairs this with cap_drop ALL + SETUID/SETGID/CHOWN
+# + no-new-privileges.
 
 ENTRYPOINT ["/usr/local/bin/grafana_entrypoint.sh"]
 CMD []
