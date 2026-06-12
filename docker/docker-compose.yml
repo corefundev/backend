@@ -321,6 +321,15 @@ services:
     mem_limit: 256m
     cpus: 0.5
     command: python -m uvicorn src.storage.sandbox_broker:app --host 0.0.0.0 --port 8100
+    # Deliberately NOT *common-env (no DSN/secrets here) — so the
+    # sandbox knobs the broker needs must be passed explicitly. Same
+    # expressions as the x-common-env block above.
+    environment:
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-ghcr.io/corefundev/sku-forecasting-sandbox:${SANDBOX_IMAGE_TAG:-main}}
+      SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-30}
+      SANDBOX_MEM_LIMIT: ${SANDBOX_MEM_LIMIT:-512m}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runc}
     security_opt:
       - no-new-privileges:true
     cap_drop:
