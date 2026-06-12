@@ -253,8 +253,10 @@ services:
       start_period: 60s
 
   # ── Upload pipeline: sandbox/process worker ───────────────────
-  # Needs access to the Docker socket to launch secure_parser containers.
-  # Run on a dedicated node in prod; treat as privileged.
+  # R11-#66 — NO Docker socket here anymore: secure_parser containers
+  # are spawned by the sandbox-broker service (below) over a dedicated
+  # internal network. This worker only stages files into the shared
+  # sandbox dir and reads results back from it.
   process-worker:
     image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-main}
     build:
@@ -272,31 +274,75 @@ services:
       # path under real workload before we move api + other workers.
       # vault_agent rewrites DATABASE_URL host:port post-Lockbox-inject.
       DB_HOST_OVERRIDE: "pgbouncer:6432"
+      SANDBOX_BROKER_URL: "http://sandbox-broker:8100"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock       # launch sandbox containers
       - sandbox_staging:/var/lib/sku-sandbox
+    networks:
+      - default
+      - sandbox-broker
     depends_on:
       redis:     { condition: service_healthy }
       postgres:  { condition: service_healthy }
       pgbouncer: { condition: service_healthy }   # cutover dependency — see DB_HOST_OVERRIDE
       minio:     { condition: service_healthy }
       migrate:   { condition: service_completed_successfully }
+      sandbox-broker: { condition: service_healthy }
     restart: unless-stopped
-    # Process worker checks: Redis + Docker socket reachability.
+    # Process worker checks: Redis + sandbox-broker reachability.
     healthcheck:
       test:
         - "CMD"
         - "python"
         - "-c"
         - |
-          import os,redis,socket
+          import os,redis,urllib.request
           redis.from_url(os.environ['REDIS_URL'], socket_connect_timeout=3).ping()
-          s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(3)
-          s.connect('/var/run/docker.sock'); s.close()
+          urllib.request.urlopen(os.environ['SANDBOX_BROKER_URL'].rstrip('/') + '/healthz', timeout=3)
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── Sandbox broker — the ONLY holder of docker.sock for sandbox work ──
+  # R11-#66: a raw RW socket in process-worker was host-root-equivalent,
+  # and a path-filtering socket proxy can't fix that (container CREATE,
+  # which the worker legitimately needs, accepts an arbitrary HostConfig
+  # — privileged, host mounts). The broker inverts the trust: it exposes
+  # exactly one capability over a dedicated internal network — run the
+  # pinned secure_parser profile (sandbox.spawn_and_wait) on a file
+  # inside the shared staging dir. No DB, no Redis, no Lockbox SA key —
+  # the broker never sees a secret.
+  sandbox-broker:
+    image: ghcr.io/corefundev/sku-forecasting-worker:${WORKER_IMAGE_TAG:-main}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    logging: *log-rotation
+    mem_limit: 256m
+    cpus: 0.5
+    command: python -m uvicorn src.storage.sandbox_broker:app --host 0.0.0.0 --port 8100
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox_staging:/var/lib/sku-sandbox
+    networks:
+      - sandbox-broker
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - |
+          import urllib.request
+          urllib.request.urlopen('http://localhost:8100/healthz', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ── ClamAV antivirus ──────────────────────────────────────────
   clamav:
@@ -1505,3 +1551,8 @@ networks:
         - subnet:  172.18.0.0/16
           ip_range: 172.18.128.0/17
           gateway: 172.18.0.1
+  # R11-#66 — private link between process-worker and sandbox-broker.
+  # internal: no gateway, no egress; only its two members can talk.
+  sandbox-broker:
+    driver: bridge
+    internal: true

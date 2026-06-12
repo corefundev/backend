@@ -68,15 +68,115 @@ class SandboxError(RuntimeError):
     """Sandbox could not run — differs from a parser validation failure."""
 
 
+def spawn_and_wait(
+    client,
+    *,
+    image: str,
+    in_dir: Path,
+    out_dir: Path,
+    input_name: str,
+    max_rows: int,
+    max_columns: int,
+    timeout_sec: int,
+    mem_limit: str,
+    cpus: float,
+    runtime: str,
+) -> tuple[int, bool, str, str]:
+    """
+    Run secure_parser in a hardened container and reap it.
+
+    The HARDENING PROFILE LIVES HERE and only here (R11-#66): both the
+    dev in-process path (DockerSandbox without a broker) and the
+    sandbox-broker service call this function, so the profile cannot
+    drift between them — and the broker cannot be talked into running
+    anything else.
+
+    Returns (exit_code, timed_out, stdout, stderr). Raises SandboxError
+    when the container cannot be launched at all.
+    """
+    # The sandbox image's ENTRYPOINT is already
+    #     ["python", "/opt/secure_parser.py"]
+    # (see docker/Dockerfile.sandbox), so containers.run appends
+    # `command` to that — don't repeat the python script here.
+    command = [
+        "--input",    f"/sandbox/in/{input_name}",
+        "--output",   "/sandbox/out/data.parquet",
+        "--manifest", "/sandbox/out/manifest.json",
+        "--max-rows",    str(max_rows),
+        "--max-columns", str(max_columns),
+    ]
+    try:
+        container = client.containers.run(
+            image=image,
+            command=command,
+            detach=True,
+            # ── isolation ───────────────────────────────────────
+            network_mode="none",
+            read_only=True,
+            user="65534:65534",
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            pids_limit=64,
+            runtime=runtime,
+            # ── resources ───────────────────────────────────────
+            mem_limit=mem_limit,
+            memswap_limit=mem_limit,    # disable swap use
+            nano_cpus=int(cpus * 1e9),
+            # ── filesystem ─────────────────────────────────────
+            volumes={
+                str(in_dir):  {"bind": "/sandbox/in",  "mode": "ro"},
+                str(out_dir): {"bind": "/sandbox/out", "mode": "rw"},
+            },
+            tmpfs={
+                "/tmp":            "size=64m,mode=1777",
+                "/sandbox/scratch": "size=64m,mode=0700",
+            },
+            environment={
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "HOME": "/sandbox/scratch",
+                "TMPDIR": "/tmp",
+            },
+            auto_remove=False,   # we need to read logs after exit
+            tty=False, stdin_open=False,
+        )
+    except Exception as e:
+        raise SandboxError(f"container launch failed: {e}") from e
+
+    try:
+        try:
+            result = container.wait(timeout=timeout_sec)
+            exit_code = int(result.get("StatusCode", -1))
+            timed_out = False
+        except Exception:   # docker wait raises on timeout (depends on SDK version)
+            container.kill()
+            exit_code = 137
+            timed_out = True
+
+        stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+        stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+        if timed_out:
+            stderr = (stderr + f"\nTIMEOUT after {timeout_sec}s").strip()
+        return exit_code, timed_out, stdout, stderr
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception as e:
+            logger.warning(f"container remove failed: {e}")
+
+
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
 class DockerSandbox:
     """
     Run `secure_parser.py` in a hardened Docker container.
 
-    The worker calling this class must have access to the Docker socket
-    (typically /var/run/docker.sock). This is itself privileged — keep the
-    worker container minimal and on a dedicated host if possible.
+    Two transports (R11-#66):
+      • SANDBOX_BROKER_URL set (prod/staging) — delegate the container
+        spawn to the sandbox-broker service over HTTP. THIS process
+        needs no Docker socket at all; it only stages files into the
+        shared work_dir and reads the results back from it.
+      • SANDBOX_BROKER_URL unset (dev/tests) — in-process docker SDK,
+        same hardened profile via spawn_and_wait().
     """
 
     def __init__(
@@ -96,16 +196,56 @@ class DockerSandbox:
         self.runtime     = runtime or os.environ.get("SANDBOX_RUNTIME", "runc")
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
+        self.broker_url = (os.environ.get("SANDBOX_BROKER_URL") or "").rstrip("/")
+        self._client = None
+        if not self.broker_url:
+            try:
+                import docker
+                # `docker` package ships no PEP 561 stubs, so mypy treats
+                # the module as `object`; from_env is real at runtime.
+                self._client = docker.from_env()    # type: ignore[attr-defined]
+            except ImportError as e:
+                raise ImportError("docker SDK required. pip install docker") from e
+            except Exception as e:
+                raise SandboxError(f"cannot connect to Docker daemon: {e}") from e
+
+    # ── broker transport ──────────────────────────────────────────────
+
+    def _spawn_via_broker(
+        self, job_dir: str, input_name: str, max_rows: int, max_columns: int
+    ) -> tuple[int, bool, str, str]:
+        """POST /spawn on the broker; mirrors spawn_and_wait's return."""
+        import urllib.error
+        import urllib.request
+
+        payload = json.dumps({
+            "job_dir":     job_dir,
+            "input_name":  input_name,
+            "max_rows":    max_rows,
+            "max_columns": max_columns,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.broker_url}/spawn",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        # The broker enforces the container timeout server-side; this
+        # HTTP timeout only guards against a hung broker.
+        http_timeout = self.timeout_sec + 30
         try:
-            import docker
-            self._docker = docker
-            # `docker` package ships no PEP 561 stubs, so mypy treats
-            # the module as `object`; from_env is real at runtime.
-            self._client = docker.from_env()    # type: ignore[attr-defined]
-        except ImportError as e:
-            raise ImportError("docker SDK required. pip install docker") from e
+            with urllib.request.urlopen(req, timeout=http_timeout) as r:
+                body = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            raise SandboxError(f"broker rejected spawn ({e.code}): {detail}") from e
         except Exception as e:
-            raise SandboxError(f"cannot connect to Docker daemon: {e}") from e
+            raise SandboxError(f"sandbox broker unreachable: {e}") from e
+        return (
+            int(body["exit_code"]),
+            bool(body["timed_out"]),
+            str(body.get("stdout", "")),
+            str(body.get("stderr", "")),
+        )
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -138,74 +278,32 @@ class DockerSandbox:
         max_rows    = int(os.environ.get("SANDBOX_MAX_ROWS",    "5000000"))
         max_columns = int(os.environ.get("SANDBOX_MAX_COLUMNS", "64"))
 
-        # The sandbox image's ENTRYPOINT is already
-        #     ["python", "/opt/secure_parser.py"]
-        # (see docker/Dockerfile.sandbox), so docker containers.run
-        # appends `command` to that. Don't repeat the python script
-        # here — secure_parser.py would see "python /opt/secure_parser.py"
-        # as positional args and abort with "unrecognized arguments".
-        command = [
-            "--input",    f"/sandbox/in/{safe_name}",
-            "--output",   "/sandbox/out/data.parquet",
-            "--manifest", "/sandbox/out/manifest.json",
-            "--max-rows",    str(max_rows),
-            "--max-columns", str(max_columns),
-        ]
-
         try:
-            container = self._client.containers.run(
-                image=self.image,
-                command=command,
-                detach=True,
-                # ── isolation ───────────────────────────────────────
-                network_mode="none",
-                read_only=True,
-                user="65534:65534",
-                cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
-                pids_limit=64,
-                runtime=self.runtime,
-                # ── resources ───────────────────────────────────────
-                mem_limit=self.mem_limit,
-                memswap_limit=self.mem_limit,    # disable swap use
-                nano_cpus=int(self.cpus * 1e9),
-                # ── filesystem ─────────────────────────────────────
-                volumes={
-                    str(in_dir):  {"bind": "/sandbox/in",  "mode": "ro"},
-                    str(out_dir): {"bind": "/sandbox/out", "mode": "rw"},
-                },
-                tmpfs={
-                    "/tmp":            "size=64m,mode=1777",
-                    "/sandbox/scratch": "size=64m,mode=0700",
-                },
-                environment={
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "HOME": "/sandbox/scratch",
-                    "TMPDIR": "/tmp",
-                },
-                auto_remove=False,   # we need to read logs after exit
-                tty=False, stdin_open=False,
-            )
-        except Exception as e:
+            # timed_out is already folded into stderr by the spawn layer —
+            # unused here, kept in the tuple for the broker API contract.
+            if self.broker_url:
+                exit_code, _timed_out, stdout, stderr = self._spawn_via_broker(
+                    staging.name, safe_name, max_rows, max_columns,
+                )
+            else:
+                exit_code, _timed_out, stdout, stderr = spawn_and_wait(
+                    self._client,
+                    image=self.image,
+                    in_dir=in_dir,
+                    out_dir=out_dir,
+                    input_name=safe_name,
+                    max_rows=max_rows,
+                    max_columns=max_columns,
+                    timeout_sec=self.timeout_sec,
+                    mem_limit=self.mem_limit,
+                    cpus=self.cpus,
+                    runtime=self.runtime,
+                )
+        except SandboxError:
             shutil.rmtree(staging, ignore_errors=True)
-            raise SandboxError(f"container launch failed: {e}") from e
+            raise
 
         try:
-            try:
-                result = container.wait(timeout=self.timeout_sec)
-                exit_code = int(result.get("StatusCode", -1))
-                timed_out = False
-            except Exception:   # docker wait raises on timeout (depends on SDK version)
-                container.kill()
-                exit_code = 137
-                timed_out = True
-
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
-
-            if timed_out:
-                stderr = (stderr + f"\nTIMEOUT after {self.timeout_sec}s").strip()
-
             # Parser exit convention: 0=ok, 2=input missing, 3=validation error
             ok = exit_code == 0
             parquet_path = out_dir / "data.parquet"
@@ -235,8 +333,6 @@ class DockerSandbox:
                 output_path=output_file, manifest=manifest,
             )
         finally:
-            try:
-                container.remove(force=True)
-            except Exception as e:
-                logger.warning(f"container remove failed: {e}")
+            # Container reaping lives in spawn_and_wait (broker side for
+            # the HTTP transport); only the staging dir is ours to clean.
             shutil.rmtree(staging, ignore_errors=True)

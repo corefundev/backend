@@ -106,7 +106,7 @@ rollback() {
     # safer than running new-sandbox under old-worker.
     export SANDBOX_IMAGE_TAG="$prev_tag"
 
-    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans api worker scan-worker process-worker
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans sandbox-broker api worker scan-worker process-worker
 
     for i in $(seq 1 60); do
         local s
@@ -430,13 +430,17 @@ docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh /scripts/init_s3
 
 if [ "$ENVIRONMENT" = "production" ]; then
     echo "  rolling: workers first (no traffic), then api"
-    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans worker scan-worker process-worker
+    # sandbox-broker ships in the worker image (R11-#66) and must be
+    # recreated with it; process-worker's healthcheck needs the broker
+    # up, so it goes first in the same invocation (compose orders by
+    # depends_on).
+    docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans sandbox-broker worker scan-worker process-worker
     sleep 5
     docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans api
 else
     echo "  recreating app services in parallel (staging)"
     docker compose $COMPOSE_ARGS up -d --force-recreate --remove-orphans \
-        api worker scan-worker process-worker
+        sandbox-broker api worker scan-worker process-worker
 fi
 
 # ── Wait for healthy ───────────────────────────────────────────────
@@ -503,6 +507,14 @@ ACTUAL_WORKER=$(docker inspect docker-worker-1 --format '{{.Config.Image}}')
 echo "  worker container running image: $ACTUAL_WORKER"
 if [ "$ACTUAL_WORKER" != "$EXPECTED_WORKER" ]; then
     rollback "worker image mismatch (expected=$EXPECTED_WORKER actual=$ACTUAL_WORKER)" || true
+    exit 4
+fi
+
+# R11-#66 — the broker rides the worker image; same identity assertion.
+ACTUAL_BROKER=$(docker inspect docker-sandbox-broker-1 --format '{{.Config.Image}}')
+echo "  sandbox-broker container running image: $ACTUAL_BROKER"
+if [ "$ACTUAL_BROKER" != "$EXPECTED_WORKER" ]; then
+    rollback "sandbox-broker image mismatch (expected=$EXPECTED_WORKER actual=$ACTUAL_BROKER)" || true
     exit 4
 fi
 
