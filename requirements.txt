@@ -64,6 +64,12 @@ httpx==0.27.0
 # ── Аутентификация и безопасность ────────────────────
 PyJWT==2.13.0              # R12-#85: CVE-2026-48526 + 48522-25 fixed in 2.13; CVE-2026-32597 fixed in 2.12
 hvac==2.3.0
+# R12-#89 (M1): imported directly (lockbox_agent PS256 signing, Google
+# OIDC RS256 verify) but previously rode in as mlflow's transitive —
+# a security-critical primitive must be pinned explicitly. Matches the
+# version mlflow 3.13 resolves (<49,>=43); bump deliberately, not by
+# resolver accident.
+cryptography==48.0.1
 
 # ── Хранилище ─────────────────────────────────────────
 boto3==1.34.100

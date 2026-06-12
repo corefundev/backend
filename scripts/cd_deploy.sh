@@ -217,6 +217,19 @@ echo "  ensuring /srv/backend/sandbox-staging exists (tolerant)"
 mkdir -p /srv/backend/sandbox-staging 2>/dev/null || true
 chmod 1777 /srv/backend/sandbox-staging 2>/dev/null || true
 
+# R12-#89 — verify the OUTCOME loudly. The tolerant chmod above
+# swallowed EPERM for 5 weeks while staging's dir sat root:root 755
+# (upload processing silently broken at the sandbox step — caught
+# 2026-06-12 during the R11-#66 e2e). The mode must be exactly 1777 so
+# the worker (uid 999) and the sandbox (uid 65534) can both write.
+SANDBOX_DIR_MODE=$(stat -c %a /srv/backend/sandbox-staging 2>/dev/null || echo missing)
+if [ "$SANDBOX_DIR_MODE" != "1777" ]; then
+    echo "FATAL: /srv/backend/sandbox-staging mode is '$SANDBOX_DIR_MODE', need 1777." >&2
+    echo "  Fix on the host (deploy@ lacks chown rights when root owns it):" >&2
+    echo "  docker run --rm -v /srv/backend:/host alpine sh -c 'chown $(id -u):$(id -g) /host/sandbox-staging && chmod 1777 /host/sandbox-staging'" >&2
+    exit 8
+fi
+
 # ── R12-#88 — verify cosign signatures BEFORE running the pulled images ──
 # cd.yml signs every pushed image digest keylessly (GitHub OIDC, R4-17);
 # until now nothing on the host CHECKED those signatures, so the signing
