@@ -238,6 +238,12 @@ def test_compose_broker_is_the_only_sock_holder_in_app_tier():
     assert broker["networks"] == ["sandbox-broker"]
     assert broker["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in broker["security_opt"]
+    # the broker skips *common-env (no secrets), so the sandbox knobs it
+    # needs MUST be passed explicitly — an empty SANDBOX_IMAGE makes the
+    # broker fall back to a non-existent local tag (caught live 2026-06-12)
+    env = broker["environment"]
+    assert "sku-forecasting-sandbox" in env["SANDBOX_IMAGE"]
+    assert "DATABASE_URL" not in env and "REDIS_URL" not in env
     # private network is internal (no egress)
     assert base["networks"]["sandbox-broker"]["internal"] is True
     # no other service mounts the raw RW socket. Deliberate exceptions:
