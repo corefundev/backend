@@ -2,7 +2,8 @@
 # Override for production VPS:
 #   • mlflow → sqlite backend (no psycopg2)
 #   • scan/process-worker — drop minio dep
-#   • process-worker — group_add for /var/run/docker.sock access
+#   • sandbox-broker — group_add for /var/run/docker.sock access (R11-#66:
+#     the socket moved here from process-worker)
 #   • alertmanager — bound to 127.0.0.1 only (admin via SSH tunnel)
 #   • postgres / redis — host port mapping removed (internal only)
 #   • prometheus / grafana / mlflow — bind to 127.0.0.1 only (SSH tunnel access)
@@ -40,25 +41,31 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    group_add:
-      - "988"
+      sandbox-broker:
+        condition: service_healthy
     environment:
-      # When process-worker spawns the sandbox container via the host
-      # docker socket, the bind-mount path it asks for is resolved on
-      # the HOST — not in process-worker's mount namespace. So a named
-      # volume at /var/lib/sku-sandbox is invisible to the spawned
-      # sandbox: docker daemon looks for that path on the host and finds
-      # nothing → "input file not found".
-      #
-      # Fix: use a real host directory and bind-mount it at the SAME
-      # path inside process-worker. Then the path is identical from
-      # both sides, host docker daemon resolves it correctly, and the
-      # sandbox container can mount it.
+      # The staging dir must be a real HOST directory bind-mounted at
+      # the SAME path in process-worker AND sandbox-broker: the broker
+      # passes these paths to the docker daemon, which resolves them on
+      # the HOST — a named volume at /var/lib/sku-sandbox would be
+      # invisible to the spawned sandbox ("input file not found").
       SANDBOX_WORK_DIR: /srv/backend/sandbox-staging
     volumes:
       - /srv/backend/sandbox-staging:/srv/backend/sandbox-staging
     # One-time setup on each VPS:
     #     mkdir -p /srv/backend/sandbox-staging && chmod 1777 …
+
+  sandbox-broker:
+    # docker gid on both VPS hosts — the broker is now the only app
+    # service touching /var/run/docker.sock (R11-#66).
+    group_add:
+      - "988"
+    environment:
+      # Same host-path trick as process-worker above — the broker hands
+      # these paths to the host docker daemon when spawning the sandbox.
+      SANDBOX_WORK_DIR: /srv/backend/sandbox-staging
+    volumes:
+      - /srv/backend/sandbox-staging:/srv/backend/sandbox-staging
 
   alertmanager:
     ports: !override
