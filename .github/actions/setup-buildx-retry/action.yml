@@ -1,0 +1,21 @@
+# R11-#83 — docker/setup-buildx-action with ONE bounded retry: the
+# setup pulls the buildkit image from Docker Hub, which intermittently
+# times out (first observed 2026-06-06).
+name: setup-buildx with bounded retry
+description: docker/setup-buildx-action wrapped with one retry after 20s
+
+runs:
+  using: composite
+  steps:
+    - id: try1
+      continue-on-error: true
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+    - if: steps.try1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::buildx setup attempt 1 failed — retrying in 20s (R11-#83 transient-registry guard)"
+        sleep 20
+
+    - if: steps.try1.outcome == 'failure'
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3

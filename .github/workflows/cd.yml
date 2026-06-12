@@ -90,7 +90,7 @@ jobs:
       - id: tag
         run: echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: ./.github/actions/setup-buildx-retry   # R11-#83 — bounded retry
 
       # R4-17 — install cosign so the post-build step can sign each
       # image digest keylessly via GitHub OIDC. Previously only
@@ -111,7 +111,7 @@ jobs:
       # `:main` is the dev / fresh-VPS fallback.
       - name: Build + push api image
         id: api
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile
@@ -124,7 +124,7 @@ jobs:
 
       - name: Build + push worker image
         id: worker
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile.worker
@@ -145,7 +145,7 @@ jobs:
       # changes actually land in prod.
       - name: Build + push sandbox image
         id: sandbox
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile.sandbox
@@ -177,7 +177,18 @@ jobs:
                   sandbox) img="${{ env.IMAGE_SANDBOX }}"; d='${{ steps.sandbox.outputs.digest }}' ;;
               esac
               echo "  signing ${img}@${d}"
-              cosign sign --yes "${img}@${d}"
+              # R11-#83 — bounded retry: a GHCR 502 at the referrers
+              # upload killed CD run 27352557584 (2026-06-11). A real
+              # signing error fails all 3 attempts and still fails CD.
+              for attempt in 1 2 3; do
+                  cosign sign --yes "${img}@${d}" && break
+                  if [ "$attempt" = 3 ]; then
+                      echo "::error::cosign sign failed after 3 attempts for ${img}@${d}"
+                      exit 1
+                  fi
+                  echo "::warning::cosign sign attempt $attempt failed — retrying in $((attempt * 20))s"
+                  sleep $((attempt * 20))
+              done
           done
 
   deploy-staging:

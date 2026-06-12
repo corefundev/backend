@@ -1,0 +1,63 @@
+# R11-#83 — docker/build-push-action with ONE bounded retry after a
+# backoff. Transient registry-side blips keep killing otherwise-green
+# runs (observed: Docker Hub buildx pull timeouts 2026-06-06; GHCR 502
+# at cosign 2026-06-11; GHCR "error writing layer blob: not_found" at
+# the buildcache write 2026-06-12). The retry re-runs the whole build;
+# buildx layer cache makes the second attempt cheap. A REAL build error
+# fails twice and still fails the job — this widens nothing.
+name: build-push with bounded retry
+description: docker/build-push-action wrapped with one retry after 30s
+
+inputs:
+  context:
+    default: "."
+  file:
+    required: true
+  push:
+    default: "false"
+  load:
+    default: "false"
+  tags:
+    required: true
+  cache-from:
+    default: ""
+  cache-to:
+    default: ""
+
+outputs:
+  digest:
+    description: image digest from whichever attempt succeeded
+    value: ${{ steps.try1.outputs.digest || steps.try2.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - id: try1
+      continue-on-error: true
+      uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        push: ${{ inputs.push }}
+        load: ${{ inputs.load }}
+        tags: ${{ inputs.tags }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - if: steps.try1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::build-push attempt 1 failed — retrying in 30s (R11-#83 transient-registry guard)"
+        sleep 30
+
+    - id: try2
+      if: steps.try1.outcome == 'failure'
+      uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        push: ${{ inputs.push }}
+        load: ${{ inputs.load }}
+        tags: ${{ inputs.tags }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
