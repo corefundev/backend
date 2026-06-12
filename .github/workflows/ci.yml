@@ -320,9 +320,9 @@ jobs:
     needs: [lint, unit-tests, integration-tests]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: ./.github/actions/setup-buildx-retry   # R11-#83 — bounded retry
       - name: Build API image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile
@@ -331,7 +331,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Build Worker image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile.worker
@@ -341,7 +341,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Build Sandbox image (Phase 2 — upload parser)
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: docker/Dockerfile.sandbox
@@ -385,9 +385,9 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: ./.github/actions/setup-buildx-retry   # R11-#83 — bounded retry
       - name: Build ${{ matrix.image.name }} image for scanning
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: ./.github/actions/build-image-retry    # R11-#83 — bounded retry
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
@@ -402,10 +402,22 @@ jobs:
         env:
           TRIVY_VERSION: 0.70.0
         run: |
-          curl -fsSL -o trivy.deb \
+          # R11-#83 — curl retries transient download failures itself;
+          # then pre-pull the vulnerability DB with a bounded retry so
+          # GHCR propagation lag can't fail the scan steps below.
+          curl -fsSL --retry 4 --retry-all-errors -o trivy.deb \
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
           sudo dpkg -i trivy.deb
           trivy --version
+          for attempt in 1 2 3; do
+              trivy image --download-db-only && break
+              if [ "$attempt" = 3 ]; then
+                  echo "::error::trivy DB download failed after 3 attempts"
+                  exit 1
+              fi
+              echo "::warning::trivy DB download attempt $attempt failed — retrying in 30s"
+              sleep 30
+          done
       # First pass: print findings to stdout so the CI log shows them.
       # Second pass: emit SARIF for the GitHub Security tab. Same image
       # is hit twice but Trivy caches the vuln-DB so it's quick.
