@@ -54,6 +54,38 @@ def test_restore_decrypt_failure_is_explicit():
     assert "exit 5" in text
 
 
+# ── M5: dev toolchain split out of prod images ──────────────────────
+
+def test_prod_requirements_has_no_dev_toolchain():
+    text = (ROOT / "requirements.txt").read_text()
+    for pkg in ("pytest", "flake8", "mypy", "types-PyYAML", "types-redis", "httpx"):
+        assert not re.search(rf"^{re.escape(pkg)}==", text, re.MULTILINE), (
+            f"{pkg} must live in requirements-dev.txt, not ship in prod images"
+        )
+
+
+def test_dev_requirements_extends_prod_and_carries_toolchain():
+    text = (ROOT / "requirements-dev.txt").read_text()
+    assert "-r requirements.txt" in text
+    for pkg in ("pytest==", "pytest-asyncio==", "httpx==", "flake8==", "mypy=="):
+        assert pkg in text
+
+
+def test_ci_test_jobs_install_dev_file_and_audit_stays_on_prod():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert ci.count("pip install -r requirements-dev.txt") >= 3
+    assert "pip install -r requirements.txt" not in ci
+    # pip-audit audits what SHIPS
+    assert "--requirement requirements.txt" in ci
+
+
+def test_prod_images_install_only_prod_requirements():
+    for df in ("Dockerfile", "Dockerfile.worker"):
+        text = (ROOT / "docker" / df).read_text()
+        assert "requirements-dev" not in text, df
+        assert "pip install --no-cache-dir -r requirements.txt" in text, df
+
+
 # ── M6: cron log rotation ───────────────────────────────────────────
 
 def test_backup_crontab_has_rotate_job():

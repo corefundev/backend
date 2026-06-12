@@ -1,0 +1,21 @@
+# requirements-dev.txt — test/lint toolchain on top of the runtime set.
+#
+# R12-#89 (M5): pytest/flake8/mypy/types-* (and httpx, which only the
+# starlette/fastapi TestClient needs) used to live in requirements.txt
+# and therefore shipped inside the production api/worker images. Prod
+# images now install ONLY requirements.txt; CI test jobs install this
+# file. pip-audit keeps auditing requirements.txt — the surface that
+# actually ships.
+-r requirements.txt
+
+# ── Тестирование ──────────────────────────────────────
+pytest==8.2.0
+pytest-asyncio==0.23.6
+# Only consumed by fastapi/starlette TestClient (no direct import in src/).
+httpx==0.27.0
+
+# ── Линтинг и типизация ───────────────────────────────
+flake8==7.1.0
+mypy==1.10.0
+types-PyYAML==6.0.12.20240311
+types-redis==4.6.0.20241004
