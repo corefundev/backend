@@ -59,7 +59,6 @@ pydantic==2.7.1
 # out of the core library). Pinned to a version compatible with
 # pydantic 2.7.x; bumping pydantic core requires re-verifying this pin.
 pydantic-settings==2.3.4
-httpx==0.27.0
 
 # ── Аутентификация и безопасность ────────────────────
 PyJWT==2.13.0              # R12-#85: CVE-2026-48526 + 48522-25 fixed in 2.13; CVE-2026-32597 fixed in 2.12
@@ -144,15 +143,8 @@ opentelemetry-instrumentation-fastapi>=0.45b0,<1.0.0
 opentelemetry-exporter-otlp-proto-grpc>=1.25.0,<2.0.0
 python-json-logger==2.0.7
 
-# ── Тестирование ──────────────────────────────────────
-pytest==8.2.0
-pytest-asyncio==0.23.6
-
-# ── Линтинг и типизация ───────────────────────────────
-flake8==7.1.0
-mypy==1.10.0
-types-PyYAML==6.0.12.20240311
-types-redis==4.6.0.20241004
+# Тестирование / линтинг / типизация / httpx (TestClient-only) живут в
+# requirements-dev.txt (R12-#89 M5) — prod-образы ставят ТОЛЬКО этот файл.
 
 # ── Build-tool security pins ──────────────────────────
 # These come baked into the Python image and aren't direct deps of

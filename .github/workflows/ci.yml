@@ -219,7 +219,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - run: |
           python -m pytest tests/unit/ tests/data/ \
             -v --tb=short \
@@ -268,7 +268,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - name: Apply migrations
         run: PYTHONPATH=. python scripts/migrate.py
       - run: |
@@ -293,7 +293,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - name: Run chaos suite
         run: |
           python -c "
