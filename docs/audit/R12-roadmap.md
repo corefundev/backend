@@ -95,7 +95,7 @@ items; they are the product surface around training config.
   malformed keys/types reach training and fail late instead of a clean 422.
   Low-risk DX; note for a future config-schema pass.
 
-### Proposed Start vs Business feature split (DESIGN — needs sign-off)
+### Start vs Business feature split — APPROVED 2026-06-14
 Today the only hard line is `config_allowed_keys` (Start = 16-key whitelist,
 Business = all) + HPO budget (15 vs 30). The model tier (3×MIMO ensemble) and
 feature engine are IDENTICAL. That makes the paid tiers hard to tell apart.
@@ -110,9 +110,12 @@ Recommended differentiation (see chat 2026-06-14 for rationale):
   holiday calendars / promo uploads, conformal prediction intervals, and
   higher `/predict` throughput (already ∞ vs 5000/h). These give Business a
   *capability* story, not just "more of the same knobs."
-- Decision needed: do FX currency presets stay Start+Business, or become a
-  Business-only "advanced exogenous" bundle? Recommend: **basic FX on Start,
-  full exogenous (Brent/key-rate/Rosstat when built) on Business.**
+- DECIDED: **basic FX on Start, full exogenous (Brent/key-rate/Rosstat when
+  built) on Business.** The Business-only capability levers above are the
+  agreed differentiation — most depend on Phase-3 modules not yet built
+  (champion/challenger, Tier C per-cluster ensemble, conformal), so they
+  land incrementally on top of the quality workstream, not as a standalone
+  tier-gating PR.
 
 ## Phase 4 — Decisions needed + maintenance
 
