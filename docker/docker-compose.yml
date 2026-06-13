@@ -124,6 +124,13 @@ services:
     # the host.
     mem_limit: 512m
     cpus: 1.0
+    # R11-#65 — app tier runs as USER sku (non-root, Dockerfile) and needs
+    # no Linux capabilities: pure-Python, no privileged ports, no chown.
+    # cap_drop ALL + no-new-privileges across api/workers/migrate.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: *common-env
     depends_on:
@@ -146,6 +153,10 @@ services:
     logging: *log-rotation
     mem_limit: 768m
     cpus: 1.5
+    security_opt:                 # R11-#65
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "8000:8000"
     environment:
@@ -187,6 +198,10 @@ services:
     logging: *log-rotation
     mem_limit: 1500m   # training: lightgbm + pandas frames can spike
     cpus: 2.0
+    security_opt:                 # R11-#65
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: rq worker sku-training --url redis://redis:6379
     environment:
       <<: *common-env
@@ -219,6 +234,10 @@ services:
     logging: *log-rotation
     mem_limit: 256m
     cpus: 0.5
+    security_opt:                 # R11-#65
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: rq worker sku-scan --url redis://redis:6379
     environment:
       <<: *common-env
@@ -265,6 +284,10 @@ services:
     logging: *log-rotation
     mem_limit: 768m   # sandbox parsing — large CSV/parquet → spike
     cpus: 1.0
+    security_opt:                 # R11-#65 (sock already gone via #66)
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: rq worker sku-process --url redis://redis:6379
     environment:
       <<: *common-env
