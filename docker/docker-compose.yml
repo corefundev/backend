@@ -687,7 +687,8 @@ services:
     # Yandex Lockbox at startup and serves artifacts via the proxy
     # (mlflow-artifacts:// scheme), so the worker HTTP-PUTs to mlflow:5000
     # instead of needing S3 creds itself. Upstream mlflow pinned to
-    # v3.11.1 + digest inside docker/Dockerfile.mlflow (R4-20 preserved).
+    # v3.13.0 + digest inside docker/Dockerfile.mlflow (R11-#82 parity;
+    # R4-20 digest discipline preserved).
     build:
       context: ..
       dockerfile: docker/Dockerfile.mlflow

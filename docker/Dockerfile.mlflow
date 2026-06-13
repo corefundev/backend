@@ -16,7 +16,10 @@
 # / pgbouncer / prometheus (R10-S6). Allowlist gates injection to ONLY
 # the 5 S3_MLFLOW_* keys so mlflow never sees the other 89 secrets.
 
-FROM ghcr.io/mlflow/mlflow:v3.11.1@sha256:6cb0a22c0d4d722a793c2e93d89ba28b10b6b27d4c1e60ab2533a8e081ffca2d
+# R11-#82 — server bumped v3.11.1 → v3.13.0 for client/server parity:
+# the app/worker client is mlflow==3.13.0 (requirements.txt, R11-#81).
+# Pinned to the multi-arch manifest-list digest (R4-20 digest discipline).
+FROM ghcr.io/mlflow/mlflow:v3.13.0@sha256:b2136d49f882fdc9c48bdb95514a8a23804e8756524135c3f09f7a553a3ac58b
 
 # Image USER stays root, but ONLY for the entrypoint's bootstrap phase
 # (lockbox_bootstrap must read the bind-mounted SA key, deploy-owned
