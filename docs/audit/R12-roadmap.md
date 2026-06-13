@@ -64,6 +64,56 @@ Order fixed by expected impact; each measured via same-model A/B before/after:
 Exit: measured WMAPE/MASE improvement vs the #76 baselines
 (Free 0.453/2.93, Business 0.340/1.249) on the wired backtest.
 
+## Phase 3.5 — Product / UX + config-system improvements
+
+Added 2026-06-14 after the client-config review. These are NOT forecast-math
+items; they are the product surface around training config.
+
+### Product / UX
+- **#94 Currency-selection UI (FE)** — `features.external_regressors_ru`
+  (CNY/USD/EUR/BYN/KZT, ЦБ РФ FX) is backend-complete and in the Start
+  whitelist, but has ZERO UI — settable only via raw API. Add to
+  `SettingsPage.tsx`: a "Учёт курсов валют (ЦБ РФ)" toggle + a checkbox
+  group, default all-on, presets Asia (CNY+KZT+BYN) / West (USD+EUR) /
+  CNY-only. Plan-gate: Start+Business editable, Free locked. Mirrors the
+  existing weather block; inline Toggle/Field/Section patterns, brand-500,
+  radius scale, inline RU copy. Full implementation map in task #94.
+- FX regressors are auto-forced ON for Start+Business today but the user
+  can't SEE or tune the currency list — #94 closes that visibility gap.
+
+### Config-system hardening (from the 2026-06-14 review)
+- **#95 Audit gap** — PUT/PATCH `/clients/{id}/config` are NOT audited
+  (only DELETE is), yet a stale comment claims they are. Config changes are
+  billing+output-relevant; add `record_event(EVT_PLAN_CHANGE, config_set/
+  config_patch)` with a before/after diff. MED.
+- **#96 user-set tracking** — train.py hand-lists 3 keys
+  (`user_set_hpo/objective/regressors_ru`) so plan defaults don't clobber
+  explicit choices; fragile (new defaulted key silently clobbers). Replace
+  with a generic "default only if the dotted key is absent from the override"
+  helper. Folds into #92.
+- Business config is validated only on ranges + JSON depth (None whitelist) —
+  malformed keys/types reach training and fail late instead of a clean 422.
+  Low-risk DX; note for a future config-schema pass.
+
+### Proposed Start vs Business feature split (DESIGN — needs sign-off)
+Today the only hard line is `config_allowed_keys` (Start = 16-key whitelist,
+Business = all) + HPO budget (15 vs 30). The model tier (3×MIMO ensemble) and
+feature engine are IDENTICAL. That makes the paid tiers hard to tell apart.
+Recommended differentiation (see chat 2026-06-14 for rationale):
+- **Keep shared:** ensemble model, all feature toggles, horizon knob,
+  objective choice, FX regressors + currency selection (#94).
+- **Start-capped / Business-only:** raw ML hyperparams (already Business-only
+  via whitelist — keep); HPO depth (15 vs 30 — keep); longer horizon (30 vs
+  90 — keep); SKU ceiling (1500 vs ∞ — keep).
+- **New Business-only levers to ADD (once the quality workstream lands them):**
+  champion/challenger model lifecycle, per-cluster ensemble (Tier C), custom
+  holiday calendars / promo uploads, conformal prediction intervals, and
+  higher `/predict` throughput (already ∞ vs 5000/h). These give Business a
+  *capability* story, not just "more of the same knobs."
+- Decision needed: do FX currency presets stay Start+Business, or become a
+  Business-only "advanced exogenous" bundle? Recommend: **basic FX on Start,
+  full exogenous (Brent/key-rate/Rosstat when built) on Business.**
+
 ## Phase 4 — Decisions needed + maintenance
 
 - **#90 dead Airflow chain teardown** — BLOCKED on user sign-off (intersects
