@@ -113,14 +113,30 @@ def _isolated_config(base_config: dict, workdir: str, tier: str) -> dict:
     return cfg
 
 
-def _register_backtest_client(tier: str) -> None:
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge `over` into a copy of `base` (over wins on leaves)."""
+    out = copy.deepcopy(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def _register_backtest_client(tier: str, extra_config: dict | None = None) -> None:
     """Register a 'backtest' client (in the ISOLATED local-file registry — see
     run_baseline) whose config explicitly carries the tier's objective/HPO/
     regressors, so run_training_pipeline's plan-tier defaults treat them as
-    user-set and don't override. plan=<tier> for caps/display parity."""
+    user-set and don't override. plan=<tier> for caps/display parity.
+
+    `extra_config` deep-merges on top of the tier config — used to A/B a
+    single feature flag (e.g. features.sku_encoded_enabled for R11-#58)
+    on the SAME data/cutoff, so the delta isolates that flag."""
+    cfg = _deep_merge(_TIER_CLIENT_CONFIG[tier], extra_config or {})
     get_registry().register(ClientRecord(
         client_id="backtest",
-        config=copy.deepcopy(_TIER_CLIENT_CONFIG[tier]),
+        config=cfg,
         storage_path="backtest",
         plan=tier,
     ))
@@ -132,6 +148,7 @@ def run_baseline(
     holdout_days: int = 14,
     label: str = "baseline",
     tier: str = "free",
+    extra_config: dict | None = None,
 ) -> BacktestResult:
     """Train on the pre-cutoff slice, serve the holdout through the real path,
     score against actuals. Returns the BacktestResult (also see .as_dict())."""
@@ -159,7 +176,7 @@ def run_baseline(
         os.environ.pop("DATABASE_URL", None)
         os.environ["REGISTRY_PATH"] = os.path.join(workdir, "registry.json")
 
-        _register_backtest_client(tier)
+        _register_backtest_client(tier, extra_config)
 
         iso_config = _isolated_config(base_config, workdir, tier)
         iso_config_path = os.path.join(workdir, "backtest_config.yaml")
@@ -183,10 +200,25 @@ def main() -> None:
     p.add_argument("--holdout-days", type=int, default=14)
     p.add_argument("--label", default="baseline")
     p.add_argument("--tier", choices=sorted(_TIER_CLIENT_CONFIG), default="free")
+    p.add_argument(
+        "--sku-encoded", choices=["on", "off"], default=None,
+        help="R11-#58 A/B: force features.sku_encoded_enabled on/off "
+             "(default: leave to config). 'on' = legacy, 'off' = #58 fix.",
+    )
     args = p.parse_args()
 
-    res = run_baseline(args.data, args.config, args.holdout_days, args.label, args.tier)
-    print(json.dumps({**res.as_dict(), "tier": args.tier}, indent=2, default=str))
+    extra = None
+    if args.sku_encoded is not None:
+        extra = {"features": {"sku_encoded_enabled": args.sku_encoded == "on"}}
+
+    res = run_baseline(
+        args.data, args.config, args.holdout_days, args.label, args.tier,
+        extra_config=extra,
+    )
+    print(json.dumps(
+        {**res.as_dict(), "tier": args.tier, "sku_encoded": args.sku_encoded},
+        indent=2, default=str,
+    ))
 
 
 if __name__ == "__main__":
