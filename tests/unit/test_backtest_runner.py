@@ -88,7 +88,8 @@ def test_run_baseline_forces_local_storage(monkeypatch, tmp_path):
     # short-circuit the actual backtest + client registration — we only assert
     # the isolation side-effects here.
     monkeypatch.setattr(runner, "run_backtest", lambda *a, **k: "RESULT")
-    monkeypatch.setattr(runner, "_register_backtest_client", lambda tier: None)
+    monkeypatch.setattr(runner, "_register_backtest_client",
+                        lambda tier, extra_config=None: None)
 
     out = runner.run_baseline(data_path=str(data), holdout_days=1)
     assert out == "RESULT"
