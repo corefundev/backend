@@ -33,7 +33,8 @@ src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline
 src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
 src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
 src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
-src/pipeline/inference_utils.py:277  pre-R9 baseline; triage in R10 — recursive forecast fallback
+src/pipeline/inference_utils.py:175  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected)
+src/pipeline/inference_utils.py:313  pre-R9 baseline (was :277, +R12-#91 shift); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
 src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
@@ -68,6 +69,6 @@ src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:334  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
 src/api/routers/training.py:347  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
-src/pipeline/inference_utils.py:351  R11-#59 — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:406  R11-#59 — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
+src/pipeline/inference_utils.py:387  R11-#59 (was :351, +R12-#91 shift) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
+src/pipeline/inference_utils.py:443  R11-#59 (was :406, +R12-#91 shift) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
 

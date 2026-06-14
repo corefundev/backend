@@ -436,6 +436,7 @@ async def predict(
             horizon=horizon,
             sku=req.sku,
             predict_fn=_wrap_predict,  # recursive-path fallback (single-step / overflow / direct-fail)
+            config=config,             # R12-#91: recompute holidays per forecast date
         )
 
         forecasts      = [round(float(r["predicted_sales"]), 4) for r in forecast_rows]
