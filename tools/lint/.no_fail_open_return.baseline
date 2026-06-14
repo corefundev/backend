@@ -20,10 +20,10 @@
 # training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:770  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
-src/pipeline/task_queue.py:765  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:778  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
-src/pipeline/task_queue.py:798  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:777  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
+src/pipeline/task_queue.py:772  R9-T4-001 — training fallback registry; closes in item #14
+src/pipeline/task_queue.py:785  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:805  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,
@@ -33,8 +33,8 @@ src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline
 src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
 src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
 src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
-src/pipeline/inference_utils.py:175  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected)
-src/pipeline/inference_utils.py:313  pre-R9 baseline (was :277, +R12-#91 shift); triage in R10 — recursive forecast fallback
+src/pipeline/inference_utils.py:195  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected)
+src/pipeline/inference_utils.py:333  pre-R9 baseline (was :277, +R12-#91 shift); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
 src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
@@ -42,9 +42,9 @@ src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstra
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
-src/features/engineering.py:76  pre-R9 baseline; triage in R10 — feature engineering optional step
-src/features/engineering.py:84  pre-R9 baseline; triage in R10 — feature engineering optional step
-src/features/engineering.py:92  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:107  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step
 src/storage/upload_pipeline.py:175  pre-R9 baseline; triage in R10 — scan-stage error capture
 src/storage/upload_pipeline.py:204  pre-R9 baseline; triage in R10 — scan-stage final
 src/storage/upload_pipeline.py:291  pre-R9 baseline; triage in R10 — process-stage error capture
@@ -69,6 +69,6 @@ src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:334  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
 src/api/routers/training.py:347  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
-src/pipeline/inference_utils.py:387  R11-#59 (was :351, +R12-#91 shift) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:443  R11-#59 (was :406, +R12-#91 shift) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
+src/pipeline/inference_utils.py:407  R11-#59 (was :351, +R12-#91 shift) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
+src/pipeline/inference_utils.py:463  R11-#59 (was :406, +R12-#91 shift) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
 

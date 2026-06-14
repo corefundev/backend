@@ -70,7 +70,15 @@ def _make_serve_fn(config_path: str) -> Callable[..., pd.DataFrame]:
     """
     def serve_fn(model, history_df: pd.DataFrame, horizon: int) -> pd.DataFrame:
         config = load_config(config_path)
-        df_feat = build_features(history_df, config)
+        # R12-#100 — pin to the model's trained lag/rolling set so a serve
+        # frame whose SKU mix differs from training (the bug heterogeneous
+        # real series exposed) can't drop the long lags the model expects.
+        from src.pipeline.inference_utils import serve_feature_set
+        _lags, _rw = serve_feature_set(model)
+        df_feat = build_features(
+            history_df, config,
+            pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
+        )
         feature_cols = get_feature_columns(df_feat, config)
         out = forecast_all_skus(model, df_feat, feature_cols, config, horizon=horizon)
         sku_col = config["data"]["sku_col"]

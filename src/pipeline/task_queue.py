@@ -550,14 +550,15 @@ def _generate_and_store_forecasts(
     horizon = max(1, horizon)
     df = load_data(data_path, config)
     df = validate_data(df, config)
-    df = build_features(df, config)
-    feature_cols = get_feature_columns(df, config)
 
     # Use the same load path the API does — ClientStorage.load_model
     # handles s3 fetch + pickle deserialisation in one step. The
     # earlier custom "download to /tmp + load_model_any_format" path
     # silently produced an UnpicklingError when the local file was
     # touched before the S3 download fully landed.
+    # R12-#100 — load BEFORE build_features so we can pin the lag/rolling
+    # set to the model's trained one (no frame-dependent auto-drop); also
+    # skips the feature build entirely when there's no model to serve.
     storage = ClientStorage(client_id)
     if not storage.model_exists():
         logger.info(
@@ -566,6 +567,12 @@ def _generate_and_store_forecasts(
         )
         return
     model = storage.load_model()
+    from src.pipeline.inference_utils import serve_feature_set
+    _lags, _rw = serve_feature_set(model)
+    df = build_features(
+        df, config, pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
+    )
+    feature_cols = get_feature_columns(df, config)
     forecasts = forecast_all_skus(
         model, df, feature_cols, config,
         horizon=horizon,
