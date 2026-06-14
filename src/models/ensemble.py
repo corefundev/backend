@@ -238,6 +238,31 @@ class EnsembleForecaster:
         """Delegated to the primary child (single set of quantile models)."""
         return self.models_[self.primary_objective].predict_quantiles(X)
 
+    def feature_importance(self) -> pd.DataFrame:
+        """Per-child MIMO importances blended by the DEFAULT (global) weights.
+
+        Per-SKU blend weights vary, so the global default blend is the
+        single honest aggregate for "which features drive this ensemble".
+        Returns [feature, importance] sorted desc; empty if unfit.
+        """
+        if not self.models_:
+            return pd.DataFrame(columns=["feature", "importance"])
+        total: pd.Series | None = None
+        for obj, child in self.models_.items():
+            ci = child.feature_importance()
+            if ci.empty:
+                continue
+            w = self.default_weights.get(obj, 1.0 / len(self.models_))
+            s = ci.set_index("feature")["importance"].astype(float) * w
+            total = s if total is None else total.add(s, fill_value=0.0)
+        if total is None:
+            return pd.DataFrame(columns=["feature", "importance"])
+        return (
+            pd.DataFrame({"feature": total.index, "importance": total.to_numpy()})
+            .sort_values("importance", ascending=False)
+            .reset_index(drop=True)
+        )
+
     # ── Serialisation ─────────────────────────────────────────
     # ClientStorage.save_pickle handles the whole object tree.
 
