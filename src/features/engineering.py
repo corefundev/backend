@@ -237,4 +237,19 @@ def get_feature_columns(df: pd.DataFrame, config: dict) -> list[str]:
     # full, identically-ordered SKU set — i.e. never for /predict).
     if not config.get("features", {}).get("sku_encoded_enabled", False):
         exclude.add("sku_encoded")
+    # Quality-#98 evidence-based prune (feature_importance dump, Free model
+    # on sample_free 2026-06-14):
+    #   • `year`    — 0.00 gain importance AND structurally non-generalizing:
+    #     the absolute year of a future forecast date is unseen at train
+    #     time (train through 2024 → serve 2025 → arbitrary out-of-range
+    #     split), the same train/serve-transfer flaw as sku_encoded. The
+    #     seasonal signal lives in dayofyear (TOP importance) + month_sin/cos.
+    #   • `quarter` — 0.00 importance and fully redundant with month +
+    #     dayofyear.
+    # Still EMITTED by _build_calendar_features (pre-prune models carry them
+    # in feature_cols), just dropped from NEW models' feature set. NOT
+    # pruned: holidays/promo (low here only because sample_free is synthetic
+    # — they matter on real retail data; pruning them would be a false
+    # synthetic-signal mistake).
+    exclude.update({"year", "quarter"})
     return [c for c in df.columns if c not in exclude]
