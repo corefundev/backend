@@ -59,6 +59,7 @@ from src.auth.signup_rate_limit import RateLimited, check_predict_attempt
 from src.clients.registry import get_registry
 from src.features.engineering import build_features, get_feature_columns
 from src.pipeline.inference_utils import get_config as _get_cfg
+from src.pipeline.inference_utils import serve_feature_set
 from src.plans.enforcement import clip_horizon_to_plan, model_display_name
 from src.plans.plans import get_plan_spec
 
@@ -408,7 +409,14 @@ async def predict(
             if col not in df.columns:
                 df[col] = default
 
-        df_feat      = build_features(df, config)
+        # R12-#100 — pin the lag/rolling set to what the loaded model was
+        # trained with. /predict is single-SKU: a short-history SKU would
+        # otherwise auto-drop the long lags the model expects → KeyError.
+        _pin_lags, _pin_rw = serve_feature_set(service.primary)
+        df_feat      = build_features(
+            df, config,
+            pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
+        )
         feature_cols = get_feature_columns(df_feat, config)
 
         # Shared serve dispatcher (R11-#59 / H2): for MIMO/Ensemble it reads

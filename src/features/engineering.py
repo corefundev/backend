@@ -15,7 +15,32 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def build_features(
+    df: pd.DataFrame,
+    config: dict,
+    pin_lags:    list[int] | None = None,
+    pin_rolling: list[int] | None = None,
+    drop_warmup: bool = True,
+) -> pd.DataFrame:
+    """
+    Build the model feature frame.
+
+    R12-#100 — train/serve feature-set consistency. At TRAIN time the lag/
+    rolling set is auto-dropped to what the frame's shortest SKU can
+    support (so the warm-up dropna doesn't wipe short SKUs). That decision
+    is FRAME-DEPENDENT, so a serve frame with a different SKU mix (e.g. a
+    short new SKU the training filter removed) would drop different lags →
+    the model's feature_cols and the served columns disagree → KeyError /
+    silent all-zero long-lags. SERVE must therefore reuse the model's
+    TRAINED set, not re-derive it:
+      • pin_lags / pin_rolling — use EXACTLY these (recovered from the
+        model's feature_cols by the serve caller); skip the frame-min
+        auto-drop. Each SKU then computes its real long-lag value where
+        its own history allows (NaN elsewhere → filled downstream).
+      • drop_warmup=False — keep every row (serve has no target to protect
+        from NaN; forecasting uses the last, most-complete row).
+    Train passes neither (default auto-drop + warm-up trim, unchanged).
+    """
     cfg_f      = config["features"]
     date_col   = config["data"]["date_col"]
     sku_col    = config["data"]["sku_col"]
@@ -24,31 +49,37 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     df = df.copy()
     df = df.sort_values([sku_col, date_col]).reset_index(drop=True)
 
-    # Auto-drop lags / rolling windows that exceed available history.
-    # Each SKU needs the lag's worth of past rows or the lag column is
-    # all-NaN for that SKU and the dropna() at the end wipes the SKU out.
-    # The shortest-history SKU is the binding constraint. Keep a 30-day
-    # safety margin so the model still has SOMETHING to fit on after
-    # warm-up rows are removed.
-    min_history = int(df.groupby(sku_col).size().min())
-    safety = 30
-    raw_lags = list(cfg_f["lags"])
-    eff_lags = [l for l in raw_lags if l < min_history - safety]
-    skipped_lags = sorted(set(raw_lags) - set(eff_lags))
-    if skipped_lags:
-        logger.info(
-            f"Skipping lags {skipped_lags} — shortest-SKU history {min_history}d "
-            f"can't support them safely"
-        )
-    raw_rw = list(cfg_f["rolling_windows"])
-    eff_rw = [w for w in raw_rw if w < min_history - safety]
-    skipped_rw = sorted(set(raw_rw) - set(eff_rw))
-    if skipped_rw:
-        logger.info(f"Skipping rolling windows {skipped_rw} — history too short")
-    if not eff_lags:
-        # Floor to lag_1 so the model still has *some* recency signal.
-        eff_lags = [1]
-        logger.warning("All configured lags exceed history; falling back to [1]")
+    if pin_lags is not None:
+        # Serve: pin to the model's trained lag/rolling set — never
+        # re-derive from this frame's history (R12-#100).
+        eff_lags = sorted(set(pin_lags)) or [1]
+        eff_rw   = sorted(set(pin_rolling or []))
+    else:
+        # Train: auto-drop lags / rolling windows that exceed available
+        # history. Each SKU needs the lag's worth of past rows or the lag
+        # column is all-NaN for that SKU and the dropna() at the end wipes
+        # the SKU out. The shortest-history SKU is the binding constraint.
+        # Keep a 30-day safety margin so the model still has SOMETHING to
+        # fit on after warm-up rows are removed.
+        min_history = int(df.groupby(sku_col).size().min())
+        safety = 30
+        raw_lags = list(cfg_f["lags"])
+        eff_lags = [l for l in raw_lags if l < min_history - safety]
+        skipped_lags = sorted(set(raw_lags) - set(eff_lags))
+        if skipped_lags:
+            logger.info(
+                f"Skipping lags {skipped_lags} — shortest-SKU history {min_history}d "
+                f"can't support them safely"
+            )
+        raw_rw = list(cfg_f["rolling_windows"])
+        eff_rw = [w for w in raw_rw if w < min_history - safety]
+        skipped_rw = sorted(set(raw_rw) - set(eff_rw))
+        if skipped_rw:
+            logger.info(f"Skipping rolling windows {skipped_rw} — history too short")
+        if not eff_lags:
+            # Floor to lag_1 so the model still has *some* recency signal.
+            eff_lags = [1]
+            logger.warning("All configured lags exceed history; falling back to [1]")
 
     # ── Per-SKU time-series features ─────────────────────────
     parts = []
@@ -108,9 +139,14 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     # have been retrained, this emit can be deleted (tracked follow-up).
     df["sku_encoded"] = pd.factorize(df[sku_col])[0]
 
-    # ── Drop warm-up rows ─────────────────────────────────────
-    max_lag = max(eff_lags)
-    df = df.dropna(subset=[f"lag_{max_lag}"]).reset_index(drop=True)
+    # ── Drop warm-up rows (TRAIN only) ────────────────────────
+    # The dropna trims rows whose max-lag is still NaN — correct at train
+    # (NaN target features would poison the fit) but WRONG at serve, where
+    # there's no target and dropping a short SKU's rows would leave it with
+    # nothing to forecast from. R12-#100: serve passes drop_warmup=False.
+    if drop_warmup:
+        max_lag = max(eff_lags)
+        df = df.dropna(subset=[f"lag_{max_lag}"]).reset_index(drop=True)
 
     logger.info(f"Features built: {df.shape[1]} columns, {len(df)} rows")
     return df

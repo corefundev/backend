@@ -17,6 +17,7 @@ from src.pipeline.inference_utils import (
     get_config,
     load_model_any_format,
     forecast_all_skus,
+    serve_feature_set,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,14 @@ def run_batch_inference(
 
     df           = load_data(data_path, config)
     df           = validate_data(df, config)
-    df           = build_features(df, config)
-    feature_cols = get_feature_columns(df, config)
-
+    # R12-#100 — load the model first so build_features can pin the lag/
+    # rolling set to what it was trained with (no frame-dependent drop).
     model  = load_model_any_format(model_path, config)
+    _lags, _rw = serve_feature_set(model)
+    df           = build_features(
+        df, config, pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
+    )
+    feature_cols = get_feature_columns(df, config)
     result = forecast_all_skus(model, df, feature_cols, config)
 
     if output_path:

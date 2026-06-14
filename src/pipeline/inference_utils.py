@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import re
 from functools import lru_cache
 from typing import Optional
 
@@ -18,6 +19,25 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_LAG_RE = re.compile(r"^lag_(\d+)$")
+_ROLLING_RE = re.compile(r"^rolling_(?:mean|std|max|min)_(\d+)$")
+
+
+def serve_feature_set(model) -> tuple[list[int], list[int]]:
+    """Recover the (lags, rolling_windows) the model was TRAINED with, by
+    parsing its persisted feature_cols.
+
+    R12-#100 — serve must build EXACTLY the model's trained lag/rolling set,
+    never re-derive it from the serve frame (whose SKU mix can differ from
+    training and would auto-drop different long lags → feature mismatch).
+    Returns ([], []) for a model without feature_cols (caller then falls
+    back to the frame-derived default, i.e. legacy behaviour).
+    """
+    cols = list(getattr(model, "feature_cols", None) or [])
+    lags = sorted({int(m.group(1)) for c in cols if (m := _LAG_RE.match(c))})
+    windows = sorted({int(m.group(1)) for c in cols if (m := _ROLLING_RE.match(c))})
+    return lags, windows
 
 
 # ── Config caching (fixes per-request load_config call in API) ──
