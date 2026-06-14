@@ -84,7 +84,9 @@ def test_log_feature_importance_writes_artifact_and_param(monkeypatch):
     m.models_ = [_StubHead([9, 1])]
     fc._log_feature_importance(m, "client-x")
 
-    assert any(p.endswith("_feature_importance.csv") for p in calls["artifacts"])
+    import os
+    assert any(os.path.basename(p) == "feature_importance.csv"
+               for p in calls["artifacts"]), calls["artifacts"]
     assert "top_features" in calls["params"]
     assert "a" in calls["params"]["top_features"]   # JSON list of names
 

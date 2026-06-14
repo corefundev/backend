@@ -193,16 +193,13 @@ def _log_feature_importance(model: object, client_id: str) -> None:
         import json
         import os
         import tempfile
-        fd, path = tempfile.mkstemp(suffix="_feature_importance.csv")
-        os.close(fd)
-        try:
+        # Write to a temp DIR with a FIXED filename so the MLflow artifact
+        # is a clean `feature_importance.csv` (mkstemp would prefix it with
+        # a random tmp name). The dir is removed on context exit.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "feature_importance.csv")
             fi.to_csv(path, index=False)
             mlflow.log_artifact(path)
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
         top = fi.head(15)["feature"].tolist()
         mlflow.log_param("top_features", json.dumps(top)[:480])
     except Exception as e:    # noqa: BLE001 — logging is best-effort
