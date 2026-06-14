@@ -64,6 +64,21 @@ Order fixed by expected impact; each measured via same-model A/B before/after:
 Exit: measured WMAPE/MASE improvement vs the #76 baselines
 (Free 0.453/2.93, Business 0.340/1.249) on the wired backtest.
 
+**ENABLER (#99) — real-data offline eval.** The sample_* datasets are
+SYNTHETIC and cannot validate VALUE features (holidays/promo/price/weather/
+FX/year-as-trend) — synthetic data has no real holiday/promo demand
+correlation, so their importance reads ~0 falsely. Decisions split:
+- *Structural/transfer* (sku_encoded skew, year non-generalizing) — decidable
+  on synthetic; true on any data.
+- *Value/signal* (does a feature predict) — NOT trustable on synthetic;
+  needs real data.
+Added 2026-06-14: 1C "Predict Future Sales" (real RU retail, license risk
+accepted by user). `scripts/eval/adapt_1c.py` → date/sku/sales/price (346
+SKUs, real RU New-Year spikes). EVAL ONLY, data uncommitted. This gates the
+held `fix/quality-prune-year-quarter` branch and the holidays/promo/weather/
+FX feature decisions — measure on real signal, not synthetic. Done #98 gives
+the importance tool; #99 gives the real data to point it at.
+
 ## Phase 3.5 — Product / UX + config-system improvements
 
 Added 2026-06-14 after the client-config review. These are NOT forecast-math
