@@ -28,7 +28,7 @@ import src.validation.backtest_runner as runner  # noqa: E402
 def test_serve_fn_returns_only_point_forecast_columns(monkeypatch):
     cfg = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}}
     monkeypatch.setattr(runner, "load_config", lambda *a, **k: cfg)
-    monkeypatch.setattr(runner, "build_features", lambda df, c: df)
+    monkeypatch.setattr(runner, "build_features", lambda df, c, **k: df)
     monkeypatch.setattr(runner, "get_feature_columns", lambda df, c: ["f1"])
 
     captured = {}
