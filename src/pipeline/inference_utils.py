@@ -92,6 +92,7 @@ def recursive_forecast(
     date_col:      str = "date",
     target_col:    str = "sales",
     predict_fn=None,
+    config:        dict | None = None,
 ) -> list[dict]:
     """
     Recursive multi-step forecast for a single SKU.
@@ -145,6 +146,35 @@ def recursive_forecast(
         for n in [_safe_int_at(c, 2)] if n is not None
     })
 
+    # R12-#91 — holiday features are deterministic functions of the
+    # forecast DATE (known for the future, just like calendar features),
+    # so they must be RECOMPUTED per step, not carried frozen from the
+    # last history row. Pre-compute them for the whole horizon up front
+    # using the SAME function training uses (compute_holiday_features —
+    # the #58 no-skew lesson). Only recompute the holiday cols the model
+    # actually serves; if holidays are disabled at train they aren't in
+    # `h` and stay carried (no-op). Falls back to carry on any failure.
+    holiday_by_step: dict[int, dict] = {}
+    recomputed_holiday_cols: set[str] = set()
+    try:
+        from src.features.holidays_features import (
+            HOLIDAY_FEATURE_COLS, compute_holiday_features,
+        )
+        present = [c for c in HOLIDAY_FEATURE_COLS if c in h.columns]
+        hol_cfg = (config or {}).get("features", {}).get("holidays", {})
+        # Only recompute when a config is supplied (we then know the
+        # country). config=None (legacy callers/tests) keeps the old
+        # carry-forward behaviour — we don't guess the country.
+        if config is not None and present and hol_cfg.get("enabled", True):
+            fdates = [last_date + pd.Timedelta(days=s) for s in range(1, horizon + 1)]
+            hol_df = compute_holiday_features(fdates, hol_cfg.get("country", "RU"))
+            if hol_df is not None:
+                recomputed_holiday_cols = set(present)
+                for s in range(1, horizon + 1):
+                    holiday_by_step[s] = {c: hol_df.iloc[s - 1][c] for c in present}
+    except Exception as e:    # noqa: BLE001 — best-effort; carry on failure
+        logger.debug("holiday recompute unavailable (sku=%s): %s", sku, e)
+
     # Carry-forward columns that the model uses but the user can't
     # provide for future dates (price, promo, stock, weather, …) —
     # we use the last observed value as the "default future".
@@ -153,6 +183,7 @@ def recursive_forecast(
         if c not in (sku_col, date_col, target_col)
         and not c.startswith("lag_")
         and not c.startswith("rolling_")
+        and c not in recomputed_holiday_cols   # R12-#91 — recomputed, not carried
         and c not in {
             "dayofweek", "is_weekend", "weekofyear", "month", "quarter",
             "dayofmonth", "dayofyear", "year",
@@ -186,6 +217,11 @@ def recursive_forecast(
         new_row["dayofweek_cos"]  = float(np.cos(2 * np.pi * forecast_date.dayofweek / 7))
         new_row["month_sin"]      = float(np.sin(2 * np.pi * forecast_date.month / 12))
         new_row["month_cos"]      = float(np.cos(2 * np.pi * forecast_date.month / 12))
+
+        # ── Holiday features for the FORECAST date (R12-#91) ──────
+        # Recomputed (not carried) so future holidays are visible.
+        for c, v in holiday_by_step.get(step, {}).items():
+            new_row[c] = v
 
         # ── Lag features: lag_k = target value k rows back ────────
         target_series = h[target_col]
@@ -380,6 +416,7 @@ def serve_forecast(
     date_col:      str = "date",
     target_col:    str = "sales",
     predict_fn=None,
+    config:        dict | None = None,
 ) -> list[dict]:
     """
     Serve-path dispatcher (R11-#59 / H2). Use the model's DIRECT heads for
@@ -410,7 +447,8 @@ def serve_forecast(
                      "until horizon-alignment", horizon, model_h, sku)
 
     return recursive_forecast(model, history, feature_cols, horizon, sku,
-                              sku_col, date_col, target_col, predict_fn)
+                              sku_col, date_col, target_col, predict_fn,
+                              config=config)
 
 
 def forecast_all_skus(
@@ -457,6 +495,7 @@ def forecast_all_skus(
             sku_col=sku_col,
             date_col=date_col,
             target_col=target_col,
+            config=config,                   # R12-#91: recompute holidays on recursive path
         )
         all_rows.extend(rows)
         processed += 1
