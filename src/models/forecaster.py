@@ -114,10 +114,13 @@ class SKUForecaster:
 
     def feature_importance(self) -> pd.DataFrame:
         if self.model is None:
-            return pd.DataFrame()
-        return pd.DataFrame(
-            {"feature": self.feature_cols, "importance": self.model.feature_importances_}
-        ).sort_values("importance", ascending=False)
+            return pd.DataFrame(columns=["feature", "importance"])
+        return (
+            pd.DataFrame({"feature": self.feature_cols,
+                          "importance": self.model.feature_importances_})
+            .sort_values("importance", ascending=False)
+            .reset_index(drop=True)
+        )
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -164,7 +167,43 @@ def log_to_mlflow(
         mlflow.log_params({k: v for k, v in config["model"].items() if k != "name"})
         mlflow.log_metrics(metrics)
         mlflow.log_artifact(model_path)
+        _log_feature_importance(model, client_id)
         run_id = run.info.run_id
 
     logger.info(f"MLflow run logged: {run_id}")
     return run_id
+
+
+def _log_feature_importance(model: object, client_id: str) -> None:
+    """Best-effort: persist the model's feature ranking to MLflow.
+
+    A durable CSV artifact (full ranking) + the top-15 names as a param
+    so the MLflow UI shows at a glance which features drive the model —
+    the visibility that lets us prune dead features by evidence (the way
+    sku_encoded was killed in #58). NEVER raises: a logging hiccup must
+    not fail an otherwise-good training run.
+    """
+    fi_fn = getattr(model, "feature_importance", None)
+    if not callable(fi_fn):
+        return
+    try:
+        fi = fi_fn()
+        if fi is None or fi.empty:
+            return
+        import json
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix="_feature_importance.csv")
+        os.close(fd)
+        try:
+            fi.to_csv(path, index=False)
+            mlflow.log_artifact(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        top = fi.head(15)["feature"].tolist()
+        mlflow.log_param("top_features", json.dumps(top)[:480])
+    except Exception as e:    # noqa: BLE001 — logging is best-effort
+        logger.warning("feature-importance logging failed (client=%s): %s", client_id, e)

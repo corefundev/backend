@@ -182,6 +182,22 @@ class MIMOForecaster:
             for key, models in self.q_models_.items()
         }
 
+    def feature_importance(self) -> pd.DataFrame:
+        """Mean LightGBM gain importance across the H direct heads.
+
+        A feature that matters for some horizons but not others still
+        surfaces (averaged), which is the honest view for a multi-step
+        model. Returns [feature, importance] sorted desc; empty if unfit.
+        """
+        if not self.models_:
+            return pd.DataFrame(columns=["feature", "importance"])
+        imp = np.mean([m.feature_importances_ for m in self.models_], axis=0)
+        return (
+            pd.DataFrame({"feature": self.feature_cols, "importance": imp})
+            .sort_values("importance", ascending=False)
+            .reset_index(drop=True)
+        )
+
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
