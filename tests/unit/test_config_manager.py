@@ -175,6 +175,26 @@ class TestValidation:
     def test_valid_quantiles(self):
         assert validate_client_config({"model": {"quantiles": [0.1, 0.5, 0.9]}}) == []
 
+    def test_valid_ru_currencies(self):
+        cfg = {"features": {"external_regressors_ru": {"currencies": ["CNY", "USD"]}}}
+        assert validate_client_config(cfg) == []
+
+    def test_unsupported_ru_currency_rejected(self):
+        cfg = {"features": {"external_regressors_ru": {"currencies": ["CNY", "JPY"]}}}
+        errors = validate_client_config(cfg)
+        assert any("currencies" in e and "JPY" in e for e in errors)
+
+    def test_empty_ru_currencies_rejected(self):
+        # empty list is a footgun (disable via .enabled instead); reject it
+        cfg = {"features": {"external_regressors_ru": {"currencies": []}}}
+        errors = validate_client_config(cfg)
+        assert any("currencies" in e for e in errors)
+
+    def test_ru_currencies_must_be_list_of_str(self):
+        cfg = {"features": {"external_regressors_ru": {"currencies": "CNY"}}}
+        errors = validate_client_config(cfg)
+        assert any("currencies" in e for e in errors)
+
     def test_learning_rate_out_of_range(self):
         errors = validate_client_config({"model": {"learning_rate": 0.99}})
         assert any("learning_rate" in e for e in errors)
