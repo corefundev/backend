@@ -97,6 +97,31 @@ def test_run_baseline_forces_local_storage(monkeypatch, tmp_path):
     assert os.environ.get("DATABASE_URL") is None         # forced off the prod DB
 
 
+def test_run_baseline_propagates_extra_config_feature_flags_to_serve(monkeypatch, tmp_path):
+    # extra_config feature flags (e.g. features.external_regressors_ru) must reach
+    # the SERVE config, not just the train client registry. If they diverge, a
+    # config-gated feature is trained-in yet never built at serve, and the model
+    # errors selecting the missing columns (train/serve skew — caught on the 1C
+    # FX A/B). run_backtest receives the iso_config (also written to the yaml that
+    # serve_fn loads), so assert the merged flag landed there.
+    data = tmp_path / "d.csv"
+    pd.DataFrame({"sku": ["A"], "date": ["2024-01-01"], "sales": [1]}).to_csv(data, index=False)
+    monkeypatch.setattr(runner, "load_config",
+                        lambda *a, **k: {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}})
+    monkeypatch.setattr(runner, "_register_backtest_client",
+                        lambda tier, extra_config=None: None)
+    captured = {}
+    monkeypatch.setattr(runner, "run_backtest",
+                        lambda df, cfg, **k: captured.update(cfg=cfg) or "RESULT")
+
+    runner.run_baseline(
+        data_path=str(data), holdout_days=1, tier="free",
+        extra_config={"features": {"external_regressors_ru": {"enabled": True}}},
+    )
+    feats = captured["cfg"].get("features", {}).get("external_regressors_ru", {})
+    assert feats.get("enabled") is True
+
+
 def test_isolated_config_points_mlflow_at_local_file_store(tmp_path):
     base = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"},
             "mlflow": {"tracking_uri": "http://mlflow:5000", "experiment_name": "prod"}}
