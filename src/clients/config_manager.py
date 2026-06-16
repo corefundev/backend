@@ -174,6 +174,31 @@ def validate_client_config(client_override: dict) -> list[str]:
         elif qs != sorted(qs):
             errors.append("model.quantiles must be sorted ascending")
 
+    # features.external_regressors_ru.currencies — must be a non-empty subset of
+    # the CBR-supported set (source of truth: external_regressors_ru.CBR_CODES).
+    # Whitelisted as a client override for paid tiers (plans._START_CONFIG_KEYS);
+    # an unsupported code would KeyError at fetch, so reject it here.
+    ccys = _get_nested(client_override, "features.external_regressors_ru.currencies")
+    if ccys is not None:
+        from src.features.external_regressors_ru import CBR_CODES
+        supported = sorted(CBR_CODES)
+        if not isinstance(ccys, list) or not all(isinstance(c, str) for c in ccys):
+            errors.append(
+                "features.external_regressors_ru.currencies must be a list of currency codes"
+            )
+        elif not ccys:
+            errors.append(
+                "features.external_regressors_ru.currencies must not be empty — "
+                "disable the feed via features.external_regressors_ru.enabled=false instead"
+            )
+        else:
+            bad = sorted(set(ccys) - set(supported))
+            if bad:
+                errors.append(
+                    f"features.external_regressors_ru.currencies: unsupported {bad}; "
+                    f"supported {supported}"
+                )
+
     return errors
 
 
