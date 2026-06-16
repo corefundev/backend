@@ -37,21 +37,30 @@ scipy==1.13.0
 pyarrow==23.0.1           # 23.0.1: closes CVE-2026-25087; within mlflow 3.13's pyarrow<25
 
 # ── API ───────────────────────────────────────────────
-# Bumped past 0.118 because Starlette 0.40 caught CVE-2025-62727
-# (DoS via Range header merging) — 0.49.1 is the patched version,
-# and FastAPI 0.121 is the first to widen the cap to allow it.
-fastapi==0.121.0
-starlette==0.49.1          # CVE-2024-47874 + CVE-2025-62727
+# 0.135.0 drops the Starlette upper-bound cap (requires only starlette>=0.46.0),
+# letting us take Starlette 1.3.1 (the CVE-patched line). Held at 0.135 on
+# purpose: 0.136+ raises the pydantic floor to >=2.9.0, which we don't want to
+# drag in here — 0.135 keeps pydantic>=2.7.0 (our 2.7.1 stands). No direct
+# `starlette` imports in src/ — the app uses it only through FastAPI, so the
+# 0.49→1.3 major bump is transparent at the app layer.
+fastapi==0.135.0
+# starlette 1.3.1 closes 4 trivy HIGH in the ASGI core under FastAPI (2026-06-16):
+#   CVE-2026-48818 SSRF + NTLM credential theft via UNC path in StaticFiles
+#   CVE-2026-48817 arbitrary HTTP method dispatch on HTTPEndpoint
+#   CVE-2026-54282 host poisoning via unvalidated path → request.url.hostname
+#   CVE-2026-54283 request.form() size limit ignored for urlencoded → DoS
+starlette==1.3.1
 # Explicit `python-multipart` pin (2026-05-15) — fastapi's UploadFile +
 # Form handling looks for this package. Without an explicit pin, pip
 # may install the unrelated `multipart` PyPI package as a transitive,
 # which fastapi detects and refuses with a clear error.
-# Bumped 0.0.18 → 0.0.27 (2026-05-15 follow-up) — closes
-#   CVE-2026-24486: arbitrary file write via path traversal (fixed in 0.0.22)
-#   CVE-2026-42561: DoS via unbounded multipart part headers (fixed in 0.0.27)
-# Both flagged by trivy as HIGH; 0.0.27 is the lowest version that
-# clears both.
-python-multipart==0.0.27
+# 0.0.18 → 0.0.27 (2026-05-15) closed CVE-2026-24486 (path-traversal file
+# write, 0.0.22) + CVE-2026-42561 (header DoS, 0.0.27). 0.0.27 → 0.0.32
+# (2026-06-16) closes 4 more trivy HIGH:
+#   CVE-2026-53537/53538 parameter smuggling via RFC 2231 / semicolon separator
+#   CVE-2026-53539 quadratic-time querystring parse → CPU DoS (0.0.30)
+#   CVE-2026-53540 negative Content-Length buffers whole body in memory (0.0.31)
+python-multipart==0.0.32
 uvicorn[standard]==0.29.0
 pydantic==2.7.1
 # R5-M4 — central Settings class (src/settings.py) uses BaseSettings
