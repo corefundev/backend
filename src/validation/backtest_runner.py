@@ -187,6 +187,13 @@ def run_baseline(
         _register_backtest_client(tier, extra_config)
 
         iso_config = _isolated_config(base_config, workdir, tier)
+        # The serve path (build_features) reads THIS config. extra_config feature
+        # flags (e.g. features.external_regressors_ru / weather) were applied to
+        # the TRAIN client registry, but must ALSO reach serve — otherwise a
+        # config-gated feature is trained-in yet never built at serve, and the
+        # model errors selecting the missing columns (train/serve skew).
+        if extra_config:
+            iso_config = _deep_merge(iso_config, extra_config)
         iso_config_path = os.path.join(workdir, "backtest_config.yaml")
         with open(iso_config_path, "w") as f:
             yaml.safe_dump(iso_config, f)
