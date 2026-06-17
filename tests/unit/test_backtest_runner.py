@@ -167,7 +167,7 @@ def test_run_baseline_rejects_unknown_tier(tmp_path):
 
 
 def test_register_backtest_client_deep_merges_extra_config(monkeypatch):
-    # R11-#58 A/B plumbing: extra_config deep-merges over the tier config
+    # extra_config A/B plumbing: deep-merges over the tier config
     # (override wins on leaves, sibling keys preserved, source untouched).
     captured = {}
 
@@ -177,14 +177,14 @@ def test_register_backtest_client_deep_merges_extra_config(monkeypatch):
 
     monkeypatch.setattr(runner, "get_registry", lambda: _FakeReg())
     runner._register_backtest_client(
-        "free", extra_config={"features": {"sku_encoded_enabled": True}}
+        "free", extra_config={"features": {"is_gap_day_enabled": True}}
     )
     cfg = captured["record"].config
-    assert cfg["features"]["sku_encoded_enabled"] is True          # override landed
+    assert cfg["features"]["is_gap_day_enabled"] is True           # override landed
     assert cfg["model"]["objective"] == "mse"                      # tier sibling kept
     assert cfg["features"]["external_regressors_ru"] == {"enabled": False}
     # source tier dict not mutated
-    assert "sku_encoded_enabled" not in runner._TIER_CLIENT_CONFIG["free"]["features"]
+    assert "is_gap_day_enabled" not in runner._TIER_CLIENT_CONFIG["free"]["features"]
 
 
 def test_deep_merge_is_recursive_and_pure():

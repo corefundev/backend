@@ -123,22 +123,6 @@ def build_features(
         except Exception as e:
             logger.warning(f"RU regressor features failed: {e}")
 
-    # ── SKU encoding ──────────────────────────────────────────
-    # R11-#58 — this column is EMITTED unconditionally for backward
-    # compatibility: models trained before #58 carry "sku_encoded" in
-    # their persisted feature_cols and select it at predict-time, so
-    # removing the emit would KeyError every pre-#58 model at serve.
-    # Whether NEW models USE it is governed by get_feature_columns'
-    # `features.sku_encoded_enabled` flag.
-    #
-    # ⚠ The value is NOT train/serve-stable: pd.factorize assigns codes
-    # by order-of-appearance in THIS frame, so the /predict path (one
-    # SKU → always code 0) and any reordered serve frame disagree with
-    # the training codes. That train/serve skew is exactly why #58
-    # defaults the feature OFF for new models. Once all pre-#58 models
-    # have been retrained, this emit can be deleted (tracked follow-up).
-    df["sku_encoded"] = pd.factorize(df[sku_col])[0]
-
     # ── Drop warm-up rows (TRAIN only) ────────────────────────
     # The dropna trims rows whose max-lag is still NaN — correct at train
     # (NaN target features would poison the fit) but WRONG at serve, where
@@ -264,22 +248,13 @@ def get_feature_columns(df: pd.DataFrame, config: dict) -> list[str]:
     # train a new model that uses it.
     if not config.get("features", {}).get("is_gap_day_enabled", False):
         exclude.add("is_gap_day")
-    # R11-#58 — sku_encoded is an arbitrary factorize-order integer that
-    # does NOT survive the train→serve trip (the /predict single-SKU path
-    # always produces code 0, misapplying the training SKU-0 effect to
-    # every served SKU). Default OFF: new models train without it and are
-    # served honestly. Flip `features.sku_encoded_enabled: true` to keep
-    # the legacy behaviour (only sound when the serve frame carries the
-    # full, identically-ordered SKU set — i.e. never for /predict).
-    if not config.get("features", {}).get("sku_encoded_enabled", False):
-        exclude.add("sku_encoded")
     # Quality-#98 evidence-based prune (feature_importance dump, Free model
     # on sample_free 2026-06-14):
     #   • `year`    — 0.00 gain importance AND structurally non-generalizing:
     #     the absolute year of a future forecast date is unseen at train
     #     time (train through 2024 → serve 2025 → arbitrary out-of-range
-    #     split), the same train/serve-transfer flaw as sku_encoded. The
-    #     seasonal signal lives in dayofyear (TOP importance) + month_sin/cos.
+    #     split) — a train/serve-transfer flaw. The seasonal signal lives in
+    #     dayofyear (TOP importance) + month_sin/cos.
     #   • `quarter` — 0.00 importance and fully redundant with month +
     #     dayofyear.
     # Still EMITTED by _build_calendar_features (pre-prune models carry them

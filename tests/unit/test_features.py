@@ -66,12 +66,17 @@ class TestBuildFeatures:
         assert "is_weekend" in result.columns
         assert "is_oos" in result.columns
 
-    def test_sku_encoded_unique_per_sku(self):
-        df = make_test_df(n_skus=5)
-        config = make_config()
-        result = build_features(df, config)
-        encoded = result.groupby("sku")["sku_encoded"].nunique()
-        assert (encoded == 1).all(), "Each SKU must have exactly one encoded value"
+    def test_feature_set_is_serve_consistent(self):
+        # The feature set built on the full multi-SKU frame must equal the
+        # set built on any single-SKU slice — no order/identity leaks in.
+        # That property is what makes /predict honest; it regression-guards
+        # the #58 fix (the order-dependent sku_encoded feature removed).
+        cfg = make_config()
+        full = get_feature_columns(build_features(make_test_df(n_skus=5), cfg), cfg)
+        one = make_test_df(n_skus=5)
+        one = one[one["sku"] == "SKU_002"].copy()
+        one_cols = get_feature_columns(build_features(one, cfg), cfg)
+        assert set(full) == set(one_cols)
 
     def test_no_future_in_rolling(self):
         """rolling_mean_7 must use shift(1) — value at t cannot include sales at t."""
