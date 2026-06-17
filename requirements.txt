@@ -19,7 +19,12 @@ lightgbm==4.6.0            # CVE-2024-43598 (RCE) fixed in 4.6
 #  tests/; a ~100MB native wheel pulled into every image for nothing.)
 pandas==2.2.2
 numpy==1.26.4
-scikit-learn==1.4.2
+scikit-learn==1.5.2        # R12-#85: CVE-2024-5206 (TfidfVectorizer label leak,
+# unused here) fixed in 1.5.0; pinned 1.5.2 (latest 1.5.x patch). Only first-party
+# uses are StandardScaler (cold_start.py) + IsolationForest (anomaly_detection.py),
+# both fit-on-the-fly (no persisted estimators crossing the version boundary).
+# Resolver-safe: evidently 0.5.0 caps scikit-learn>=1.0.1 (no upper), shap 0.49.1
+# unbounded at runtime; 1.5.2 needs scipy>=1.6.0 — does NOT push the scipy<2 wedge.
 # scipy: NOT a first-party import (grep src/ = 0). Pinned as a RESOLVER
 # CONSTRAINT — the scipy<2 wedge keeps evidently 0.5.0 + sklearn/shap
 # resolvable (R6-1, deferred by user 2026-05-18; re-trigger only on
