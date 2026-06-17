@@ -32,6 +32,46 @@ from src.plans.enforcement import PlanDenied, assert_config_keys_allowed
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["config"])
 
+
+def _audit_config_change(
+    *,
+    subtype:   str,
+    client_id: str,
+    record,
+    auth:      AuthContext,
+    http_req:  Request,
+    before:    dict,
+    after:     dict,
+    extra:     dict | None = None,
+) -> None:
+    """Record a config mutation (PUT/PATCH) to the audit log (#95).
+
+    Uses EVT_PLAN_CHANGE (the existing taxonomy for config/plan-relevant
+    mutations, shared with reset + plans.py). `before`/`after` carry the
+    override deltas so the trail shows exactly what changed. record_event
+    never raises on its own; the wrapper mirrors the DELETE handler's
+    defensive catch so an audit hiccup can never fail the user's request.
+    """
+    metadata = {
+        "actor_role": ",".join(auth.roles or []),
+        "before": before,
+        "after": after,
+    }
+    if extra:
+        metadata.update(extra)
+    try:
+        record_event(
+            event_type=EVT_PLAN_CHANGE, event_subtype=subtype,
+            client_id=client_id,
+            actor_email=(record.email_canonical or record.email) if record else None,
+            ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+            target_type="client_config", target_id=client_id,
+            metadata=metadata,
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("%s audit event failed: %s", subtype, e)
+
+
 # Mirror main.py's CONFIG_PATH — the config manager is keyed on this.
 # Reading the env-var directly here keeps the router file independent
 # of main.py module state. CONFIG_PATH hasn't been migrated to
@@ -93,6 +133,7 @@ async def get_client_config(
 async def set_client_config(
     client_id: str,
     req: ClientConfigRequest,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -113,6 +154,9 @@ async def set_client_config(
     except PlanDenied as e:
         raise HTTPException(status_code=403, detail=str(e))
 
+    # Capture the pre-image for the audit trail before we overwrite it.
+    before = mgr.get_override(client_id, registry)
+
     try:
         effective = mgr.set(client_id, req.config, registry)
     except ConfigValidationError as e:
@@ -120,6 +164,18 @@ async def set_client_config(
 
     # Invalidate model cache so next predict uses new config
     invalidate_service_cache(client_id)
+
+    # Audit the applied change (#95). Config edits are billing- and
+    # output-relevant mutations and must leave a trail, same as DELETE.
+    # Ordering differs from DELETE on purpose: reset() has no after-image
+    # so it audits before mutating, whereas a SET is only an auditable
+    # *change* once it validates and applies — so we record after success
+    # with before/after deltas. record_event never raises; the try/except
+    # mirrors the DELETE handler's belt-and-braces.
+    _audit_config_change(
+        subtype="config_set", client_id=client_id, record=record,
+        auth=auth, http_req=http_req, before=before, after=req.config,
+    )
 
     return ClientConfigResponse(
         client_id=client_id,
@@ -133,6 +189,7 @@ async def set_client_config(
 async def patch_client_config(
     client_id: str,
     req: ClientConfigPatchRequest,
+    http_req: Request,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -159,6 +216,10 @@ async def patch_client_config(
     except PlanDenied as e:
         raise HTTPException(status_code=403, detail=str(e))
 
+    # Pre-image for the audit trail (see set_client_config for the
+    # after-success ordering rationale).
+    before = mgr.get_override(client_id, registry)
+
     try:
         effective = mgr.patch(client_id, req.key, req.value, registry)
     except ConfigValidationError as e:
@@ -166,9 +227,18 @@ async def patch_client_config(
 
     invalidate_service_cache(client_id)
 
+    after = mgr.get_override(client_id, registry)
+
+    # Audit the applied single-key change (#95).
+    _audit_config_change(
+        subtype="config_patch", client_id=client_id, record=record,
+        auth=auth, http_req=http_req, before=before, after=after,
+        extra={"key": req.key},
+    )
+
     return ClientConfigResponse(
         client_id=client_id,
-        override=mgr.get_override(client_id, registry),
+        override=after,
         effective=effective,
         diff=mgr.diff(client_id, registry),
     )
@@ -185,9 +255,9 @@ async def reset_client_config(
     registry = get_registry()
     mgr      = get_config_manager(CONFIG_PATH)
 
-    # Audit R3-25 — log the reset BEFORE mutating so the audit-log
-    # row exists even if reset() raises. The PUT/PATCH config routes
-    # already audit; DELETE was the gap that closed here.
+    # Audit R3-25 — log the reset BEFORE mutating so the audit-log row
+    # exists even if reset() raises. (PUT/PATCH now audit too, via
+    # _audit_config_change after a successful apply — #95.)
     record = registry.get(client_id)
     try:
         record_event(
