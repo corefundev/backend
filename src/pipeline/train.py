@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from src.data.loader import load_config, load_data, validate_data
 from src.data.ge_validator import validate_with_great_expectations
-from src.clients.config_manager import get_config_manager
+from src.clients.config_manager import _has_nested, _set_nested, get_config_manager
 from src.data.anomaly_detection import SalesAnomalyDetector
 from src.features.engineering import build_features, get_feature_columns
 from src.models.forecaster import SKUForecaster, log_to_mlflow
@@ -113,56 +113,53 @@ def run_training_pipeline(
     # ── Apply per-client config overrides ────────────────────
     # Client config is merged ON TOP of system config.
     # System config.yaml is never modified.
-    user_set_hpo = False
-    user_set_objective = False
-    user_set_regressors_ru = False
+    record = None
+    client_cfg: dict = {}    # explicit client deltas; gates plan defaults below
     try:
         from src.clients.registry import get_registry
         registry = get_registry()
         mgr      = get_config_manager(config_path)
         record   = registry.get(client_id)
-        # Track explicit user choices so plan-tier defaults below
-        # don't overwrite them.
         client_cfg = (record.config if record else None) or {}
-        user_set_hpo = "hpo" in client_cfg
-        user_set_objective = "objective" in (client_cfg.get("model") or {})
-        user_set_regressors_ru = (
-            "external_regressors_ru" in (client_cfg.get("features") or {})
-        )
         config   = mgr.get_effective(client_id, registry)
         logger.info(f"Config for client={client_id}: applied per-client overrides")
     except Exception as e:
         logger.warning(f"Could not load per-client config overrides: {e}. Using system defaults.")
         record = None
 
-    # ── Plan-tier defaults: HPO + objective ──────────────────
-    # Each plan has its own HPO budget (Free 0 / Start 15 / Business 30)
-    # and its own default loss objective (Free→mse / Start, Business→
-    # tweedie). Applied only when the user hasn't explicitly set the
-    # corresponding override — explicit user choice always wins.
+    # ── Plan-tier defaults ────────────────────────────────────
+    # Each plan has its own HPO budget (Free 0 / Start 15 / Business 30),
+    # default loss objective (Free→mse / Start, Business→ensemble), and RU
+    # external-regressor default (auto-on for paid tiers; Free off to keep
+    # free trainings fast and avoid ЦБ РФ load). A default is applied ONLY
+    # when the client hasn't set the gating key — explicit user choice wins.
+    #
+    # #96: driven declaratively off the actual client override instead of
+    # hand-listed per-key tracking booleans. Each row co-locates the GATE key (its
+    # presence in client_cfg suppresses the default) with the TARGET it
+    # writes, so a new plan default can't silently clobber a user's explicit
+    # value by forgetting to add a matching flag (the trap backtest_runner
+    # warns about).
     try:
         from src.plans.plans import get_plan_spec
         spec = get_plan_spec(record.plan if record else None)
-        if not user_set_hpo:
-            config.setdefault("hpo", {})
-            config["hpo"]["enabled"]  = spec.hpo_n_trials > 0
-            config["hpo"]["n_trials"] = spec.hpo_n_trials
-        if not user_set_objective:
-            config.setdefault("model", {})
-            config["model"]["objective"] = spec.default_objective
-        # Plan-tier default: RU external regressors auto-on for Start +
-        # Business (FE will surface a per-currency selector). Free stays
-        # off — keeps free-tier trainings fast and avoids ЦБ РФ load
-        # from low-value runs. Explicit client-config wins.
-        if not user_set_regressors_ru:
-            tier_enables_regressors = (record.plan if record else "free") in {"start", "business"}
-            config.setdefault("features", {}).setdefault("external_regressors_ru", {})
-            config["features"]["external_regressors_ru"]["enabled"] = tier_enables_regressors
+        plan = record.plan if record else "free"
+        # (gate dotted-key in client override, target dotted-key in config, value)
+        plan_defaults = [
+            ("hpo",                             "hpo.enabled",     spec.hpo_n_trials > 0),
+            ("hpo",                             "hpo.n_trials",    spec.hpo_n_trials),
+            ("model.objective",                 "model.objective", spec.default_objective),
+            ("features.external_regressors_ru", "features.external_regressors_ru.enabled",
+                                                plan in {"start", "business"}),
+        ]
+        for gate, target, value in plan_defaults:
+            if not _has_nested(client_cfg, gate):
+                _set_nested(config, target, value)
         logger.info(
-            f"Plan-tier defaults: plan={record.plan if record else 'free'} "
-            f"hpo_n_trials={config['hpo'].get('n_trials', 0)} "
-            f"objective={config['model'].get('objective', 'mse')} "
-            f"regressors_ru={config.get('features',{}).get('external_regressors_ru',{}).get('enabled', False)}"
+            f"Plan-tier defaults: plan={plan} "
+            f"hpo_n_trials={config.get('hpo', {}).get('n_trials', 0)} "
+            f"objective={config.get('model', {}).get('objective', 'mse')} "
+            f"regressors_ru={config.get('features', {}).get('external_regressors_ru', {}).get('enabled', False)}"
         )
     except Exception as e:    # noqa: BLE001
         logger.warning(f"Could not apply plan defaults: {e}")

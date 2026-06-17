@@ -118,6 +118,35 @@ def _get_nested(d: dict, dotted_key: str) -> Any:
     return cur
 
 
+def _has_nested(d: dict, dotted_key: str) -> bool:
+    """True if the full dotted path is present in nested dict `d`.
+
+    Distinct from `_get_nested(...) is not None`: this returns True even
+    when the leaf value is None/0/False/"". That precision matters when the
+    presence of a key (not its value) is the signal — e.g. plan-tier defaults
+    that must NOT clobber a key the client set explicitly (#96).
+    """
+    cur = d
+    for k in dotted_key.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return False
+        cur = cur[k]
+    return True
+
+
+def _set_nested(d: dict, dotted_key: str, value: Any) -> None:
+    """Set `value` at the dotted path in `d`, creating intermediate dicts."""
+    parts = dotted_key.split(".")
+    cur = d
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
 # ── Validation ────────────────────────────────────────────────
 
 class ConfigValidationError(ValueError):
@@ -309,13 +338,8 @@ class ClientConfigManager:
         Returns new effective config.
         """
         # Build nested dict from dotted key
-        parts = dotted_key.split(".")
         patch_dict: dict = {}
-        cur = patch_dict
-        for part in parts[:-1]:
-            cur[part] = {}
-            cur = cur[part]
-        cur[parts[-1]] = value
+        _set_nested(patch_dict, dotted_key, value)
 
         # Get current override and merge patch into it
         if registry is not None:

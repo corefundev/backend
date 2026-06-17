@@ -31,8 +31,8 @@ src/pipeline/task_queue.py:805  R9-T4-001 — training fallback registry; closes
 # branch as deliberate (and then move out of "broad except" to a typed one).
 src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
 src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
-src/pipeline/train.py:134  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (+45 lines after R11 _save_and_log_to_mlflow helper insertion, 2026-06-01)
-src/pipeline/train.py:167  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (+45 lines, R11)
+src/pipeline/train.py:126  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :134, -8 lines after #96 dropped user_set_* booleans, 2026-06-17)
+src/pipeline/train.py:164  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :167, -3 lines after #96, 2026-06-17)
 src/pipeline/inference_utils.py:195  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected)
 src/pipeline/inference_utils.py:333  pre-R9 baseline (was :277, +R12-#91 shift); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback

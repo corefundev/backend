@@ -19,6 +19,8 @@ from src.clients.config_manager import (
     deep_merge,
     validate_client_config,
     _compute_diff,
+    _has_nested,
+    _set_nested,
 )
 from src.clients.registry import ClientRecord, LocalFileRegistry
 
@@ -384,3 +386,79 @@ class TestMultiClientIsolation:
 
         assert eff_a["model"]["horizon"] == 14  # reset to system
         assert eff_b["model"]["horizon"] == 7   # still overridden
+
+
+# ── #96: dotted-path helpers + plan-default gating semantics ──────────────
+
+class TestDottedHelpers:
+    """_has_nested / _set_nested back the generalized plan-default gating
+    in train.py (#96), replacing the hand-listed user_set_* booleans."""
+
+    def test_has_nested_present_and_absent(self):
+        d = {"model": {"objective": "tweedie"}, "hpo": {"n_trials": 20}}
+        assert _has_nested(d, "model.objective") is True
+        assert _has_nested(d, "hpo") is True
+        assert _has_nested(d, "hpo.n_trials") is True
+        assert _has_nested(d, "features.external_regressors_ru") is False
+        assert _has_nested(d, "model.horizon") is False
+
+    def test_has_nested_true_for_falsy_leaf(self):
+        # The whole point of #96: presence of the KEY suppresses the plan
+        # default, even when the client set it to a falsy value (0/False/None).
+        d = {"hpo": {"enabled": False, "n_trials": 0}, "model": {"objective": None}}
+        assert _has_nested(d, "hpo.enabled") is True
+        assert _has_nested(d, "hpo.n_trials") is True
+        assert _has_nested(d, "model.objective") is True
+
+    def test_has_nested_non_dict_midpath(self):
+        d = {"model": "not-a-dict"}
+        assert _has_nested(d, "model.objective") is False
+
+    def test_set_nested_creates_intermediate(self):
+        d: dict = {}
+        _set_nested(d, "features.external_regressors_ru.enabled", True)
+        assert d == {"features": {"external_regressors_ru": {"enabled": True}}}
+
+    def test_set_nested_preserves_siblings(self):
+        d = {"model": {"horizon": 14}}
+        _set_nested(d, "model.objective", "ensemble")
+        assert d == {"model": {"horizon": 14, "objective": "ensemble"}}
+
+    def test_set_nested_overwrites_non_dict_midpath(self):
+        d = {"hpo": 5}                       # leaf where we need to descend
+        _set_nested(d, "hpo.n_trials", 30)
+        assert d == {"hpo": {"n_trials": 30}}
+
+    def test_gating_loop_does_not_clobber_explicit_choice(self):
+        """End-to-end of the #96 invariant: a default is applied only when
+        the gate key is ABSENT from the client override, regardless of how
+        many defaults share a gate. Mirrors train.py's plan_defaults loop."""
+        client_cfg = {"model": {"objective": "tweedie"}}   # user set objective
+        config = {"model": {"objective": "tweedie", "horizon": 14}}
+        plan_defaults = [
+            ("hpo",             "hpo.enabled",     True),
+            ("hpo",             "hpo.n_trials",    15),
+            ("model.objective", "model.objective", "ensemble"),  # must NOT win
+        ]
+        for gate, target, value in plan_defaults:
+            if not _has_nested(client_cfg, gate):
+                _set_nested(config, target, value)
+
+        assert config["model"]["objective"] == "tweedie"   # user choice survives
+        assert config["hpo"] == {"enabled": True, "n_trials": 15}  # gate absent → defaulted
+
+
+def test_train_py_uses_declarative_plan_defaults_not_user_set_flags():
+    """#96 anti-regression: train.py must drive plan-tier defaults off the
+    actual client override (_has_nested gate) and NOT reintroduce the fragile
+    hand-listed `user_set_*` booleans that silently clobbered explicit user
+    values when a new default's flag was forgotten."""
+    train_py = (Path(__file__).resolve().parents[2]
+                / "src" / "pipeline" / "train.py").read_text()
+    assert "user_set_" not in train_py, (
+        "train.py reintroduced hand-listed user_set_* flags — use the "
+        "declarative _has_nested gate instead (#96)"
+    )
+    assert "plan_defaults" in train_py and "_has_nested(client_cfg" in train_py, (
+        "train.py must gate plan defaults via _has_nested on the client override"
+    )
