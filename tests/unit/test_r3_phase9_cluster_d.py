@@ -147,6 +147,79 @@ def test_reset_config_route_audits_event():
     )
 
 
+# ── #95: audit events on PUT/PATCH config (not just DELETE) ───────────────
+
+_CONFIG_ROUTER = _BACKEND / "src" / "api" / "routers" / "config.py"
+
+
+def _handler_block(text: str, handler: str) -> str:
+    """Slice the source of one async handler: from `async def <handler>`
+    up to the next `@router.`/`@app.` decorator (or EOF)."""
+    start = text.find(f"async def {handler}")
+    assert start >= 0, f"{handler} not found in config.py"
+    nxt = [
+        i for i in (
+            text.find("@router.", start + len(handler) + 10),
+            text.find("@app.", start + len(handler) + 10),
+        ) if i > 0
+    ]
+    end = min(nxt) if nxt else -1
+    return text[start:end] if end > 0 else text[start:]
+
+
+@pytest.mark.parametrize(
+    "handler, subtype, mutate_call",
+    [
+        ("set_client_config",   "config_set",   "mgr.set("),
+        ("patch_client_config", "config_patch", "mgr.patch("),
+    ],
+)
+def test_put_patch_config_routes_audit(handler, subtype, mutate_call):
+    """PUT and PATCH config mutations must emit an audit event (#95).
+
+    The historical gap: only DELETE (reset) audited; SET/PATCH silently
+    changed billing- and output-relevant config with no trail, while a
+    stale DELETE comment claimed they were covered. This pins that both
+    now audit, with the correct subtype, AFTER the mutation applies (a
+    config change is only auditable once it validates and lands).
+    """
+    text = _CONFIG_ROUTER.read_text()
+    block = _handler_block(text, handler)
+
+    assert "_audit_config_change(" in block, (
+        f"{handler} must record an audit event via _audit_config_change"
+    )
+    assert subtype in block, f"{handler} must tag the audit subtype '{subtype}'"
+
+    # Audit must come AFTER the mutation (opposite of DELETE's pre-mutate
+    # ordering): the event records a change that actually happened.
+    mutate_idx = block.find(mutate_call)
+    audit_idx  = block.find("_audit_config_change(")
+    assert mutate_idx > 0 and audit_idx > mutate_idx, (
+        f"{handler}: audit must follow {mutate_call}"
+    )
+
+
+def test_audit_config_change_helper_uses_plan_change_event():
+    """The shared helper must route through record_event with the
+    EVT_PLAN_CHANGE taxonomy and a client_config target — same event
+    family as reset + plans.py, so history stays queryable as one stream.
+    """
+    text = _CONFIG_ROUTER.read_text()
+    # _audit_config_change is a plain `def` (not `async def`), so locate
+    # it directly and slice to the next blank-line gap.
+    start = text.find("def _audit_config_change")
+    assert start >= 0
+    end = text.find("\n\n\n", start)
+    block = text[start:(end if end > 0 else len(text))]
+    assert "record_event(" in block
+    assert "EVT_PLAN_CHANGE" in block
+    assert 'target_type="client_config"' in block
+    assert '"before"' in block and '"after"' in block, (
+        "audit metadata must carry before/after override deltas"
+    )
+
+
 # ── R3-27: asyncpg pool close at shutdown ────────────────────────────────
 
 def test_lifespan_closes_asyncpg_pool():

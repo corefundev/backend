@@ -58,7 +58,7 @@ src/audit/log.py:446  pre-R9 baseline; triage in R10 — list_for_client read fa
 src/audit/log.py:486  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter)
 src/audit/log.py:556  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines after R10 phantom-metric Counter)
 src/api/routers/auth.py:362  pre-R9 baseline; triage in R10 — signup OAuth race retry
-src/api/routers/config.py:201  pre-R9 baseline; triage in R10 — config-reset write fallback
+src/api/routers/config.py:271  pre-R9 baseline; triage in R10 — config-reset write fallback (was :201, +70 lines after #95 added _audit_config_change helper + PUT/PATCH audit, 2026-06-17)
 src/api/routers/ops.py:145  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. +4 lines after R11-H7 added logging + JSONResponse imports (2026-06-01)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
 src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics)
