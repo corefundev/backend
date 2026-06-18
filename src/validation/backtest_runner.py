@@ -139,7 +139,7 @@ def _register_backtest_client(tier: str, extra_config: dict | None = None) -> No
     user-set and don't override. plan=<tier> for caps/display parity.
 
     `extra_config` deep-merges on top of the tier config — used to A/B a
-    single feature flag (e.g. features.sku_encoded_enabled for R11-#58)
+    single feature flag (e.g. features.external_regressors_ru.enabled)
     on the SAME data/cutoff, so the delta isolates that flag."""
     cfg = _deep_merge(_TIER_CLIENT_CONFIG[tier], extra_config or {})
     get_registry().register(ClientRecord(
@@ -215,23 +215,13 @@ def main() -> None:
     p.add_argument("--holdout-days", type=int, default=14)
     p.add_argument("--label", default="baseline")
     p.add_argument("--tier", choices=sorted(_TIER_CLIENT_CONFIG), default="free")
-    p.add_argument(
-        "--sku-encoded", choices=["on", "off"], default=None,
-        help="R11-#58 A/B: force features.sku_encoded_enabled on/off "
-             "(default: leave to config). 'on' = legacy, 'off' = #58 fix.",
-    )
     args = p.parse_args()
-
-    extra = None
-    if args.sku_encoded is not None:
-        extra = {"features": {"sku_encoded_enabled": args.sku_encoded == "on"}}
 
     res = run_baseline(
         args.data, args.config, args.holdout_days, args.label, args.tier,
-        extra_config=extra,
     )
     print(json.dumps(
-        {**res.as_dict(), "tier": args.tier, "sku_encoded": args.sku_encoded},
+        {**res.as_dict(), "tier": args.tier},
         indent=2, default=str,
     ))
 
