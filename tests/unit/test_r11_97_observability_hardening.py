@@ -88,6 +88,18 @@ def test_pushgateway_init_pre_owns_volume_so_cap_dropped_pushgateway_can_persist
     assert any(v == "pushgateway_data:/data" for v in pg_vols)
 
 
+def test_postgres_exporter_hardened_no_caps():
+    # R11-#97 — postgres-exporter already runs as USER nobody
+    # (Dockerfile.postgres-exporter) and is stateless (no data volume), so it
+    # gets cap_drop ALL + no-new-privileges with NO cap_add and needs no
+    # privilege-drop entrypoint change.
+    svc = COMPOSE["services"]["postgres-exporter"]
+    assert svc.get("cap_drop") == ["ALL"], "postgres-exporter: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (svc.get("security_opt") or [])
+    assert not svc.get("cap_add"), "postgres-exporter needs no caps back"
+    assert not svc.get("volumes"), "postgres-exporter is stateless (no volume)"
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

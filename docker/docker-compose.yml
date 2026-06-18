@@ -870,6 +870,14 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    # R11-#97: already runs as USER nobody (Dockerfile.postgres-exporter), is
+    # stateless (no data volume — just scrapes postgres over the network and
+    # serves /metrics on the unprivileged port 9187), and the lockbox bootstrap
+    # runs as nobody too. Needs zero Linux caps. (No gosu drop needed — unlike
+    # the task's original assumption, the image already drops to nobody.)
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     healthcheck:
