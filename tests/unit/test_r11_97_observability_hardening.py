@@ -100,6 +100,23 @@ def test_postgres_exporter_hardened_no_caps():
     assert not svc.get("volumes"), "postgres-exporter is stateless (no volume)"
 
 
+def test_prometheus_hardened_no_init_needed():
+    # R11-#97 — prometheus already runs as USER nobody (Dockerfile.prometheus,
+    # which also `chown -R nobody:nobody /prometheus`), so a fresh prometheus_data
+    # volume inherits nobody ownership via Docker copy-on-first-mount → no *-init
+    # container needed (unlike upstream pushgateway). Just cap_drop ALL +
+    # no-new-privileges, no cap_add (TSDB written to an owned volume; port 9090
+    # is unprivileged).
+    svcs = COMPOSE["services"]
+    svc = svcs["prometheus"]
+    assert svc.get("cap_drop") == ["ALL"], "prometheus: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (svc.get("security_opt") or [])
+    assert not svc.get("cap_add"), "prometheus needs no caps back"
+    assert "prometheus-init" not in svcs, (
+        "prometheus needs no *-init — the image pre-owns /prometheus"
+    )
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",
