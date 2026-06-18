@@ -60,6 +60,34 @@ def test_promtail_keeps_readonly_docker_socket():
     )
 
 
+def test_pushgateway_init_pre_owns_volume_so_cap_dropped_pushgateway_can_persist():
+    # R11-#97 durable fix: pushgateway runs cap_drop ALL as `nobody` and so
+    # can't write its --persistence.file to a root-owned fresh volume nor
+    # chown it. A one-shot init container pre-owns the volume to 65534 with
+    # the single CHOWN cap, and pushgateway waits for it to complete. Without
+    # this, a recreate on a fresh/root-owned volume loses the in-memory series
+    # → BackupStale fires (staging 2026-06-18).
+    svcs = COMPOSE["services"]
+    init = svcs.get("pushgateway-init")
+    assert init is not None, "pushgateway-init must exist to pre-own the volume"
+    assert init.get("cap_drop") == ["ALL"]
+    assert init.get("cap_add") == ["CHOWN"], "init needs ONLY CHOWN (minimal)"
+    assert "no-new-privileges:true" in (init.get("security_opt") or [])
+    assert init.get("restart") == "no", "init is a one-shot"
+    assert init.get("command") == ["chown", "-R", "65534:65534", "/data"]
+    assert any(v.startswith("pushgateway_data:") for v in (init.get("volumes") or [])), (
+        "init must mount the pushgateway_data volume it chowns"
+    )
+    # pushgateway must gate on the init completing.
+    dep = (svcs["pushgateway"].get("depends_on") or {}).get("pushgateway-init")
+    assert dep == {"condition": "service_completed_successfully"}, (
+        "pushgateway must wait for pushgateway-init to complete"
+    )
+    # Both mount the same volume at /data.
+    pg_vols = svcs["pushgateway"].get("volumes") or []
+    assert any(v == "pushgateway_data:/data" for v in pg_vols)
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

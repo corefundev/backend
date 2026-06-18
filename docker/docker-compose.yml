@@ -966,12 +966,41 @@ services:
   # to push sku_backup_last_success_timestamp_seconds, and Prometheus
   # picks it up on its next scrape. The BackupStale alert fires if
   # that timestamp is more than 25h old.
+  # R11-#97 — one-shot: pre-own the pushgateway data volume as nobody:65534
+  # BEFORE pushgateway (cap_drop ALL) starts. A freshly-created Docker named
+  # volume is owned root:root; pushgateway runs as `nobody` and — now that it
+  # has cap_drop: ALL — can neither write its --persistence.file there NOR
+  # chown it. Without persistence the in-memory series are lost on every
+  # recreate → BackupStale/BaseBackupStale fire on the gap (hit on staging
+  # 2026-06-18). This init container owns the chown (cap_add: CHOWN only),
+  # runs to completion, exits; idempotent (a no-op where the volume is already
+  # nobody-owned, e.g. prod). See feedback_pushgateway_recreate_loses_metrics.
+  pushgateway-init:
+    # alpine pinned to the same digest used by docker/Dockerfile.postgres-exporter.
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    command: ["chown", "-R", "65534:65534", "/data"]
+    volumes:
+      - pushgateway_data:/data
+    # Runs as root so the chown succeeds, but with ALL caps dropped except the
+    # single CHOWN it needs — minimal privilege for a one-shot.
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *log-rotation
+
   pushgateway:
     # R4-20 digest-pinned 2026-05-17
     image: prom/pushgateway:v1.9.0@sha256:98a458415f8f5afcfd45622d289a0aa67063563bec0f90d598ebc76783571936
     mem_limit: 128m    # R5-M9
     cpus: 0.1        # R5-M9
     restart: unless-stopped
+    # R11-#97 — wait for pushgateway-init to chown the data volume so the
+    # cap-dropped pushgateway can write its --persistence.file.
+    depends_on:
+      pushgateway-init:
+        condition: service_completed_successfully
     # R11-#97: stateless metrics cache — receives pushes, serves /metrics,
     # writes only its persistence file to a named volume. Needs zero caps.
     cap_drop: [ALL]
