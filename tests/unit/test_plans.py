@@ -62,11 +62,9 @@ def test_plan_limits_snapshot():
     assert free.max_skus == 30 and free.max_horizon_days == 7
     assert free.training_cooldown_hours == 12
     assert start.max_skus == 1500 and start.max_horizon_days == 30
-    # Monthly training limits removed 2026-06-02 — no plan caps monthly
-    # runs (Start, like Free + Business, is UNLIMITED).
-    assert start.training_runs_per_month is None
+    # Monthly training limits removed 2026-06-02; counter machinery torn
+    # down #73 — no plan caps monthly runs, no per_month field remains.
     assert biz.max_skus is None and biz.max_horizon_days == 90
-    assert biz.training_runs_per_month is None
 
 
 def test_all_specs_as_dicts_shape():
@@ -198,20 +196,15 @@ def test_business_has_no_cooldown():
 # ── Quota: NO monthly cap on any plan (removed 2026-06-02) ──────────────────
 # The per-month training cap was an early idea that didn't pan out. No plan
 # limits monthly runs anymore — the only training throttles are Free's 12h
-# cooldown and the single-in-flight guard (R11-H4). A high counter must NOT
-# block training on ANY plan (the counter column is now vestigial, pending
-# full removal).
+# cooldown and the single-in-flight guard (R11-H4). The counter machinery was
+# torn down in #73, so there's no per_month field to assert; this just pins
+# that check_training_quota never raises on quota grounds when no cooldown is
+# in play, on ANY plan.
 
 @pytest.mark.parametrize("plan", ["free", "start", "business"])
 def test_no_plan_caps_monthly_runs(plan):
-    rec = _rec(
-        plan=plan,
-        training_runs_this_month=9999,   # absurdly high — must not matter
-        last_trained_at=None,            # no cooldown in play
-    )
-    status = check_training_quota(rec)   # must NOT raise
-    # No plan exposes a monthly cap → remaining is unlimited (None).
-    assert status.training_runs_remaining is None
+    rec = _rec(plan=plan, last_trained_at=None)  # no cooldown in play
+    check_training_quota(rec)   # must NOT raise on any plan
 
 
 # ── get_status snapshot ────────────────────────────────────────────────────

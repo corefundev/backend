@@ -6,19 +6,22 @@ R4-16 — training quota TOCTOU race.
 `check_training_quota` + `record_training_started` used to be a
 non-atomic pair: read snapshot via registry.get → eval check → bump via
 registry.update. Two parallel /clients/{id}/train calls could both pass
-the check with the same stale snapshot and both write used+1, allowing
-one extra training past the cap.
+the check with the same stale snapshot and both claim a run.
 
 Closed by `ClientRegistry.try_record_training_run` — atomic conditional
-UPDATE with the quota + cooldown gate inside a single SQL statement
-under the PK row lock (Postgres) or the in-process lock (file backend).
-On zero-rows-matched, `record_training_started` raises QuotaExceeded.
+UPDATE with the gate inside a single SQL statement under the PK row lock
+(Postgres) or the in-process lock (file backend). On zero-rows-matched,
+`record_training_started` raises QuotaExceeded (cooldown) /
+TrainingInProgress (in-flight).
+
+The gate enforces two throttles: the per-plan cooldown (Free = 12h) and
+the single-in-flight guard (R11-H4). Monthly run caps were an early idea,
+removed 2026-06-02 and the dormant counter machinery torn down in #73 —
+so there is no monthly-cap clause to test here anymore.
 """
 from __future__ import annotations
 
-import json
 import sys
-import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,10 +37,10 @@ sys.path.insert(0, str(_BACKEND))
 
 def test_postgres_registry_has_atomic_quota_method():
     """PostgresClientRegistry must expose try_record_training_run with
-    a single-statement UPDATE…WHERE…RETURNING shape that enforces both
-    cap and cooldown — the entire R4-16 fix."""
+    a single-statement UPDATE…WHERE…RETURNING shape that enforces the
+    cooldown + single-in-flight gate — the R4-16 / R11-H4 fix."""
     text = (_BACKEND / "src" / "clients" / "registry.py").read_text()
-    # Method exists on both backends.
+    # Method exists on all three: ABC + Postgres + File.
     assert text.count("def try_record_training_run(") >= 3, (
         "try_record_training_run must be declared on ABC + Postgres + File registries"
     )
@@ -53,16 +56,15 @@ def test_postgres_registry_has_atomic_quota_method():
     # Single UPDATE…WHERE…RETURNING; no read-modify-write fallback.
     assert "UPDATE sku_clients" in impl, "PG impl must mutate sku_clients"
     assert "RETURNING" in impl, "PG impl must use RETURNING for atomic read-back"
-    # Cap gate (the OR-chain for unlimited / stale-window / under-cap).
-    assert "training_runs_this_month < %s::int" in impl or \
-           "training_runs_this_month <" in impl, (
-        "WHERE clause must compare current counter < cap"
-    )
     # Cooldown via make_interval (R1 C1 / purge_old pattern) — defends
     # against the prior `interval '%s hours' % str_value` SQL-injection
     # shape that the audit flagged historically.
     assert "make_interval(hours =>" in impl, (
         "cooldown clause must use make_interval (R1 pattern, not string-interp)"
+    )
+    # R11-H4 single-in-flight gate clause.
+    assert "status <> 'training'" in impl, (
+        "WHERE clause must enforce single-in-flight (R11-H4)"
     )
 
 
@@ -75,9 +77,8 @@ def test_local_file_registry_holds_lock_for_atomic_path():
     lf_block = text[lf_start:]
     impl_start = lf_block.find("def try_record_training_run(")
     assert impl_start > 0
-    # Body must begin with `with self._lock:` — that's the gate.
-    body_first_300 = lf_block[impl_start:impl_start + 600]
-    assert "with self._lock:" in body_first_300, (
+    body_first = lf_block[impl_start:impl_start + 600]
+    assert "with self._lock:" in body_first, (
         "file backend atomic path must run under self._lock"
     )
 
@@ -89,21 +90,13 @@ def test_quota_module_delegates_to_atomic_method():
     text = (_BACKEND / "src" / "plans" / "quota.py").read_text()
     rec_start = text.find("def record_training_started(")
     assert rec_start > 0
-    body_end = len(text)
-    body = text[rec_start:body_end]
+    body = text[rec_start:]
 
-    # Must invoke the atomic method.
     assert "registry.try_record_training_run(" in body, (
         "record_training_started must delegate to try_record_training_run (R4-16)"
     )
-    # Must raise QuotaExceeded on race-lost.
     assert "raise QuotaExceeded(" in body, (
         "race-lost path must raise QuotaExceeded for the 429 mapping"
-    )
-    # Must NOT carry the old read-modify-write pattern: bumping then
-    # calling registry.update with training_runs_this_month.
-    assert "training_runs_this_month=used" not in body, (
-        "old non-atomic registry.update bump must be removed"
     )
 
 
@@ -132,9 +125,6 @@ def test_api_main_wraps_atomic_bump_with_429():
     )
     idx = text.find("record = record_training_started(registry, record)")
     assert idx > 0
-    # Window around the call must include the try + both except arms.
-    # (Widened for R11-H4, which added the TrainingInProgress→409 arm
-    # ahead of the QuotaExceeded→429 arm + explanatory comments.)
     window = text[max(0, idx - 500):idx + 900]
     assert "try:" in window and "record = record_training_started" in window, (
         "record_training_started call must be inside a try block (R4-16)"
@@ -165,115 +155,48 @@ def file_reg(tmp_path):
         client_id="r4-16-test",
         config={},
         storage_path="s3://test/path",
-        plan="start",  # cap = 15/month
+        plan="free",
     )
     reg.register(rec)
     return reg
 
 
-def test_atomic_method_returns_none_when_cap_already_hit(file_reg):
-    """If training_runs_this_month is already at cap, the atomic
-    method returns None instead of bumping."""
+def test_atomic_method_succeeds_when_clear(file_reg):
+    """No cooldown active, not in-flight → claims the run and returns
+    the new last_trained_at."""
     now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    # Manually set the counter at the cap.
-    file_reg.update(
-        "r4-16-test",
-        training_runs_this_month=15,
-        training_runs_window_start=month_start.isoformat(),
-    )
-    result = file_reg.try_record_training_run(
-        "r4-16-test", cap=15, cooldown_hours=None,
-        now=now, month_start=month_start,
-    )
-    assert result is None, "atomic method must reject when counter == cap"
-
-
-def test_atomic_method_succeeds_under_cap(file_reg):
-    """Below cap: bumps counter + returns the new triple."""
-    now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    file_reg.update(
-        "r4-16-test",
-        training_runs_this_month=5,
-        training_runs_window_start=month_start.isoformat(),
-    )
-    result = file_reg.try_record_training_run(
-        "r4-16-test", cap=15, cooldown_hours=None,
-        now=now, month_start=month_start,
-    )
+    result = file_reg.try_record_training_run("r4-16-test", None, now)
     assert result is not None
-    assert result["training_runs_this_month"] == 6
     assert result["last_trained_at"] == now.isoformat()
-
-
-def test_atomic_method_resets_counter_on_new_month(file_reg):
-    """If the stored window is older than month_start, counter resets
-    to 1 and window moves forward — same semantics as the old non-
-    atomic _next_month_start path."""
-    now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    # Old window in May.
-    file_reg.update(
-        "r4-16-test",
-        training_runs_this_month=15,        # at-cap in the OLD window
-        training_runs_window_start="2026-05-01T00:00:00+00:00",
-    )
-    result = file_reg.try_record_training_run(
-        "r4-16-test", cap=15, cooldown_hours=None,
-        now=now, month_start=month_start,
-    )
-    assert result is not None, "stale window must reset, not block"
-    assert result["training_runs_this_month"] == 1
-    assert result["training_runs_window_start"] == month_start.isoformat()
+    assert file_reg.get("r4-16-test").status == "training"
 
 
 def test_atomic_method_rejects_during_cooldown(file_reg):
     """If last_trained_at is within cooldown_hours, the method returns
-    None regardless of cap state."""
+    None (cooldown gate)."""
     now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     file_reg.update(
         "r4-16-test",
-        training_runs_this_month=0,
         last_trained_at=(now - timedelta(hours=1)).isoformat(),  # 1h ago
+        status="ready",
     )
-    result = file_reg.try_record_training_run(
-        "r4-16-test", cap=None, cooldown_hours=48,  # FREE plan: 48h
-        now=now, month_start=month_start,
-    )
+    result = file_reg.try_record_training_run("r4-16-test", 12, now)  # 12h cooldown
     assert result is None, "cooldown active must block training"
 
 
 def test_concurrent_same_client_claims_serialized_to_one_by_h4(file_reg):
-    """R11-H4 (2026-06-01) SUPERSEDES the old R4-16 '5 of 20 concurrent
-    succeed' model. A client may now have at most ONE in-flight training,
-    so 20 concurrent claims for the SAME client serialize to exactly 1
-    success — the rest are blocked by the in-flight guard (status set to
-    'training' on the winning claim), not by the cap. The monthly cap is
-    still enforced, but over SEQUENTIAL runs — see
-    test_cap_respected_over_sequential_runs below.
-
-    (Pre-H4 this asserted 5/20; that scenario — 5 concurrent successful
-    runs for one client — is exactly the clobber H4 prevents.)"""
+    """R11-H4 (2026-06-01): a client may have at most ONE in-flight
+    training, so 20 concurrent claims for the SAME client serialize to
+    exactly 1 success — the rest are blocked by the in-flight guard
+    (status set to 'training' on the winning claim)."""
     now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    file_reg.update(
-        "r4-16-test",
-        training_runs_this_month=0,
-        training_runs_window_start=month_start.isoformat(),
-        status="ready",
-    )
+    file_reg.update("r4-16-test", status="ready")
 
     results = []
     results_lock = threading.Lock()
 
     def worker():
-        r = file_reg.try_record_training_run(
-            "r4-16-test", cap=None, cooldown_hours=None,  # no monthly cap (removed)
-            now=now, month_start=month_start,
-        )
+        r = file_reg.try_record_training_run("r4-16-test", None, now)
         with results_lock:
             results.append(r)
 
@@ -288,9 +211,7 @@ def test_concurrent_same_client_claims_serialized_to_one_by_h4(file_reg):
         f"R11-H4 in-flight guard must serialize concurrent same-client "
         f"claims to exactly 1 — got {len(successes)}"
     )
-    rec = file_reg.get("r4-16-test")
-    assert rec.training_runs_this_month == 1
-    assert rec.status == "training"
+    assert file_reg.get("r4-16-test").status == "training"
 
 
 def test_record_training_started_raises_quotaexceeded_on_cooldown(file_reg):
