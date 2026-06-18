@@ -891,6 +891,11 @@ services:
     mem_limit: 64m    # R5-M9
     cpus: 0.1        # R5-M9
     restart: unless-stopped
+    # R11-#97: stateless distroless exporter — reads a config file, scrapes
+    # TLS endpoints over the network. Needs zero Linux caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./ssl-exporter.yml:/config/ssl_exporter.yml:ro
     command:
@@ -921,6 +926,11 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # R11-#97: stateless exporter — polls Redis over the network, serves
+    # /metrics. Needs zero Linux caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     # Functional healthcheck (incident 2026-05-17): the previous probe
@@ -962,6 +972,11 @@ services:
     mem_limit: 128m    # R5-M9
     cpus: 0.1        # R5-M9
     restart: unless-stopped
+    # R11-#97: stateless metrics cache — receives pushes, serves /metrics,
+    # writes only its persistence file to a named volume. Needs zero caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     # R5-16 (2026-05-17) — persistence flag + named volume. The
@@ -1277,6 +1292,13 @@ services:
       - /sys:/host/sys:ro
       - /:/host/root:ro,rslave
     restart: unless-stopped
+    # R11-#97: reads host /proc + /sys + / via read-only bind-mounts and the
+    # host PID namespace (pid: host) — none of that needs a Linux capability,
+    # so cap_drop ALL is safe. no-new-privileges blocks any escalation through
+    # the (unprivileged) host visibility.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     healthcheck:
@@ -1402,6 +1424,11 @@ services:
     mem_limit: 384m    # R5-M9
     cpus: 0.5        # R5-M9
     restart: unless-stopped
+    # R11-#97: trace store — reads config (ro), writes only its data volume,
+    # serves over the network. Needs zero Linux caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
@@ -1427,6 +1454,11 @@ services:
     mem_limit: 384m    # R5-M9
     cpus: 0.5        # R5-M9
     restart: unless-stopped
+    # R11-#97: log store — reads config + rules (ro), writes only its data
+    # volume, serves over the network. Needs zero Linux caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
@@ -1454,6 +1486,13 @@ services:
     mem_limit: 128m    # R5-M9
     cpus: 0.2        # R5-M9
     restart: unless-stopped
+    # R11-#97: tails container logs from read-only bind-mounts and reads the
+    # docker socket (ro) for service discovery — reading mounted files/socket
+    # needs no Linux capability. cap_drop ALL is safe; the ro docker.sock
+    # stays (SD needs it). no-new-privileges blocks escalation.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     volumes:
