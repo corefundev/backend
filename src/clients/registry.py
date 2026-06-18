@@ -58,10 +58,6 @@ class ClientRecord:
     # ── Subscription plan + usage counters ────────────────────────────
     # plan: "free" | "start" | "business" — resolved to PlanSpec at enforce time.
     plan: str = "free"
-    # How many training jobs the client has started in the current UTC month.
-    # Reset by the quota module when it detects a month boundary.
-    training_runs_this_month: int = 0
-    training_runs_window_start: Optional[str] = None   # ISO of window start
     # SKU count from the most recent successful training (from upload manifest).
     trained_sku_count: Optional[int] = None
 
@@ -134,16 +130,14 @@ class ClientRegistry:
     # registry lock across read-eval-write).
     #
     # Returns the updated row's relevant fields on success, or None if
-    # the conditional WHERE matched zero rows (cap hit or cooldown
-    # active). The caller (quota.record_training_started) maps None to
-    # QuotaExceeded with a re-fetched precise reason.
+    # the conditional WHERE matched zero rows (cooldown active or a live
+    # in-flight claim). The caller (quota.record_training_started) maps
+    # None to QuotaExceeded/TrainingInProgress with a re-fetched reason.
     def try_record_training_run(
         self,
         client_id: str,
-        cap: Optional[int],
         cooldown_hours: Optional[int],
         now: datetime,
-        month_start: datetime,
     ) -> Optional[dict]: ...
 
     # R11-H4 — unstick clients left in a dead 'training' claim. Default
@@ -184,8 +178,7 @@ CLIENT_UPDATABLE_COLUMNS: frozenset = frozenset({
     "config", "storage_path",
     "last_trained_at", "last_mlflow_run_id", "last_wmape", "last_mase",
     "status", "model_version", "horizon", "notes",
-    "plan", "training_runs_this_month", "training_runs_window_start",
-    "trained_sku_count",
+    "plan", "trained_sku_count",
     "api_key_hash", "email", "email_canonical", "email_verified_at",
     "oauth_provider", "oauth_subject",
 })
@@ -407,25 +400,25 @@ class PostgresClientRegistry(ClientRegistry):
     def try_record_training_run(
         self,
         client_id: str,
-        cap: Optional[int],
         cooldown_hours: Optional[int],
         now: datetime,
-        month_start: datetime,
     ) -> Optional[dict]:
         """
         Audit R4-16 — atomic conditional UPDATE.
 
-        A single SQL statement under the PK row lock checks both the
-        monthly cap and the cooldown, then either bumps the counter +
-        timestamps or returns no rows. Behaviour:
+        A single SQL statement under the PK row lock checks the per-plan
+        cooldown AND the single-in-flight gate, then either claims the
+        training (sets last_trained_at + status='training') or returns no
+        rows. Behaviour:
 
-          * Cap == NULL → unlimited plan, gate always passes.
-          * window_start NULL or older than month_start → counter resets
-            to 1 and window_start moves to month_start (matches the
-            Python-side _month_start logic in quota.py).
-          * Otherwise → gate passes only if training_runs_this_month < cap.
-          * Cooldown gate analogous: last_trained_at NULL OR older than
+          * Cooldown gate: pass only if cooldown_hours IS NULL, OR
+            last_trained_at NULL, OR last_trained_at older than
             (now - interval cooldown_hours).
+          * In-flight gate (R11-H4): pass only if not already 'training',
+            OR the existing claim is stale (dead worker) → self-heals.
+
+        Monthly run caps were removed 2026-06-02 (no plan caps monthly
+        runs); #73 dropped the dormant counter columns + machinery.
 
         `make_interval(hours => ...)` matches the R1 C1 / R3-pattern
         for parameterised interval arithmetic — same shape as
@@ -433,27 +426,9 @@ class PostgresClientRegistry(ClientRegistry):
         """
         sql = """
             UPDATE sku_clients
-            SET training_runs_this_month = CASE
-                    WHEN training_runs_window_start IS NULL
-                      OR training_runs_window_start < %s::timestamptz
-                    THEN 1
-                    ELSE training_runs_this_month + 1
-                END,
-                training_runs_window_start = CASE
-                    WHEN training_runs_window_start IS NULL
-                      OR training_runs_window_start < %s::timestamptz
-                    THEN %s::timestamptz
-                    ELSE training_runs_window_start
-                END,
-                last_trained_at = %s::timestamptz,
+            SET last_trained_at = %s::timestamptz,
                 status = 'training'
             WHERE client_id = %s
-              AND (
-                  %s::int IS NULL
-                  OR training_runs_window_start IS NULL
-                  OR training_runs_window_start < %s::timestamptz
-                  OR training_runs_this_month < %s::int
-              )
               AND (
                   %s::int IS NULL
                   OR last_trained_at IS NULL
@@ -468,31 +443,23 @@ class PostgresClientRegistry(ClientRegistry):
                   OR last_trained_at IS NULL
                   OR last_trained_at < (%s::timestamptz - make_interval(mins => %s::int))
               )
-            RETURNING training_runs_this_month,
-                      training_runs_window_start,
-                      last_trained_at
+            RETURNING last_trained_at
         """
         now_iso = now.isoformat()
-        month_start_iso = month_start.isoformat()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
-                    month_start_iso,                       # SET-CASE counter check
-                    month_start_iso, month_start_iso,      # SET-CASE window_start
-                    now_iso,                                # SET last_trained_at
-                    client_id,                              # WHERE pk
-                    cap, month_start_iso, cap,              # WHERE quota
+                    now_iso,                                  # SET last_trained_at
+                    client_id,                                # WHERE pk
                     cooldown_hours, now_iso, cooldown_hours,  # WHERE cooldown
-                    now_iso, STALE_TRAINING_MINUTES,        # WHERE in-flight (R11-H4)
+                    now_iso, STALE_TRAINING_MINUTES,          # WHERE in-flight (R11-H4)
                 ))
                 row = cur.fetchone()
             conn.commit()
         if row is None:
             return None
         return {
-            "training_runs_this_month":   int(row[0]),
-            "training_runs_window_start": str(row[1]) if row[1] is not None else None,
-            "last_trained_at":            str(row[2]) if row[2] is not None else None,
+            "last_trained_at": str(row[0]) if row[0] is not None else None,
         }
 
     def reset_stuck_training_status(
@@ -543,11 +510,6 @@ class PostgresClientRegistry(ClientRegistry):
             horizon=row.get("horizon", 14),
             notes=row.get("notes"),
             plan=row.get("plan") or "free",
-            training_runs_this_month=row.get("training_runs_this_month") or 0,
-            training_runs_window_start=(
-                str(row["training_runs_window_start"])
-                if row.get("training_runs_window_start") else None
-            ),
             trained_sku_count=row.get("trained_sku_count"),
             api_key_hash=row.get("api_key_hash"),
             email=row.get("email"),
@@ -700,18 +662,17 @@ class LocalFileRegistry(ClientRegistry):
     def try_record_training_run(
         self,
         client_id: str,
-        cap: Optional[int],
         cooldown_hours: Optional[int],
         now: datetime,
-        month_start: datetime,
     ) -> Optional[dict]:
         """
         Audit R4-16 — atomic under self._lock.
 
         Mirrors PostgresClientRegistry.try_record_training_run semantics
-        for the dev/test backend. Multi-process is out of scope (the
-        file backend is not used in prod); multi-threaded uvicorn
-        workers are serialised through the lock.
+        for the dev/test backend: cooldown gate + single-in-flight gate
+        (R11-H4). Multi-process is out of scope (the file backend is not
+        used in prod); multi-threaded uvicorn workers are serialised
+        through the lock.
         """
         with self._lock:
             data = self._load()
@@ -741,26 +702,6 @@ class LocalFileRegistry(ClientRegistry):
                 if not inflight_stale:
                     return None
 
-            # Window reset check — mirror the SQL CASE expression.
-            cur_window_iso = row.get("training_runs_window_start")
-            cur_used = int(row.get("training_runs_this_month") or 0)
-            cur_window: Optional[datetime] = None
-            if cur_window_iso:
-                try:
-                    cur_window = datetime.fromisoformat(
-                        str(cur_window_iso).replace("Z", "+00:00")
-                    )
-                    if cur_window.tzinfo is None:
-                        cur_window = cur_window.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    cur_window = None
-            window_stale = (cur_window is None) or (cur_window < month_start)
-
-            # Quota gate.
-            if cap is not None:
-                if not (window_stale or cur_used < cap):
-                    return None
-
             # Cooldown gate.
             if cooldown_hours is not None:
                 last_iso = row.get("last_trained_at")
@@ -777,21 +718,13 @@ class LocalFileRegistry(ClientRegistry):
                     except ValueError:
                         pass
 
-            # Mutate.
-            new_used = 1 if window_stale else (cur_used + 1)
-            new_window_iso = month_start.isoformat() if window_stale else str(cur_window_iso)
+            # Mutate — claim the training (R11-H4).
             now_iso = now.isoformat()
-            row["training_runs_this_month"]   = new_used
-            row["training_runs_window_start"] = new_window_iso
-            row["last_trained_at"]            = now_iso
-            row["status"]                     = "training"   # R11-H4 claim
+            row["last_trained_at"] = now_iso
+            row["status"]          = "training"
             data[client_id] = row
             self._save(data)
-            return {
-                "training_runs_this_month":   new_used,
-                "training_runs_window_start": new_window_iso,
-                "last_trained_at":            now_iso,
-            }
+            return {"last_trained_at": now_iso}
 
     def reset_stuck_training_status(
         self, stale_after_minutes: int = STALE_TRAINING_MINUTES

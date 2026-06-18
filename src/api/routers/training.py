@@ -295,15 +295,16 @@ async def trigger_training(
         logger.warning("could not create training_runs row: %s", e)
         run_id = None
 
-    # R5-4 (2026-05-17) — refund counter on enqueue failure.
-    # record_training_started() bumps training_runs_this_month BEFORE
-    # enqueue. Without this try/except, a Redis hiccup, queue config
-    # error, or any other enqueue-time exception consumes the counter
-    # without starting a job — the FREE-plan user loses one of their
-    # N runs/month for nothing. The refund mirrors the atomic bump:
-    # an UPDATE that decrements by 1 and clears last_trained_at iff
-    # it equals the just-stamped value (best-effort, fail-silent —
-    # the rollback for a rollback shouldn't itself break the request).
+    # R5-4 (2026-05-17) — release the in-flight claim on enqueue failure.
+    # record_training_started() set status='training' (the R11-H4 atomic
+    # claim) BEFORE enqueue. Without this try/except, a Redis hiccup,
+    # queue config error, or any other enqueue-time exception leaves the
+    # client stuck 'training' with no job running — blocked until the
+    # stale-claim reaper (STALE_TRAINING_MINUTES) frees it. Resetting
+    # status to 'ready' here releases the claim immediately. Best-effort,
+    # fail-silent — the rollback for a rollback shouldn't itself break the
+    # request. (#73 dropped the monthly-counter refund that used to live
+    # here alongside this status reset — no counter remains to refund.)
     try:
         job_id = enqueue_training(
             client_id=client_id,
@@ -314,26 +315,14 @@ async def trigger_training(
         )
     except Exception as enq_err:    # noqa: BLE001
         logger.warning(
-            "R5-4: enqueue_training failed for client=%s — refunding quota counter: %s",
+            "R5-4: enqueue_training failed for client=%s — releasing in-flight claim: %s",
             client_id, enq_err,
         )
         try:
-            # Decrement counter; the counter is monotonic-up via the
-            # R4-16 atomic UPDATE, so a simple decrement is correct
-            # iff no other request has slid in. If a concurrent
-            # request DID slide in, the decrement under-refunds (by
-            # 0 instead of by 1) which is still safer than the
-            # alternative (double-refund creating a free run).
-            fresh = registry.get(client_id)
-            if fresh and (fresh.training_runs_this_month or 0) > 0:
-                registry.update(
-                    client_id,
-                    training_runs_this_month=fresh.training_runs_this_month - 1,
-                    status="ready",
-                )
+            registry.update(client_id, status="ready")
         except Exception as refund_err:    # noqa: BLE001
             logger.warning(
-                "R5-4: refund-counter step also failed: %s", refund_err,
+                "R5-4: release-claim step also failed: %s", refund_err,
             )
         raise HTTPException(
             status_code=503,

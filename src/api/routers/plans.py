@@ -85,9 +85,6 @@ async def get_client_usage(
             if spec.config_allowed_keys is not None else None
         ),
         "training_cooldown_hours": spec.training_cooldown_hours,
-        "training_runs_per_month": spec.training_runs_per_month,
-        "training_runs_used":      status.training_runs_used,
-        "training_runs_remaining": status.training_runs_remaining,
         "cooldown_until":          status.cooldown_until.isoformat() if status.cooldown_until else None,
         "trained_sku_count":       record.trained_sku_count,
         "current_sku_count":       _latest_upload_sku_count(client_id),

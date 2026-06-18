@@ -62,8 +62,6 @@ def _free_record():
         plan="free",
         status="ready",
         last_trained_at=None,
-        training_runs_this_month=0,
-        training_runs_window_start=None,
     )
 
 

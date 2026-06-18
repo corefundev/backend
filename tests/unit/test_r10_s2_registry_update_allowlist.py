@@ -75,10 +75,10 @@ def test_allowlist_covers_every_real_caller_kwarg():
     # passes (verified by grep across src/ during the R10 audit).
     real_caller_kwargs = {
         "config", "status", "api_key_hash", "plan", "horizon", "notes",
-        "training_runs_this_month", "oauth_provider", "oauth_subject",
+        "oauth_provider", "oauth_subject",
         "last_trained_at", "last_mlflow_run_id", "last_wmape", "last_mase",
         "model_version", "trained_sku_count", "storage_path",
-        "training_runs_window_start", "email", "email_canonical",
+        "email", "email_canonical",
         "email_verified_at",
     }
     missing = real_caller_kwargs - CLIENT_UPDATABLE_COLUMNS

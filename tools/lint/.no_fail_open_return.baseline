@@ -66,8 +66,8 @@ src/api/routers/notifications.py:152  pre-R9 baseline; triage in R10 — telegra
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
 src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02)
-src/api/routers/training.py:334  pre-R9 baseline; triage in R10 — trigger_training enqueue (+26 lines, R11-H3)
-src/api/routers/training.py:347  pre-R9 baseline; triage in R10 — trigger_training fallback (+26 lines, R11-H3)
+src/api/routers/training.py:323  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18)
+src/api/routers/training.py:336  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 src/pipeline/inference_utils.py:407  R11-#59 (was :351, +R12-#91 shift) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
 src/pipeline/inference_utils.py:463  R11-#59 (was :406, +R12-#91 shift) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path

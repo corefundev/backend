@@ -138,12 +138,14 @@ def test_async_registry_register_is_not_implemented():
 
 def test_trigger_training_refunds_quota_on_enqueue_fail():
     """The enqueue_training call must be wrapped in try/except that
-    decrements training_runs_this_month on failure — otherwise a
-    Redis hiccup permanently consumes a FREE-plan user's
-    monthly run quota.
+    releases the in-flight claim (status='ready') on failure — otherwise
+    a Redis hiccup leaves the client stuck 'training' until the
+    stale-claim reaper frees it.
 
     R5-M1 slice 7 (2026-05-18) — trigger_training moved to
-    routers/training.py.
+    routers/training.py. #73 (2026-06-18) — the monthly-counter refund
+    that used to live here was dropped with the counter; the status
+    release remains.
     """
     candidates = (
         _BACKEND / "src" / "api" / "main.py",
@@ -181,10 +183,10 @@ def test_trigger_training_refunds_quota_on_enqueue_fail():
     assert try_idx > 0 and (enq_idx - try_idx) < 800, (
         "enqueue_training must be inside a try block (R5-4)"
     )
-    # And the except branch decrements the counter.
-    assert "training_runs_this_month=" in block, (
-        "refund branch must explicitly set training_runs_this_month "
-        "(R5-4 — counter rollback)"
+    # And the except branch releases the in-flight claim.
+    assert 'status="ready"' in block, (
+        "refund branch must release the in-flight claim (status='ready') "
+        "(R5-4 — claim rollback)"
     )
 
 

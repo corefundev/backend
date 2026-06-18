@@ -3,17 +3,15 @@ src/plans/quota.py
 
 Training-quota accounting.
 
-Two rules across plans:
+One throttle across plans:
 
-  1. Cooldown — "how soon after the last training can the client start another".
-     FREE: 48h. Others: unspecified (None).
+  Cooldown — "how soon after the last training can the client start another".
+  FREE: 12h. Others: none (None).
 
-  2. Monthly counter — "how many training jobs per UTC calendar month".
-     START: 15. Others: unlimited.
-
-The counter window is stored on the ClientRecord as
-`training_runs_window_start` (ISO). When we see a newer month than the
-window start, we reset the counter atomically before checking the cap.
+(Monthly run caps were an early idea, removed 2026-06-02 — no plan caps
+monthly runs. The dormant counter machinery was torn out in #73. The only
+other throttle is the single-in-flight gate, enforced atomically in
+registry.try_record_training_run — see record_training_started.)
 
 This module is pure logic + registry I/O; the API layer wires it into
 FastAPI deps (see src/plans/enforcement.py).
@@ -46,27 +44,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _month_start(dt: datetime) -> datetime:
-    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-
 # ── Public result types ───────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class QuotaStatus:
     """
-    Snapshot of a client's current quota — what's used, what's left.
+    Snapshot of a client's current training throttle.
 
-    None values mean "unlimited" per plan.
+    `cooldown_until` is None when the client is not cooling down.
     """
     plan:                     str
     model_display_name:       str
     training_cooldown_hours:  int | None
     cooldown_until:           Optional[datetime]      # None if not cooling down
-    training_runs_per_month:  int | None
-    training_runs_used:       int
-    training_runs_remaining:  int | None              # None if cap is None
-    window_start:             Optional[datetime]
 
 
 class QuotaExceeded(Exception):
@@ -89,9 +79,8 @@ class TrainingInProgress(Exception):
 # ── Read-only status ──────────────────────────────────────────────────────────
 
 def get_status(record: ClientRecord) -> QuotaStatus:
-    spec      = get_plan_spec(record.plan)
-    last      = _parse_ts(record.last_trained_at)
-    win_start = _parse_ts(record.training_runs_window_start)
+    spec = get_plan_spec(record.plan)
+    last = _parse_ts(record.last_trained_at)
 
     cooldown_until: Optional[datetime] = None
     if spec.training_cooldown_hours is not None and last is not None:
@@ -99,27 +88,11 @@ def get_status(record: ClientRecord) -> QuotaStatus:
         if eta > _now():
             cooldown_until = eta
 
-    used = record.training_runs_this_month or 0
-    # If the stored window is from a previous month, treat the counter
-    # as effectively zero — `record_training_started` will physically
-    # reset it when the next training starts.
-    if win_start is not None and _month_start(win_start) < _month_start(_now()):
-        used = 0
-        win_start = _month_start(_now())
-
-    remaining: int | None = None
-    if spec.training_runs_per_month is not None:
-        remaining = max(0, spec.training_runs_per_month - used)
-
     return QuotaStatus(
         plan=spec.id.value,
         model_display_name=spec.model_display_name,
         training_cooldown_hours=spec.training_cooldown_hours,
         cooldown_until=cooldown_until,
-        training_runs_per_month=spec.training_runs_per_month,
-        training_runs_used=used,
-        training_runs_remaining=remaining,
-        window_start=win_start,
     )
 
 
@@ -155,36 +128,31 @@ def record_training_started(
     record: ClientRecord,
 ) -> ClientRecord:
     """
-    Atomically check + bump the monthly counter and update
-    last_trained_at. Resets the counter if we've rolled into a new
-    calendar month since the stored window_start.
+    Atomically claim a training slot (cooldown + single-in-flight gate)
+    and update last_trained_at + status.
 
     Audit R4-16 — previously this function was a non-atomic
     read-mutate-write off the snapshot in `record`. Two parallel
-    requests could both pass check_training_quota with the same
-    stale used count and both write used+1, allowing one extra
-    training past the cap. The fix delegates the entire check-and-
-    bump to `registry.try_record_training_run`, which runs as a
-    single conditional UPDATE under the PK row lock (Postgres) or
-    the in-process registry lock (LocalFileRegistry). If the
-    conditional matches zero rows, the race was lost and we raise
-    QuotaExceeded with a re-fetched precise reason.
+    requests could both pass check_training_quota and both claim a run.
+    The fix delegates the entire check-and-claim to
+    `registry.try_record_training_run`, which runs as a single
+    conditional UPDATE under the PK row lock (Postgres) or the
+    in-process registry lock (LocalFileRegistry). If the conditional
+    matches zero rows, the gate was lost and we raise QuotaExceeded /
+    TrainingInProgress with a re-fetched precise reason.
 
     Called AFTER check_training_quota succeeds in the happy path; the
     early check is still useful for fail-fast UX before doing SKU /
-    upload manifest work, but the atomic gate here is what enforces
-    the limit under concurrency.
+    upload manifest work, but the atomic gate here is what enforces the
+    throttle under concurrency.
     """
-    spec        = get_plan_spec(record.plan)
-    now         = _now()
-    month_start = _month_start(now)
+    spec = get_plan_spec(record.plan)
+    now  = _now()
 
     result = registry.try_record_training_run(
         record.client_id,
-        spec.training_runs_per_month,
         spec.training_cooldown_hours,
         now,
-        month_start,
     )
 
     if result is None:
@@ -214,11 +182,9 @@ def record_training_started(
     return ClientRecord(
         **{
             **record.__dict__,
-            "last_trained_at":            result["last_trained_at"],
-            "training_runs_this_month":   result["training_runs_this_month"],
-            "training_runs_window_start": result["training_runs_window_start"],
+            "last_trained_at": result["last_trained_at"],
             # R11-H4: the atomic gate set status='training' in the DB; keep
             # the returned in-memory record consistent.
-            "status":                     "training",
+            "status":          "training",
         }
     )

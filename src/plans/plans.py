@@ -60,9 +60,9 @@ class PlanSpec:
     # ── Training quota ──────────────────────────────────────────────
     # training_cooldown_hours: minimum gap between consecutive training
     #                          jobs (None = no cooldown).
-    # training_runs_per_month: max starts per UTC calendar month (None = unlimited).
+    # (Monthly run caps removed 2026-06-02 / torn down #73 — no plan caps
+    #  monthly runs; the only throttles are cooldown + single-in-flight.)
     training_cooldown_hours:  int | None
-    training_runs_per_month:  int | None
 
     # ── Inference rate-limit (audit R2-10, 2026-05-15) ───────────────
     # Per-hour budget for /predict + /predict/batch combined, keyed by
@@ -137,7 +137,6 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_skus=30,
         max_horizon_days=7,
         training_cooldown_hours=12,    # was 48; lowered for v2 — let testers iterate
-        training_runs_per_month=UNLIMITED,
         predict_requests_per_hour=100,  # R2-10: free tier abuse ceiling
         config_allowed_keys=frozenset(),    # "black box" — zero overrides
         hpo_n_trials=0,                # HPO off — keep training fast and free
@@ -157,7 +156,6 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         # and the single-in-flight guard (R11-H4, all plans). The cap
         # machinery is now dormant on every plan — scheduled for full
         # removal (see the monthly-limit-machinery cleanup task).
-        training_runs_per_month=UNLIMITED,
         predict_requests_per_hour=5000,  # R2-10
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
@@ -173,7 +171,6 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
         default_objective="ensemble",  # 3-model blend; HPO tunes each child
-        training_runs_per_month=UNLIMITED,
         predict_requests_per_hour=UNLIMITED,  # R2-10: enterprise has its own SRE
         config_allowed_keys=None,  # all keys
         price_label="",
@@ -207,7 +204,6 @@ def all_specs_as_dicts() -> list[dict]:
             "max_skus":                 spec.max_skus,
             "max_horizon_days":         spec.max_horizon_days,
             "training_cooldown_hours":  spec.training_cooldown_hours,
-            "training_runs_per_month":  spec.training_runs_per_month,
             "config_allowed_keys":      (
                 sorted(spec.config_allowed_keys)
                 if spec.config_allowed_keys is not None
