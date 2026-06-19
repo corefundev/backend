@@ -1359,6 +1359,26 @@ services:
   # Runs at 02:10 UTC daily via busybox crond. Uses backup.sh with
   # pg_dump + AES-256 encryption + S3 upload. The same container can be
   # exec'd to run restore.sh interactively.
+
+  # R11-#97 — one-shot: pre-own the backup data volumes as nobody:65534 before
+  # the now-non-root (cap_drop ALL) backup container starts. /tmp/backup holds
+  # the in-flight dump; /var/lib/backup-state holds last-success epochs read by
+  # backup_metric_warmup.sh. Fresh named volumes are root:root and the
+  # cap-dropped backup (running as nobody) can neither write them nor chown
+  # them. Same pattern + rationale as pushgateway-init.
+  backup-init:
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    command: ["sh", "-c", "chown -R 65534:65534 /tmp/backup /var/lib/backup-state"]
+    volumes:
+      - backups:/tmp/backup
+      - backup_state:/var/lib/backup-state
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *log-rotation
+
   backup:
     # Custom image: deps baked at build time (no runtime apk-add hangs)
     # + scripts/lockbox_bootstrap.sh as a cron wrapper that fetches
@@ -1414,7 +1434,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       minio:    { condition: service_healthy }
+      # R11-#97: wait for backup-init to chown the data volumes so the
+      # cap-dropped, non-root (USER nobody) backup container can write them.
+      backup-init: { condition: service_completed_successfully }
     restart: unless-stopped
+    # R11-#97: runs as USER nobody (Dockerfile.backup) — crond + all cron jobs
+    # + the startup warmup run non-root. Needs zero Linux caps: dcron is
+    # launched as nobody and runs nobody's crontab (no setuid), tini (init:true)
+    # handles setpgid, and the jobs are network/file ops (pg_dump, openssl, mc,
+    # lockbox curl). cap_drop ALL + no-new-privileges, no cap_add.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     healthcheck:
