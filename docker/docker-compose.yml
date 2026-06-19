@@ -1450,6 +1450,16 @@ services:
       - ./alertmanager:/etc/alertmanager:ro
       - alertmanager_data:/alertmanager
     restart: unless-stopped
+    # R11-#97: already runs as USER nobody (Dockerfile.alertmanager) and the
+    # lockbox bootstrap + config render happen as nobody too — needs zero Linux
+    # caps (silences/nflog written to a volume it owns; port 9093 unprivileged).
+    # No *-init needed (like prometheus, unlike upstream pushgateway): the custom
+    # image does `chown -R nobody:nobody /alertmanager`, so a fresh
+    # alertmanager_data volume inherits nobody ownership via Docker's
+    # copy-on-first-mount. Verified live: /alertmanager is 65534:65534.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     healthcheck:
