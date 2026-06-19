@@ -183,6 +183,28 @@ def test_redis_runs_nonroot_with_init_volume_preown():
     assert any(v.startswith("redis_data:") for v in (init.get("volumes") or []))
 
 
+def test_clamav_caps_dropped_stays_root_with_drop_caps():
+    # R11-#97 data-tier — clamav stays root (its /init chowns the db volume and
+    # creates /run/clamav before clamd+freshclam drop to the clamav user via
+    # their own `--user=clamav`). Hardening = cap_drop ALL + no-new-privileges
+    # + the minimal cap_add empirically required by the real startup (validated
+    # on staging — fresh-volume clamd reached clamdcheck OK, daemons ran as the
+    # clamav user; dropping any one cap broke startup):
+    #   CHOWN+FOWNER  — /init chown -R + install -o/-m on /var/lib/clamav, /run/clamav
+    #   DAC_OVERRIDE  — clamd/freshclam open clamav-owned 0640 logfiles while root (pre-drop)
+    #   SETGID+SETUID — the --user=clamav privilege drop (setgid+initgroups+setuid)
+    svcs = COMPOSE["services"]
+    cv = svcs["clamav"]
+    assert cv.get("cap_drop") == ["ALL"], "clamav: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (cv.get("security_opt") or [])
+    assert sorted(cv.get("cap_add") or []) == [
+        "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"
+    ], "clamav needs exactly CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID for its root /init + --user drop"
+    assert "clamav-init" not in svcs, (
+        "no clamav-init — the image's root /init pre-owns the db volume itself"
+    )
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

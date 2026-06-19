@@ -396,6 +396,28 @@ services:
       CLAMAV_NO_MILTERD: "true"
     volumes:
       - clamav_db:/var/lib/clamav
+    # R11-#97 data-tier hardening — clamav stays root (its /init MUST run as
+    # root: chowns the db volume, creates /run/clamav, then clamd+freshclam
+    # drop to the clamav user via their own `--user=clamav`). cap_drop ALL +
+    # no-new-privileges removes ~all ambient power; the 5 caps below are the
+    # minimum the real startup needs — each empirically confirmed on staging
+    # (fresh-volume clamd reached `clamdcheck OK` in ~15s, both daemons running
+    # as the clamav user; dropping any one of them broke startup):
+    #   CHOWN        — /init: `chown -R clamav /var/lib/clamav` + `install -o
+    #                  clamav /run/clamav`
+    #   FOWNER       — /init: `install -m 775` chmods the clamav-owned /run/clamav
+    #   DAC_OVERRIDE — clamd/freshclam open their clamav-owned 0640 logfiles
+    #                  (/var/log/clamav/*.log shipped by the image) WHILE STILL
+    #                  ROOT, before the --user drop → root needs DAC_OVERRIDE to
+    #                  write a file it doesn't own. Without it both daemons die
+    #                  "Failed to open log file … Permission denied".
+    #   SETGID/SETUID— clamd+freshclam `--user=clamav`: setgid()+initgroups()+
+    #                  setuid() (initgroups→setgroups(2) needs CAP_SETGID even
+    #                  for root). Without them the privilege drop fails.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
