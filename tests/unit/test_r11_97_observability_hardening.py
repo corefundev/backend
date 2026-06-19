@@ -135,14 +135,17 @@ def test_alertmanager_hardened_no_init_needed():
 def test_backup_caps_dropped_stays_root():
     # R11-#97 — backup is the only genuine root service. dcron's crond binary
     # is mode 0700 root:root, so it CANNOT run as non-root ("crond: Permission
-    # denied", validated on staging 2026-06-19). Hardening is therefore Level 1:
-    # keep root but cap_drop ALL + no-new-privileges (crond + cron jobs need no
-    # caps → a capability-less root). No non-root drop, no backup-init.
+    # denied"). Hardening is Level 1: keep root, cap_drop ALL + no-new-privileges,
+    # but cap_add SETGID,SETUID — dcron's per-job ChangeUser (setgid+initgroups+
+    # setuid) needs them or it silently runs ZERO jobs (validated on staging).
+    # No non-root drop, no backup-init.
     svcs = COMPOSE["services"]
     bk = svcs["backup"]
     assert bk.get("cap_drop") == ["ALL"], "backup: cap_drop must be [ALL]"
     assert "no-new-privileges:true" in (bk.get("security_opt") or [])
-    assert not bk.get("cap_add"), "backup needs no caps back (crond+jobs need none)"
+    assert sorted(bk.get("cap_add") or []) == ["SETGID", "SETUID"], (
+        "backup needs SETGID+SETUID for dcron's per-job ChangeUser (else 0 jobs run)"
+    )
     assert "backup-init" not in svcs, "no backup-init — root writes its own volumes"
 
     # Dockerfile must NOT have dropped to nobody (dcron crond is root-only).

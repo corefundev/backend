@@ -105,10 +105,12 @@ RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
 #
 # R11-#97: backup stays root (cannot drop to nobody) — dcron's crond binary is
 # mode 0700 root:root (verified: `-rwx------ root`), so only root can exec it,
-# and it setuids per-crontab at runtime. Non-root crond fails with
-# "crond: Permission denied" (validated on staging 2026-06-19). The hardening
-# is therefore Level 1: keep root but drop ALL Linux capabilities +
-# no-new-privileges (see the backup service in docker-compose.yml) — crond +
-# the cron jobs (pg_dump/openssl/mc/lockbox curl) need no caps, so a
-# capability-less root is a real reduction without breaking backups.
+# and it does setgid()+initgroups()+setuid() (ChangeUser) per job at runtime.
+# Non-root crond fails with "crond: Permission denied". The hardening is
+# Level 1: keep root but cap_drop ALL + no-new-privileges + cap_add
+# SETGID,SETUID (see the backup service in docker-compose.yml). SETGID/SETUID
+# are REQUIRED — without them crond's per-job initgroups()/setgroups(2) fails
+# ("unable to ChangeUser") and ZERO cron jobs run, silently. Every other
+# privileged kernel op is still dropped; the jobs themselves (pg_dump/openssl/
+# mc/lockbox curl) need no further caps.
 CMD ["sh", "-c", "echo 'backup cron installed; warming pushgateway from S3…' && /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/backup_metric_warmup.sh; echo 'warmup done; starting crond' && exec crond -f -L /var/log/backup.log"]

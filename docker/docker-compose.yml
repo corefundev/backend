@@ -1417,14 +1417,18 @@ services:
       minio:    { condition: service_healthy }
     restart: unless-stopped
     # R11-#97: stays root — dcron's crond binary is mode 0700 root:root, so
-    # only root can exec it (non-root → "crond: Permission denied", validated
-    # on staging 2026-06-19). Hardening is Level 1: drop ALL caps +
-    # no-new-privileges while keeping root. crond + the cron jobs (pg_dump,
-    # openssl, mc, lockbox curl) need no Linux capability, so a capability-less
-    # root runs backups unchanged while losing every privileged kernel op.
-    # tini (init:true) handles setpgid. Verified live: crond runs as root under
-    # cap_drop ALL.
+    # only root can exec it (non-root → "crond: Permission denied"). Hardening
+    # is Level 1: cap_drop ALL + no-new-privileges, keeping root but dropping
+    # every privileged kernel op (CAP_SYS_ADMIN, CAP_NET_ADMIN, …). cap_add
+    # SETGID + SETUID is REQUIRED: to run each cron job dcron does
+    # setgid()+initgroups()+setuid() to the crontab owner (ChangeUser), and
+    # initgroups()→setgroups(2) needs CAP_SETGID even for root → without it
+    # crond logs "initgroups failed / unable to ChangeUser" and SILENTLY runs
+    # ZERO jobs (validated on staging 2026-06-20: cap_drop ALL alone → 0 fires;
+    # + SETGID,SETUID → fires). The jobs themselves (pg_dump/openssl/mc/lockbox)
+    # need no further caps. tini (init:true) handles setpgid.
     cap_drop: [ALL]
+    cap_add: [SETGID, SETUID]
     security_opt:
       - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
