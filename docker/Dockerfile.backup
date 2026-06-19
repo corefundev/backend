@@ -86,8 +86,17 @@ RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "0  5 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/mirror_prune.sh >> /var/log/mirror_prune.log 2>&1" \
         "*/5 * * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/archive_mode_check.sh >> /var/log/archive_mode_check.log 2>&1" \
         "20 5 * * * /scripts/rotate_backup_logs.sh >> /var/log/rotate.log 2>&1" \
-        | crontab - \
- && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log /var/log/mirror_prune.log /var/log/archive_mode_check.log /var/log/rotate.log
+        | crontab -u nobody - \
+ && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log /var/log/mirror_prune.log /var/log/archive_mode_check.log /var/log/rotate.log \
+ # R11-#97: run crond + all cron jobs as `nobody` (no root). The crontab is
+ # installed under nobody's spool (`crontab -u nobody`), so dcron — launched
+ # as nobody via USER below — processes only that crontab and runs each job as
+ # nobody (no setuid → no SETUID/SETGID cap needed). The log files crond (-L)
+ # and the jobs (>> /var/log/*.log) append to live in the image layer, so
+ # chown them at build time (a volume mount would shadow this, but /var/log is
+ # not a volume). The data volumes (/tmp/backup, /var/lib/backup-state) ARE
+ # named volumes → pre-owned by the backup-init one-shot in compose.
+ && chown nobody:nobody /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log /var/log/mirror_prune.log /var/log/archive_mode_check.log /var/log/rotate.log
 
 # Foreground crond — image PID 1.
 # Echo the "backup cron installed" sentinel so scripts/restart-backup
@@ -102,4 +111,9 @@ RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
 # though the actual backups were healthy in S3. Best-effort: a failed
 # warmup logs + continues to crond — monitoring resilience must NEVER
 # block the data path.
+#
+# R11-#97: drop to non-root. crond + every cron job + the startup warmup all
+# run as nobody. The SA key is mounted 0644 (world-readable) so the lockbox
+# bootstrap still works; jobs are network/file ops that need no Linux caps.
+USER nobody
 CMD ["sh", "-c", "echo 'backup cron installed; warming pushgateway from S3…' && /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/backup_metric_warmup.sh; echo 'warmup done; starting crond' && exec crond -f -L /var/log/backup.log"]

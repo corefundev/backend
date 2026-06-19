@@ -132,6 +132,36 @@ def test_alertmanager_hardened_no_init_needed():
     )
 
 
+def test_backup_runs_nonroot_with_init_volume_preown():
+    # R11-#97 — backup is the only genuine root service (crond). Hardened to
+    # run as USER nobody: cap_drop ALL + no-new-privileges, no cap_add (dcron
+    # launched as nobody runs nobody's crontab → no setuid; tini handles
+    # setpgid). backup-init pre-owns the data volumes (cap_add CHOWN).
+    svcs = COMPOSE["services"]
+    bk = svcs["backup"]
+    assert bk.get("cap_drop") == ["ALL"], "backup: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (bk.get("security_opt") or [])
+    assert not bk.get("cap_add"), "backup needs no caps back (non-root crond, same-user jobs)"
+    dep = (bk.get("depends_on") or {}).get("backup-init")
+    assert dep == {"condition": "service_completed_successfully"}, (
+        "backup must wait for backup-init to chown its volumes"
+    )
+
+    init = svcs.get("backup-init")
+    assert init is not None, "backup-init must exist to pre-own the data volumes"
+    assert init.get("cap_drop") == ["ALL"] and init.get("cap_add") == ["CHOWN"]
+    assert init.get("restart") == "no"
+    init_vols = {v.split(":")[0] for v in (init.get("volumes") or [])}
+    assert {"backups", "backup_state"} <= init_vols, (
+        "backup-init must mount both data volumes it chowns"
+    )
+
+    # Dockerfile must drop to nobody and install the crontab under nobody's spool.
+    df = (ROOT / "docker" / "Dockerfile.backup").read_text()
+    assert "USER nobody" in df, "Dockerfile.backup must drop to USER nobody"
+    assert "crontab -u nobody" in df, "crontab must be installed under nobody's spool"
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",
