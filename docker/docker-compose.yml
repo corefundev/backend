@@ -1091,6 +1091,16 @@ services:
     extra_hosts:
       - "postgres-replica.internal:${REPLICA_EXPORTER_HOST:-212.8.226.233}"
     restart: unless-stopped
+    # R11-#97: already runs as USER nobody (Dockerfile.prometheus) and the
+    # lockbox bootstrap + /run/metrics_token write happen as nobody too —
+    # needs zero Linux caps (TSDB writes to a volume it owns; port 9090 is
+    # unprivileged). No *-init needed (unlike pushgateway): the custom image
+    # does `chown -R nobody:nobody /prometheus`, so a fresh named volume
+    # inherits nobody ownership via Docker's copy-on-first-mount. Verified
+    # live: /prometheus is 65534:65534 on prod + staging.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # R5-M10 — bound docker json-log file size to avoid filling host disk on chatty service.
     logging: *log-rotation
     healthcheck:
