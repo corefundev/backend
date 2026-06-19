@@ -156,6 +156,33 @@ def test_backup_caps_dropped_stays_root():
     assert "crontab -u nobody" not in df, "crontab stays under root's spool"
 
 
+def test_redis_runs_nonroot_with_init_volume_preown():
+    # R11-#97 data-tier — redis dropped from root to user 999:1000 with
+    # cap_drop ALL + no-new-privileges, NO cap_add (redis-server on the
+    # unprivileged 6379, writes only its own /data → no caps). redis-init
+    # pre-owns the volume to 999:1000 (existing dump.rdb was root-owned because
+    # redis used to run as root) so the cap-dropped redis can write its RDB.
+    svcs = COMPOSE["services"]
+    r = svcs["redis"]
+    assert str(r.get("user")) == "999:1000", "redis must run as redis (999:1000)"
+    assert r.get("cap_drop") == ["ALL"], "redis: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (r.get("security_opt") or [])
+    assert not r.get("cap_add"), "redis needs no caps (non-root, unprivileged port, own volume)"
+    dep = (r.get("depends_on") or {}).get("redis-init")
+    assert dep == {"condition": "service_completed_successfully"}, (
+        "redis must wait for redis-init to chown its volume"
+    )
+
+    init = svcs.get("redis-init")
+    assert init is not None, "redis-init must exist to pre-own redis_data"
+    assert init.get("cap_drop") == ["ALL"] and init.get("cap_add") == ["CHOWN"]
+    assert init.get("restart") == "no"
+    assert any("999:1000" in str(x) for x in (init.get("entrypoint") or [])), (
+        "redis-init must chown to redis 999:1000"
+    )
+    assert any(v.startswith("redis_data:") for v in (init.get("volumes") or []))
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

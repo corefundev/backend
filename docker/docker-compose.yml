@@ -426,11 +426,46 @@ services:
   # When empty, falls back to no-auth (legacy behaviour) but logs a
   # loud warning so ops sees the gap. Production overrides REDIS_PASSWORD
   # via Lockbox (key listed in LOCKBOX_ALLOWED_KEYS).
+  # R11-#97 — one-shot: pre-own redis_data as redis (999:1000) before the
+  # now-non-root redis starts. Historically redis ran as ROOT (the compose
+  # `command:` wraps redis-server in `sh -c`, so $1!='redis-server' and the
+  # image entrypoint's setpriv-to-redis drop never triggered), so the existing
+  # dump.rdb is root:root mode 0600. Switching redis to user 999 under
+  # cap_drop ALL (no CAP_DAC_OVERRIDE) means it could not overwrite that
+  # root-owned RDB → BGSAVE would fail silently and persistence would break.
+  # This init chowns the volume so redis-999 owns its RDB. Same pattern as
+  # pushgateway-init. (Fresh volumes already inherit redis:redis from the
+  # image's /data, but existing prod/staging volumes carry root-owned files.)
+  redis-init:
+    image: redis:7.2-alpine@sha256:dfa18828cbc07b3ae6a95ec7343f6c214fdee2d836197b4be8e9904420762cd8
+    entrypoint: ["sh", "-c", "chown -R 999:1000 /data"]
+    volumes:
+      - redis_data:/data
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *log-rotation
+
   redis:
     # R4-20 digest-pinned 2026-05-17
     image: redis:7.2-alpine@sha256:dfa18828cbc07b3ae6a95ec7343f6c214fdee2d836197b4be8e9904420762cd8
     mem_limit: 256m
     cpus: 0.5
+    # R11-#97 — run as the redis user (999:1000) instead of root, with ALL caps
+    # dropped + no-new-privileges. redis-server binds the unprivileged 6379 and
+    # writes only its own (now redis-owned) /data, so it needs zero Linux caps.
+    # This also fixes the pre-existing "redis runs as root" gap (the sh -c
+    # command wrapper defeated the image entrypoint's auto-drop). Waits for
+    # redis-init to chown the volume first.
+    user: "999:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      redis-init:
+        condition: service_completed_successfully
     ports:
       - "6379:6379"
     volumes:
