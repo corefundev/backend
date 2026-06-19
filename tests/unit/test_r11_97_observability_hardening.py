@@ -117,6 +117,21 @@ def test_prometheus_hardened_no_init_needed():
     )
 
 
+def test_alertmanager_hardened_no_init_needed():
+    # R11-#97 — like prometheus: already USER nobody (Dockerfile.alertmanager
+    # also `chown -R nobody:nobody /alertmanager`), so a fresh alertmanager_data
+    # volume inherits nobody ownership via Docker copy-on-first-mount → no *-init.
+    # cap_drop ALL + no-new-privileges, no cap_add.
+    svcs = COMPOSE["services"]
+    svc = svcs["alertmanager"]
+    assert svc.get("cap_drop") == ["ALL"], "alertmanager: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (svc.get("security_opt") or [])
+    assert not svc.get("cap_add"), "alertmanager needs no caps back"
+    assert "alertmanager-init" not in svcs, (
+        "alertmanager needs no *-init — the image pre-owns /alertmanager"
+    )
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",
