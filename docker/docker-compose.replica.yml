@@ -94,16 +94,15 @@ services:
     restart: unless-stopped
     environment:
       DATA_SOURCE_NAME: "postgresql://replicator:${REPLICATION_PASSWORD}@postgres-replica:5432/sku_forecasting?sslmode=disable"
-    # R5-13 (2026-05-17) — `pg_replication_lag_seconds` is NOT a built-in
-    # postgres_exporter metric. The `PgReplicaLagHigh` rule (in
-    # alerts.production.yml as of 2026-05-27) has been referring to a
-    # phantom metric (silent-alert pattern same as RqWorkerSilent).
-    # Mount a custom queries file and point the exporter at it so the
-    # replication-lag series actually exists.
-    command:
-      - "--extend.query-path=/etc/postgres_exporter/queries.yaml"
-    volumes:
-      - ./postgres-exporter-queries.yaml:/etc/postgres_exporter/queries.yaml:ro
+    # #102 (2026-06-21) — `pg_replication_lag_seconds` + `pg_replication_is_replica`
+    # ARE built-in collector metrics in postgres_exporter v0.15.0 (verified live:
+    # the series emit with the built-in HELP "Replication lag behind master in
+    # seconds" even with no custom queries). The earlier R5-13 custom queries
+    # file + `--extend.query-path` flag were dead config — v0.15.0's deprecated
+    # `--extend.query-path` silently emits NO custom-query metrics anyway (same
+    # finding as R11-#80b on the primary). Removed the flag, the volume mount and
+    # docker/postgres-exporter-queries.yaml; the PgReplicaLagHigh alert keeps
+    # working off the built-in series.
     depends_on:
       postgres-replica:
         condition: service_healthy
@@ -112,8 +111,13 @@ services:
     # IP to PRIMARY_CIDR only — anyone else gets DROP.
     ports:
       - "9187:9187"
+    # #102 — probe the actual /metrics endpoint (verifies the exporter is really
+    # serving, not just that the binary exists). The previous test ran
+    # `/postgres_exporter --version`, but v0.15.0 ships the binary at
+    # `/bin/postgres_exporter`, so the old path failed `stat: no such file` and
+    # the container sat "unhealthy" for 6 weeks while scraping fine.
     healthcheck:
-      test: ["CMD", "/postgres_exporter", "--version"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/metrics"]
       interval: 30s
       timeout: 5s
       retries: 3

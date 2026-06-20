@@ -73,12 +73,11 @@ groups:
         #
         # R5-13 (2026-05-17) — added `or absent()` defence (the
         # phantom-metric pattern that bit RqWorkerSilent + Container-
-        # OOMKilled). `pg_replication_lag_seconds` is not a built-in
-        # metric; it comes from the custom queries file mounted into
-        # postgres-exporter (see docker/postgres-exporter-queries.yaml +
-        # docker-compose.replica.yml). If the queries file is not
-        # mounted (early-bootstrapping replica VPS, deploy regression)
-        # the absent() branch fires and ops sees the gap.
+        # OOMKilled). `pg_replication_lag_seconds` is a BUILT-IN
+        # collector metric in postgres_exporter v0.15.0 (#102, 2026-06-21
+        # — verified live; the earlier custom queries.yaml was dead config
+        # and was removed). The absent() branch still guards against the
+        # replica-side exporter being down / unscrapeable entirely.
         expr: |
           pg_replication_lag_seconds{job="postgres-replica"} > 60
             or absent(pg_replication_lag_seconds{job="postgres-replica"})
@@ -88,7 +87,7 @@ groups:
           team:     forecasting
         annotations:
           summary:     "Replica is {{ $value | printf \"%.0f\" }}s behind primary (or exporter silent)"
-          description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
+          description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is down or unscrapeable (built-in pg_replication_lag_seconds missing). Otherwise: network or WAL apply bottleneck."
 
       - alert: PgReplicaWalReceiverDown
         # Replica disconnected from primary's WAL stream entirely.

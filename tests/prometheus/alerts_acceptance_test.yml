@@ -792,10 +792,10 @@ tests:
           - exp_labels: {job: "postgres-replica", severity: warning, team: forecasting}
             exp_annotations:
               summary: "Replica is 120s behind primary (or exporter silent)"
-              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
+              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is down or unscrapeable (built-in pg_replication_lag_seconds missing). Otherwise: network or WAL apply bottleneck."
 
   - interval: 1m
-    name: "PgReplicaLagHigh fires when lag metric absent (exporter missing queries.yaml)"
+    name: "PgReplicaLagHigh fires when lag metric absent (replica exporter down/unscrapeable)"
     input_series: []
     alert_rule_test:
       - eval_time: 12m
@@ -805,7 +805,7 @@ tests:
           - exp_labels: {job: "postgres-replica", severity: warning, team: forecasting}
             exp_annotations:
               summary: "Replica is 1s behind primary (or exporter silent)"
-              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is missing the custom queries.yaml mount — see docker/postgres-exporter-queries.yaml. Otherwise: network or WAL apply bottleneck."
+              description: "Check pg_stat_wal_receiver on replica + pg_stat_replication on primary. If `absent`, the replica-side postgres-exporter is down or unscrapeable (built-in pg_replication_lag_seconds missing). Otherwise: network or WAL apply bottleneck."
 
   - interval: 1m
     name: "PgReplicaWalReceiverDown fires when pg_up=0"
