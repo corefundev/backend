@@ -205,6 +205,33 @@ def test_clamav_caps_dropped_stays_root_with_drop_caps():
     )
 
 
+def test_postgres_caps_dropped_stays_root_with_drop_caps():
+    # R11-#97 data-tier — postgres stays root (its entrypoint chain edits
+    # pg_hba + chowns/inits PGDATA, then su-exec/gosu drops to the postgres
+    # user). Hardening = cap_drop ALL + no-new-privileges + the minimal cap_add
+    # the real startup needs, determined by an empirical cap-subtraction matrix
+    # on staging (throwaway docker-postgres:custom, fresh-initdb + restart paths;
+    # dropping any of DAC_OVERRIDE/SETGID/SETUID exits the container):
+    #   DAC_OVERRIDE  — root traverses the 0700 postgres-owned PGDATA
+    #   SETGID+SETUID — the su-exec/gosu drop to the postgres user
+    #   CHOWN+FOWNER  — preserve the official entrypoint's boot-time PGDATA
+    #                   ownership/perms self-heal (DR-restore safety net)
+    svcs = COMPOSE["services"]
+    pg = svcs["postgres"]
+    assert pg.get("cap_drop") == ["ALL"], "postgres: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (pg.get("security_opt") or [])
+    assert sorted(pg.get("cap_add") or []) == [
+        "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"
+    ], "postgres needs exactly CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID (root entrypoint + gosu drop)"
+    assert "postgres-init" not in svcs, (
+        "no postgres-init — the root entrypoint chowns/inits PGDATA itself"
+    )
+    # Volume must still be mounted (the cap set is what lets root reach it).
+    assert any(v.startswith("postgres_data:") for v in (pg.get("volumes") or [])), (
+        "postgres must keep its data volume"
+    )
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

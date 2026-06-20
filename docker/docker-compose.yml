@@ -560,6 +560,34 @@ services:
       POSTGRES_DB: sku_forecasting
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # R11-#97 data-tier hardening — postgres stays root (its entrypoint chain
+    # MUST start as root: postgres_entrypoint.sh edits pg_hba, the official
+    # docker-entrypoint.sh chowns/inits PGDATA, then both drop to the postgres
+    # user via su-exec/gosu). cap_drop ALL + no-new-privileges removes ~34
+    # ambient caps (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, MKNOD, NET_RAW, …); the
+    # 5 below are the minimum the startup needs. Each was determined by an
+    # empirical cap-subtraction matrix on staging (throwaway containers + real
+    # docker-postgres:custom image, fresh-initdb AND restart-on-existing paths):
+    #   DAC_OVERRIDE — root must traverse the 0700 postgres-owned PGDATA during
+    #                  the entrypoint's `find $PGDATA \! -user postgres` /
+    #                  pg_hba edit (drop it → `find: …/data: Permission denied`,
+    #                  container EXITS).
+    #   SETGID/SETUID— su-exec/gosu drop to the postgres user: setgid()+
+    #                  setgroups()+setuid() (drop either → `failed switching to
+    #                  'postgres': operation not permitted`, container EXITS).
+    #   CHOWN/FOWNER — the official entrypoint self-heals PGDATA ownership/perms
+    #                  every boot (`find \! -user postgres -exec chown postgres`
+    #                  + `chmod 700 $PGDATA`). A pristine volume doesn't exercise
+    #                  them (verified staging+prod: 0 non-postgres files, PGDATA
+    #                  already 0700), but we keep them so a DR restore /
+    #                  base_backup-restore / manual intervention that lays down a
+    #                  mis-owned file self-heals on the next start instead of
+    #                  silently wedging — marginal added privilege since SETUID
+    #                  is already required for the gosu drop.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     logging: *log-rotation   # R5-M10
     # 2026-05-30 — STABLE IP. pgbouncer's c-ares resolver wedges when
