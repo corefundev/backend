@@ -1,0 +1,11 @@
+---
+# Fires ONLY when daemon.json actually changed (fresh host / drift), never on
+# a steady-state no-op run. A storage-driver change restarts every container
+# on the host — the migration is volume-preserving (named volumes are
+# driver-independent), but run it in a maintenance window and force-recreate
+# cAdvisor afterwards (it is outside the app CD recreate scope).
+- name: Restart docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  become: true
