@@ -44,6 +44,32 @@ def test_grafana_entrypoint_reowns_data_volume_before_drop():
     assert "chown -R 472:472 /var/lib/grafana" in text
 
 
+def test_grafana_entrypoint_chown_guard_is_recursive_not_dir_owner():
+    # #104 — the chown -R migration must be guarded by a RECURSIVE check
+    # (any non-grafana-owned entry), not by the top-dir owner. The old
+    # `stat -c %u /var/lib/grafana != 472` proxy let a 472 dir with a
+    # root-owned grafana.db inside skip the chown → su-exec to 472 crash
+    # loop (staging: 12206 restarts). busybox find has no -uid/-quit, so
+    # the guard uses `find … \! -user grafana | head`.
+    text = (ROOT / "scripts" / "grafana_entrypoint.sh").read_text()
+    code_lines = [
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    ]
+    # The dir-owner proxy guard must be gone from CODE (a history comment
+    # mentioning it is fine — check non-comment lines only).
+    assert not any("stat -c %u /var/lib/grafana" in ln for ln in code_lines), (
+        "the dir-owner proxy guard must be gone (#104) — it misses "
+        "root-owned files under a 472 dir"
+    )
+    guard_lines = [
+        ln for ln in code_lines if "find /var/lib/grafana" in ln
+    ]
+    assert guard_lines, "chown guard must use `find /var/lib/grafana …` (#104)"
+    assert any(r"\! -user grafana" in ln for ln in guard_lines), (
+        "guard must detect ANY non-grafana-owned entry (find \\! -user grafana)"
+    )
+
+
 def test_mlflow_entrypoint_drops_to_mlflow_user():
     text = (ROOT / "scripts" / "mlflow_entrypoint.sh").read_text()
     assert any(

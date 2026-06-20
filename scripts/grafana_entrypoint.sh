@@ -60,10 +60,20 @@ fi
 # R12-#86 — the root phase ends here: root was only needed so
 # lockbox_bootstrap.sh could read the bind-mounted SA key. Re-own the
 # data volume (pre-#86 boots wrote it as root) and drop to grafana's
-# upstream UID/GID before exec'ing the server. The owner check keeps
-# the chown -R a one-time migration cost, not an every-boot tax.
+# upstream UID/GID before exec'ing the server.
+#
+# #104 — the guard must check that EVERY entry is grafana-owned, NOT just
+# the top dir. The old `stat -c %u /var/lib/grafana != 472` check used the
+# directory owner as a proxy for "already migrated", but the dir can be 472
+# while a FILE inside (grafana.db from a pre-#86 root boot) is still
+# root-owned → su-exec to 472 then can't open it → `unable to open database
+# file: permission denied` crash loop (staging hit 12206 restarts). `find
+# … \! -user grafana | head -1` returns non-empty iff any entry isn't
+# grafana-owned, so the chown -R stays a one-time migration (once everything
+# is 472 it matches nothing and skips). busybox find has no -uid/-quit, so
+# use -user + head -1.
 if [ "$(id -u)" = "0" ]; then
-    if [ "$(stat -c %u /var/lib/grafana 2>/dev/null || echo 472)" != "472" ]; then
+    if [ -n "$(find /var/lib/grafana \! -user grafana 2>/dev/null | head -1)" ]; then
         chown -R 472:472 /var/lib/grafana
     fi
     exec su-exec 472:472 /run.sh "$@"
