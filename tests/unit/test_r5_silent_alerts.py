@@ -21,19 +21,28 @@ alerts silently never fired despite looking deployed.
          bug and, post-removal, only "passed" by substring-matching the
          explanatory comment in the compose block.
 
-  R5-13: `PgReplicaLagHigh` referenced `pg_replication_lag_seconds`,
-         which standard `prometheuscommunity/postgres_exporter` does
-         NOT emit by default. Fix: ship `docker/postgres-exporter-
-         queries.yaml` with a `pg_replication_lag` custom query and
-         mount it into the replica-VPS exporter via
-         `--extend.query-path`. Alert also gains `or absent(...)`
-         defence (R5-12 lesson — phantom-metric pattern).
+  R5-13 (CORRECTED by #102, 2026-06-21): `PgReplicaLagHigh` references
+         `pg_replication_lag_seconds`. R5-13 believed this was not
+         emitted by default and shipped a custom queries.yaml +
+         `--extend.query-path`. That was wrong twice: (a) the metric is
+         a BUILT-IN collector metric in postgres_exporter v0.15.0
+         (verified live — emits with HELP "Replication lag behind master
+         in seconds"), and (b) v0.15.0's deprecated `--extend.query-path`
+         silently emits NO custom-query metrics anyway (same R11-#80b
+         finding). So the queries.yaml + flag + mount were dead config —
+         removed in #102. The `or absent(...)` defence stays (it guards
+         the exporter being down/unscrapeable). #102 also fixed the
+         exporter healthcheck (it probed `/postgres_exporter`, but
+         v0.15.0 ships the binary at `/bin/postgres_exporter`, so the
+         container sat "unhealthy" 6 weeks while scraping fine).
 
 Source-level pins so these don't regress.
 """
 from __future__ import annotations
 
 from pathlib import Path
+
+import yaml
 
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -48,58 +57,56 @@ _BACKEND = Path(__file__).resolve().parents[2]
 
 # ── R5-13: postgres-exporter custom queries ──────────────────────────────
 
-def test_postgres_exporter_queries_file_exists():
-    """The custom queries file must exist in the repo so the replica
-    VPS can mount it."""
+def test_postgres_exporter_queries_file_removed():
+    """#102 — the R5-13 custom queries file was dead config (the metric is
+    built-in to v0.15.0 and --extend.query-path is a no-op). It must NOT
+    exist, so it can't be re-mounted as a phantom dependency."""
     queries = _BACKEND / "docker" / "postgres-exporter-queries.yaml"
-    assert queries.exists(), (
-        "docker/postgres-exporter-queries.yaml must exist (R5-13)"
-    )
-    text = queries.read_text()
-    # The custom query must produce `pg_replication_lag_seconds` —
-    # naming = `pg_<query_name>_<column>`, so query=replication_lag +
-    # column=seconds.
-    assert "pg_replication_lag:" in text, (
-        "queries file must define `pg_replication_lag` query"
-    )
-    assert "seconds:" in text, (
-        "queries file must produce a `seconds` column → "
-        "pg_replication_lag_seconds metric"
-    )
-    # The query body must use the canonical replica-lag expression.
-    assert "pg_last_xact_replay_timestamp" in text, (
-        "query must use pg_last_xact_replay_timestamp() — the standard "
-        "replica-side WAL apply lag function"
-    )
-    assert "pg_is_in_recovery" in text, (
-        "query must gate on pg_is_in_recovery() so primary returns 0 "
-        "instead of NULL"
+    assert not queries.exists(), (
+        "docker/postgres-exporter-queries.yaml must be removed (#102 — dead "
+        "config; pg_replication_lag_seconds is a built-in v0.15.0 metric)"
     )
 
 
-def test_compose_replica_mounts_custom_queries():
-    """docker-compose.replica.yml's postgres-exporter must mount the
-    queries.yaml and pass --extend.query-path."""
-    text = (_BACKEND / "docker" / "docker-compose.replica.yml").read_text()
-    pe_idx = text.find("postgres-exporter:")
-    assert pe_idx > 0
-    # Find end of postgres-exporter block.
-    next_svc = text.find("\n  ", pe_idx + 20)
-    while next_svc > 0:
-        # next-service heading is `  <name>:` followed by newline; not a sub-field.
-        if text[next_svc + 1:next_svc + 4] == "  " or text[next_svc + 1] != " ":
-            break
-        nxt = text.find("\n  ", next_svc + 1)
-        if nxt == next_svc:
-            break
-        next_svc = nxt
-    block = text[pe_idx:next_svc] if next_svc > pe_idx else text[pe_idx:pe_idx + 3000]
-
-    assert "--extend.query-path=/etc/postgres_exporter/queries.yaml" in block, (
-        "postgres-exporter must pass --extend.query-path (R5-13)"
+def _replica_exporter_svc() -> dict:
+    # Parse the YAML and read the service mapping — NOT a raw-text substring
+    # search (which would false-match the explanatory comments that still
+    # mention the removed flag/file). See feedback_config_test_parse_not_substring.
+    compose = yaml.safe_load(
+        (_BACKEND / "docker" / "docker-compose.replica.yml").read_text()
     )
-    assert "./postgres-exporter-queries.yaml:/etc/postgres_exporter/queries.yaml:ro" in block, (
-        "compose must mount the queries file at /etc/postgres_exporter/queries.yaml"
+    return compose["services"]["postgres-exporter"]
+
+
+def test_compose_replica_exporter_has_no_dead_queries_config():
+    """#102 — the replica exporter must NOT pass the no-op
+    --extend.query-path flag nor mount the removed queries file."""
+    svc = _replica_exporter_svc()
+    cmd = svc.get("command") or []
+    cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    assert "--extend.query-path" not in cmd_str, (
+        "postgres-exporter command must NOT pass --extend.query-path (#102 — "
+        "no-op in v0.15.0, removed dead config)"
+    )
+    vols = svc.get("volumes") or []
+    assert not any("postgres-exporter-queries.yaml" in str(v) for v in vols), (
+        "compose must NOT mount the removed queries file (#102)"
+    )
+
+
+def test_compose_replica_exporter_healthcheck_uses_correct_binary_path():
+    """#102 — the exporter healthcheck must not probe the old
+    `/postgres_exporter` path (v0.15.0 ships the binary at
+    `/bin/postgres_exporter`); that bug left it "unhealthy" 6 weeks. The
+    fixed probe hits the /metrics endpoint, which verifies real serving."""
+    svc = _replica_exporter_svc()
+    test = svc.get("healthcheck", {}).get("test") or []
+    test_str = " ".join(test) if isinstance(test, list) else str(test)
+    assert "/postgres_exporter" not in test_str, (
+        "healthcheck must NOT probe the nonexistent /postgres_exporter path (#102)"
+    )
+    assert "9187/metrics" in test_str, (
+        "healthcheck should probe the /metrics endpoint (verifies real serving)"
     )
 
 
