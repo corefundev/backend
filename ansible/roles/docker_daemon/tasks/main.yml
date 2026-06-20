@@ -1,0 +1,24 @@
+---
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Render /etc/docker/daemon.json
+  # Compact JSON (no inter-token spaces) + a single trailing newline to match
+  # the bytes already on prod+staging EXACTLY, so re-running on a correctly
+  # configured host is a true no-op — `changed=0`, handler not fired, docker
+  # NOT bounced. Only a fresh/reinstalled host (missing or drifted file)
+  # registers a change and triggers the one-time restart.
+  ansible.builtin.copy:
+    content: "{{ docker_daemon_config | to_json(separators=[',', ':']) }}\n"
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart docker

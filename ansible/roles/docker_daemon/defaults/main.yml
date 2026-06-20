@@ -1,0 +1,18 @@
+---
+# Docker daemon configuration managed on backend hosts.
+#
+# Pinned to overlay2 + containerd-snapshotter:false: cAdvisor v0.49.1 cannot
+# read the Docker 29 default containerd snapshotter layout and silently emits
+# ZERO container_* metrics regardless of `privileged` (google/cadvisor#3860,
+# R11-M12). overlay2 is the classic graphdriver cAdvisor understands.
+# Full rationale + the volume-preserving migration/rollback procedure:
+# docs/runbook/docker-storage-driver-overlay2.md.
+#
+# Edit this dict to change managed daemon settings; the role renders it to
+# /etc/docker/daemon.json. Keys are emitted in this order — keep
+# `features` before `storage-driver` so the rendered bytes match what is
+# already deployed (a re-order would look like a change and bounce docker).
+docker_daemon_config:
+  features:
+    containerd-snapshotter: false
+  storage-driver: overlay2

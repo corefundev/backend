@@ -1,0 +1,14 @@
+---
+# Pin the Docker storage driver to overlay2 on backend hosts (prod + staging).
+# Idempotent: a no-op on hosts already pinned; applies the pin + bounces docker
+# only on a fresh/reinstalled/drifted host.
+#
+# Usage (ALWAYS dry-run first):
+#   staging:  ansible-playbook playbooks/docker-daemon.yml -l staging --check --diff
+#   prod:     ansible-playbook playbooks/docker-daemon.yml -l prod    --check --diff --ask-become-pass
+# Drop --check to apply (prod also needs --ask-become-pass — no passwordless sudo).
+- name: Pin Docker storage driver to overlay2 (backend hosts)
+  hosts: backend
+  gather_facts: false
+  roles:
+    - docker_daemon
