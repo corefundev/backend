@@ -232,6 +232,51 @@ def test_postgres_caps_dropped_stays_root_with_drop_caps():
     )
 
 
+def test_minio_runs_nonroot_with_init_volume_preown():
+    # R11-#97 data-tier (dev-profile) — minio dropped from root to 1000:1000
+    # with cap_drop ALL + no-new-privileges, NO cap_add (serves the
+    # unprivileged 9000/9001 and writes only its own /data → no caps). The
+    # minio image runs as root with a root-owned /data, so minio-data-init
+    # pre-owns the volume to 1000:1000 (verified on staging: a non-root minio
+    # on a root-owned volume EXITS "file access denied"). All three services
+    # stay dev-profile-gated (never on prod).
+    svcs = COMPOSE["services"]
+    m = svcs["minio"]
+    assert m.get("profiles") == ["dev"], "minio must stay dev-profile-gated"
+    assert str(m.get("user")) == "1000:1000", "minio must run non-root (1000:1000)"
+    assert m.get("cap_drop") == ["ALL"], "minio: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (m.get("security_opt") or [])
+    assert not m.get("cap_add"), "minio needs no caps (non-root, unprivileged ports, own volume)"
+    dep = (m.get("depends_on") or {}).get("minio-data-init")
+    assert dep == {"condition": "service_completed_successfully"}, (
+        "minio must wait for minio-data-init to chown its volume"
+    )
+
+    init = svcs.get("minio-data-init")
+    assert init is not None, "minio-data-init must exist to pre-own minio_data"
+    assert init.get("profiles") == ["dev"]
+    assert init.get("cap_drop") == ["ALL"] and init.get("cap_add") == ["CHOWN"]
+    assert init.get("restart") == "no"
+    assert any("1000:1000" in str(x) for x in (init.get("entrypoint") or [])), (
+        "minio-data-init must chown to 1000:1000"
+    )
+    assert any(v.startswith("minio_data:") for v in (init.get("volumes") or []))
+
+    # The mc bucket-creator one-shot is also hardened (network + own config
+    # only → zero caps).
+    mi = svcs["minio-init"]
+    assert mi.get("cap_drop") == ["ALL"], "minio-init: cap_drop must be [ALL]"
+    assert "no-new-privileges:true" in (mi.get("security_opt") or [])
+    assert not mi.get("cap_add"), "minio-init needs no caps (mc network + own config)"
+    # mc writes $HOME/.mc; the image's /root is 0550 and the cap-dropped
+    # container has no DAC_OVERRIDE to write it, so HOME must point at the
+    # world-writable /tmp or mc fails "mkdir /root/.mc: permission denied" and
+    # silently creates NO buckets (verified on staging).
+    assert (mi.get("environment") or {}).get("HOME") == "/tmp", (
+        "minio-init must set HOME=/tmp so cap-dropped mc can write its config"
+    )
+
+
 def test_already_hardened_services_unchanged():
     # Guard the previously-hardened set so this sweep doesn't regress them.
     for name in ("api", "worker", "scan-worker", "process-worker", "migrate",

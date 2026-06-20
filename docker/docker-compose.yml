@@ -708,9 +708,42 @@ services:
   # starts when explicitly requested via `--profile dev`. Prod CD
   # never enables that profile, so prod can no longer accidentally
   # boot MinIO via a stray `compose up`.
+  # R11-#97 data-tier hardening — pre-own the minio_data volume to the
+  # non-root uid 1000 before minio (which now runs as 1000:1000 under
+  # cap_drop ALL) starts. The minio image runs as root by default and its
+  # /data is root-owned, so a fresh volume is root-owned and a cap-dropped
+  # non-root minio can't write it (verified on staging: non-root minio on a
+  # root-owned volume EXITS "file access denied" on /data/.minio.sys/tmp).
+  # Same reusable one-shot pattern as redis-init / pushgateway-init.
+  minio-data-init:
+    profiles: ["dev"]
+    image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    entrypoint: ["sh", "-c", "chown -R 1000:1000 /data"]
+    volumes:
+      - minio_data:/data
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *log-rotation
+
   minio:
     profiles: ["dev"]
     image: minio/minio:RELEASE.2024-08-29T01-40-52Z@sha256:0bd79595dbcf155782860716abf4cf79d5ee32a9508b60fa1a88793bbe55b245
+    # R11-#97 — drop from root to a non-root uid with ALL caps removed +
+    # no-new-privileges. minio serves only the unprivileged 9000/9001 and
+    # writes only its own (now 1000-owned) /data, so it needs ZERO Linux caps
+    # (verified on staging: non-root minio on a pre-owned volume reaches
+    # health + real PUT/GET with cap_drop ALL and no cap_add). Waits for
+    # minio-data-init to chown the volume first.
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      minio-data-init:
+        condition: service_completed_successfully
     ports:
       - "9000:9000"
       - "9001:9001"       # MinIO Console UI
@@ -735,6 +768,17 @@ services:
   minio-init:
     profiles: ["dev"]
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    # R11-#97 — one-shot mc that only talks to minio over the network and
+    # writes its own mc config: needs ZERO Linux caps, so cap_drop ALL +
+    # no-new-privileges with no cap_add. NOTE: the mc image's default config
+    # dir is $HOME/.mc = /root/.mc, but /root is mode 0550 (no write bit even
+    # for root); the image relied on root's CAP_DAC_OVERRIDE to write it, which
+    # cap_drop ALL removes (mc fails "mkdir /root/.mc: permission denied" and
+    # silently creates NO buckets — verified on staging). Point HOME at the
+    # world-writable /tmp so mc writes /tmp/.mc with zero caps.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       minio: { condition: service_healthy }
     entrypoint: >
@@ -749,6 +793,10 @@ services:
         echo 'Buckets ready';
       "
     environment:
+      # mc writes its config to $HOME/.mc; redirect HOME to the world-writable
+      # /tmp so the cap-dropped (no DAC_OVERRIDE) container can write it — see
+      # the cap_drop note above.
+      HOME: /tmp
       MINIO_USER: ${MINIO_USER:-minioadmin}
       MINIO_PASSWORD: ${MINIO_PASSWORD:-minioadmin}
       S3_BUCKET: ${S3_BUCKET:-sku-forecasting}
