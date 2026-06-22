@@ -33,8 +33,8 @@ src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline
 src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
 src/pipeline/train.py:126  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :134, -8 lines after #96 dropped user_set_* booleans, 2026-06-17)
 src/pipeline/train.py:164  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :167, -3 lines after #96, 2026-06-17)
-src/pipeline/inference_utils.py:195  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected)
-src/pipeline/inference_utils.py:333  pre-R9 baseline (was :277, +R12-#91 shift); triage in R10 — recursive forecast fallback
+src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
+src/pipeline/inference_utils.py:326  pre-R9 baseline (was :277, +R12-#91 shift, -7 R13-7); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
 src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
@@ -69,6 +69,6 @@ src/api/routers/training.py:294  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:323  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18)
 src/api/routers/training.py:336  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
-src/pipeline/inference_utils.py:407  R11-#59 (was :351, +R12-#91 shift) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:463  R11-#59 (was :406, +R12-#91 shift) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
+src/pipeline/inference_utils.py:400  R11-#59 (was :351, +R12-#91 shift, -7 R13-7) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
+src/pipeline/inference_utils.py:456  R11-#59 (was :406, +R12-#91 shift, -7 R13-7) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
 

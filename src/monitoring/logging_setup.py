@@ -26,10 +26,7 @@ import contextvars
 import logging
 import os
 import sys
-import time
 import uuid
-from contextlib import contextmanager
-from typing import Any
 
 _CONFIGURED = False
 
@@ -148,60 +145,3 @@ def configure_structured_logging(level: str | None = None) -> None:
 def get_logger(name: str) -> logging.Logger:
     """Return a configured logger. Use instead of logging.getLogger() for consistency."""
     return logging.getLogger(name)
-
-
-@contextmanager
-def log_duration(logger: logging.Logger, operation: str, **extra_fields: Any):
-    """
-    Context manager that logs start and end of an operation with duration.
-
-    Usage:
-        with log_duration(logger, "feature_engineering", client_id="acme", n_rows=5000):
-            df = build_features(df, config)
-    """
-    t0 = time.perf_counter()
-    logger.debug(f"{operation} started", extra=extra_fields)
-    try:
-        yield
-        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-        logger.info(
-            f"{operation} completed",
-            extra={**extra_fields, "duration_ms": elapsed_ms, "status": "ok"},
-        )
-    except Exception as e:
-        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-        logger.error(
-            f"{operation} failed",
-            extra={**extra_fields, "duration_ms": elapsed_ms, "status": "error",
-                   "error": str(e)},
-        )
-        raise
-
-
-class RequestLogger:
-    """
-    Middleware helper: logs every API request with standard fields.
-    Used in FastAPI middleware.
-    """
-
-    def __init__(self, logger: logging.Logger):
-        self._log = logger
-
-    def log_request(
-        self,
-        method:     str,
-        path:       str,
-        status:     int,
-        duration_ms: float,
-        client_id:  str = "unknown",
-        **extra,
-    ) -> None:
-        level = logging.WARNING if status >= 400 else logging.INFO
-        self._log.log(level, "request", extra={
-            "http_method":  method,
-            "http_path":    path,
-            "http_status":  status,
-            "duration_ms":  round(duration_ms, 1),
-            "client_id":    client_id,
-            **extra,
-        })

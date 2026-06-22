@@ -13,7 +13,6 @@ import logging
 import pickle
 import re
 from functools import lru_cache
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -54,12 +53,6 @@ def _cached_config(config_path: str) -> dict:
 def get_config(config_path: str) -> dict:
     """Return cached config dict for given path."""
     return _cached_config(config_path)
-
-
-def invalidate_config_cache(config_path: Optional[str] = None) -> None:
-    """Clear config cache (call after config file changes)."""
-    _cached_config.cache_clear()
-    logger.info("Config cache cleared")
 
 
 # ── Model loading ────────────────────────────────────────────

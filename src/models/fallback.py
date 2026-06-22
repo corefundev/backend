@@ -150,7 +150,6 @@ class ForecastingService:
         # without mypy complaining about None-only inference.
         self.primary: object = None
         self.fallback = SeasonalNaiveModel(seasonality=7)
-        self._using_fallback = False
 
     @retry(max_attempts=3, backoff_sec=1.0)
     def load_primary(self, storage) -> None:
