@@ -7,7 +7,6 @@ handlers call.
 """
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,7 +18,8 @@ from src.plans.quota import (
 )
 from src.plans.enforcement import (
     PlanDenied, PlanLimitExceeded,
-    assert_config_keys_allowed, assert_sku_count_within_limit,
+    assert_config_keys_allowed, assert_horizon_within_plan,
+    assert_sku_count_within_limit,
     clip_horizon_to_plan, model_display_name,
 )
 
@@ -170,6 +170,43 @@ def test_business_allows_anything():
         _rec(plan="business"),
         {"model": {"horizon": 28, "type": "mimo", "learning_rate": 0.03}},
     )
+
+
+# ── Horizon cap on config-write (R13-2) ──────────────────────────────────────
+
+def test_horizon_write_start_over_plan_rejected():
+    # Start max is 30; training would build 90 per-step models → resource-DoS.
+    with pytest.raises(PlanLimitExceeded, match="horizon"):
+        assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 90}})
+
+
+def test_horizon_write_start_at_limit_ok():
+    assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 30}})  # no raise
+
+
+def test_horizon_write_business_at_limit_ok():
+    assert_horizon_within_plan(_rec(plan="business"), {"model": {"horizon": 90}})  # no raise
+
+
+def test_horizon_write_free_over_plan_rejected():
+    with pytest.raises(PlanLimitExceeded, match="horizon"):
+        assert_horizon_within_plan(_rec(plan="free"), {"model": {"horizon": 14}})
+
+
+def test_horizon_write_absent_is_noop():
+    # override without model.horizon must not raise
+    assert_horizon_within_plan(_rec(plan="start"), {"features": {"weather": {"enabled": True}}})
+
+
+def test_horizon_write_non_numeric_deferred_to_value_check():
+    # a non-numeric horizon is left to validate_client_config's range check (also 422)
+    assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": "lots"}})  # no raise
+
+
+def test_horizon_write_exposes_limit_and_actual():
+    with pytest.raises(PlanLimitExceeded) as ei:
+        assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 45}})
+    assert ei.value.limit == 30 and ei.value.actual == 45
 
 
 # ── Quota: cooldown ────────────────────────────────────────────────────────

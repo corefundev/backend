@@ -26,7 +26,12 @@ from src.clients.config_manager import (
     get_config_manager,
 )
 from src.clients.registry import get_registry
-from src.plans.enforcement import PlanDenied, assert_config_keys_allowed
+from src.plans.enforcement import (
+    PlanDenied,
+    PlanLimitExceeded,
+    assert_config_keys_allowed,
+    assert_horizon_within_plan,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -153,6 +158,10 @@ async def set_client_config(
         assert_config_keys_allowed(record, req.config)
     except PlanDenied as e:
         raise HTTPException(status_code=403, detail=str(e))
+    try:
+        assert_horizon_within_plan(record, req.config)
+    except PlanLimitExceeded as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Capture the pre-image for the audit trail before we overwrite it.
     before = mgr.get_override(client_id, registry)
@@ -215,6 +224,10 @@ async def patch_client_config(
         assert_config_keys_allowed(record, probe)
     except PlanDenied as e:
         raise HTTPException(status_code=403, detail=str(e))
+    try:
+        assert_horizon_within_plan(record, probe)
+    except PlanLimitExceeded as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Pre-image for the audit trail (see set_client_config for the
     # after-success ordering rationale).
