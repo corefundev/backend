@@ -59,7 +59,7 @@ import copy
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -89,6 +89,26 @@ _ALLOWED_COUNTRIES = {
     "IN", "IT", "ES", "PL", "NL", "SE", "NO", "FI",
     "DK", "AU", "CA", "KZ", "UA", "BY",
 }
+
+# ── Server-managed keys — clients may NEVER override these (R13-1) ──
+# A tenant overriding a filesystem-path key redirects parquet writes to an
+# arbitrary path (features/weather.py:71 to_parquet(cache_path);
+# external_regressors_ru.py:131 os.makedirs(cache_dir)) → it can clobber
+# another tenant's model.pkl (HMAC-verify then fails → cross-tenant DoS) or
+# fill the disk. This is the R13-1 root class: config-write validated VALUES
+# but not KEYS, and Business has config_allowed_keys=None — so any key passed.
+# These guards run for EVERY plan (validate_client_config is plan-agnostic and
+# is invoked on every set()/patch()), closing the Business bypass.
+#
+#   • path leaves      — cache_path / cache_dir, plus any *_path / *_dir leaf
+#                        so a feed added later with a path key is forbidden by
+#                        default (fail-closed) with no code change.
+#   • infra namespaces — mlflow.* (tracking URI) and api.* (host/port/rate
+#                        limiting) are operator-owned, never client business
+#                        config; overriding them is tampering, not tuning.
+_FORBIDDEN_KEY_LEAVES:    frozenset[str]   = frozenset({"cache_path", "cache_dir"})
+_FORBIDDEN_PATH_SUFFIXES: tuple[str, ...]  = ("_path", "_dir")
+_SERVER_NAMESPACES:       frozenset[str]   = frozenset({"mlflow", "api"})
 
 
 # ── Core merge logic ──────────────────────────────────────────
@@ -147,6 +167,41 @@ def _set_nested(d: dict, dotted_key: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def _iter_leaf_paths(d: Any, prefix: str = "") -> Iterable[str]:
+    """Yield every leaf key in a nested dict as a dotted path.
+
+    {"features": {"weather": {"cache_path": "x"}}} → "features.weather.cache_path".
+    Mirrors plans.enforcement._iter_dotted_keys but kept local to avoid a
+    cross-module private import.
+    """
+    if isinstance(d, dict):
+        if not d:
+            return
+        for k, v in d.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, dict):
+                yield from _iter_leaf_paths(v, path)
+            else:
+                yield path
+    elif prefix:
+        yield prefix
+
+
+def _forbidden_config_key(dotted: str) -> str | None:
+    """Return a reason string if `dotted` is a server-managed key a client must
+    never override, else None (R13-1). Pure classification — see the
+    `_FORBIDDEN_*` / `_SERVER_NAMESPACES` constants for the rationale.
+    """
+    parts = dotted.split(".")
+    leaf  = parts[-1]
+    if leaf in _FORBIDDEN_KEY_LEAVES or leaf.endswith(_FORBIDDEN_PATH_SUFFIXES):
+        return ("server-managed filesystem path — clients cannot override it "
+                "(it is derived from the system config)")
+    if parts[0] in _SERVER_NAMESPACES:
+        return f"'{parts[0]}' is operator-managed infrastructure config, not client-tunable"
+    return None
+
+
 # ── Validation ────────────────────────────────────────────────
 
 class ConfigValidationError(ValueError):
@@ -160,6 +215,14 @@ def validate_client_config(client_override: dict) -> list[str]:
     Does NOT require all keys to be present — only validates what's there.
     """
     errors = []
+
+    # Server-managed keys (R13-1) — reject for EVERY plan, including Business
+    # (config_allowed_keys=None). Runs before the value checks so a forbidden
+    # key is rejected regardless of whether its value would otherwise pass.
+    for dotted in _iter_leaf_paths(client_override):
+        reason = _forbidden_config_key(dotted)
+        if reason is not None:
+            errors.append(f"{dotted}: {reason}")
 
     # Numeric range checks
     for dotted, (lo, hi) in _ALLOWED_RANGES.items():
