@@ -126,6 +126,46 @@ def assert_sku_count_within_limit(record: ClientRecord, sku_count: int) -> None:
         )
 
 
+# ── Horizon cap on config-write ──────────────────────────────────────────────
+
+def assert_horizon_within_plan(record: ClientRecord, override: dict) -> None:
+    """Reject a config override that sets `model.horizon` beyond the plan's
+    `max_horizon_days` (R13-2). Map to HTTP 422.
+
+    The serve path already clips (clip_horizon_to_plan), but TRAINING consumes
+    the raw config horizon: MIMO fits one LightGBM PER horizon step, ×quantiles,
+    ×ensemble children (mimo.py) — so an over-plan horizon (e.g. Start=30 set to
+    90) explodes memory/time on the single serialized rq worker and can OOM all
+    tenants' trainings (ties project_training_resource_limits / #93). We REJECT
+    at config-write rather than silently clamp, so the client sees an explicit
+    limit instead of a quietly-different model.
+    """
+    spec = get_plan_spec(record.plan)
+    if spec.max_horizon_days is None:
+        return
+    model_cfg = override.get("model")
+    if not isinstance(model_cfg, dict) or "horizon" not in model_cfg:
+        return
+    try:
+        requested = int(model_cfg["horizon"])
+    except (TypeError, ValueError):
+        # Non-numeric horizon is a value error — left to validate_client_config's
+        # range check (also 422); don't double-report here.
+        return
+    if requested > spec.max_horizon_days:
+        logger.warning(
+            "plan limit: %s horizon cap exceeded (%d > %d) on config-write — client=%s",
+            spec.id.value, requested, spec.max_horizon_days, record.client_id,
+        )
+        raise PlanLimitExceeded(
+            f"Plan '{spec.id.value}' ({spec.display_name}) allows a forecast "
+            f"horizon up to {spec.max_horizon_days} days; requested {requested}. "
+            f"Lower model.horizon or upgrade to a higher tier.",
+            limit=spec.max_horizon_days,
+            actual=requested,
+        )
+
+
 # ── Horizon cap ─────────────────────────────────────────────────────────────
 
 def clip_horizon_to_plan(
