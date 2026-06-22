@@ -7,7 +7,6 @@ CRUD via registry, file-based CRUD, diff, patch.
 from __future__ import annotations
 
 import copy
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,7 +17,6 @@ from src.clients.config_manager import (
     ConfigValidationError,
     deep_merge,
     validate_client_config,
-    _compute_diff,
     _has_nested,
     _set_nested,
 )
@@ -205,6 +203,66 @@ class TestValidation:
         cfg = {"model": {"horizon": 999, "type": "bad_type"}}
         errors = validate_client_config(cfg)
         assert len(errors) >= 2
+
+
+# ══════════════════════════════════════════════════════════════
+# Forbidden server-managed keys (R13-1)
+# ══════════════════════════════════════════════════════════════
+
+class TestForbiddenServerManagedKeys:
+    """Server-managed keys (filesystem paths, infra namespaces) must be
+    rejected for EVERY plan — including Business (config_allowed_keys=None),
+    whose key-whitelist bypass let an arbitrary FS-path write through before
+    (R13-1: clobber another tenant's model.pkl / fill the disk)."""
+
+    @pytest.mark.parametrize("cfg, needle", [
+        # the two real FS-path sinks
+        ({"features": {"weather": {"cache_path": "/srv/data/victim/model.pkl"}}}, "cache_path"),
+        ({"features": {"external_regressors_ru": {"cache_dir": "/srv/data/victim"}}}, "cache_dir"),
+        # operator-owned infrastructure namespaces
+        ({"mlflow": {"tracking_uri": "http://attacker:5000"}}, "mlflow.tracking_uri"),
+        ({"api": {"host": "0.0.0.0"}}, "api.host"),
+        ({"api": {"rate_limiting": {"enabled": False}}}, "api.rate_limiting.enabled"),
+        # fail-closed for a future path key via the *_path / *_dir pattern
+        ({"model": {"snapshot_dir": "/tmp/x"}}, "model.snapshot_dir"),
+        ({"features": {"weather": {"backup_path": "/tmp/y"}}}, "features.weather.backup_path"),
+    ])
+    def test_forbidden_key_rejected(self, cfg, needle):
+        errors = validate_client_config(cfg)
+        assert any(needle in e for e in errors), errors
+
+    def test_forbidden_on_key_not_value(self):
+        # cache_path holds a perfectly valid string, yet is still rejected —
+        # the classification is on the KEY, which value-only checks missed.
+        errors = validate_client_config(
+            {"features": {"weather": {"cache_path": "artifacts/ok.parquet"}}}
+        )
+        assert any("cache_path" in e for e in errors)
+
+    def test_legit_business_knobs_still_pass(self):
+        # No legitimate tunable key ends in _path/_dir or sits under mlflow/api;
+        # the normal business knobs (incl. Business-only ML hyperparams) stay allowed.
+        cfg = {
+            "model": {"horizon": 28, "n_estimators": 800, "learning_rate": 0.05,
+                      "tweedie_variance_power": 1.4},
+            "features": {"weather": {"enabled": True, "latitude": 59.93, "longitude": 30.32},
+                         "external_regressors_ru": {"enabled": True, "currencies": ["CNY"]}},
+        }
+        assert validate_client_config(cfg) == []
+
+    def test_forbidden_via_manager_set_raises(self, mgr, registry):
+        # the Business attack path: set() → validate_client_config → 422 in the router
+        with pytest.raises(ConfigValidationError, match="cache_path"):
+            mgr.set("acme", {"features": {"weather": {"cache_path": "/srv/x"}}}, registry)
+
+    def test_forbidden_via_manager_patch_raises(self, mgr, registry):
+        with pytest.raises(ConfigValidationError, match="cache_dir"):
+            mgr.patch("acme", "features.external_regressors_ru.cache_dir", "/srv/x", registry)
+
+    def test_forbidden_via_save_to_file_raises(self, mgr, tmp_path):
+        with pytest.raises(ConfigValidationError, match="mlflow"):
+            mgr.save_to_file("acme", {"mlflow": {"tracking_uri": "http://x"}},
+                             directory=str(tmp_path))
 
 
 # ══════════════════════════════════════════════════════════════
