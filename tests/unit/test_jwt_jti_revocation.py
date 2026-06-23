@@ -195,14 +195,14 @@ def test_inmem_revoked_wins_even_for_non_admin(fresh_revocation):
     assert is_token_revoked("jx", redis=None, fail_closed=False) is True
 
 
-def test_decode_admin_token_denied_during_redis_outage(fresh_revocation, monkeypatch):
-    # End-to-end wiring + the intended trade-off: with Redis unreachable, an
-    # admin token is denied (we can't confirm it wasn't revoked) while a
-    # non-admin token still decodes (bounded fail-open).
+def test_decode_admin_token_denied_during_redis_outage(fresh_revocation):
+    # End-to-end wiring + the intended trade-off. In the unit env Redis is
+    # unavailable (the suite uses the in-mem fallback), so the revocation check
+    # can't consult the authoritative denylist: an admin token is denied (we
+    # can't confirm it wasn't revoked) while a non-admin token still decodes
+    # (bounded fail-open). No private monkeypatching — R5-M7 (test_r5_m7_di).
     from fastapi import HTTPException
-    from src.auth import jwt_auth as mod
     from src.auth.jwt_auth import create_access_token, decode_access_token
-    monkeypatch.setattr(mod, "_redis_client", lambda: None)
 
     admin_token = create_access_token("admin_c", roles=["admin"])
     user_token  = create_access_token("user_c", roles=["forecast"])
