@@ -544,6 +544,16 @@ def verify_chain(*, limit: int = 10_000) -> ChainVerifyResult:
                 (limit,),
             )
             rows = cur.fetchall()
+            # No-gap input (R13-3): count rows actually present in the signed-id
+            # span. Every id in [first_signed, last_signed] must exist — a
+            # missing id is a deleted row the HMAC chain cannot see.
+            span_present = None
+            if rows:
+                cur.execute(
+                    "SELECT count(*) AS n FROM audit_log WHERE id BETWEEN %s AND %s",
+                    (rows[0]["id"], rows[-1]["id"]),
+                )
+                span_present = cur.fetchone()["n"]
     except Exception as e:
         logger.exception("audit: verify_chain SELECT failed")
         return ChainVerifyResult(
@@ -596,6 +606,26 @@ def verify_chain(*, limit: int = 10_000) -> ChainVerifyResult:
                 ),
             )
         expected_prev = r["signature"]
+
+    # No-gap check (R13-3): within the signed-id span every id must still exist
+    # (signed-and-chained OR a legitimate unsigned row such as a prune
+    # sentinel). A short count means a row was DELETED — which the
+    # prev_signature chain cannot detect for an unsigned row, nor when a signed
+    # row is removed together with its chain neighbour. Tail-truncation is NOT
+    # detected here (deleting the newest rows leaves the span complete); it is
+    # PREVENTED at the DB level by migration 015's append-only trigger.
+    if rows:
+        span_expected = rows[-1]["id"] - rows[0]["id"] + 1
+        if span_present != span_expected:
+            return ChainVerifyResult(
+                ok=False, rows_checked=checked, first_bad_id=None,
+                reason="id_gap",
+                detail=(
+                    f"{span_expected - span_present} row(s) missing in id span "
+                    f"[{rows[0]['id']}, {rows[-1]['id']}] — a row was deleted "
+                    f"(append-only violation)"
+                ),
+            )
 
     return ChainVerifyResult(
         ok=True, rows_checked=checked, first_bad_id=None,
