@@ -55,9 +55,15 @@ def _signing_key() -> bytes:
     if not raw:
         raise StateError("server misconfigured: no signing key for OAuth state")
     try:
-        return bytes.fromhex(raw)
+        key = bytes.fromhex(raw)
     except ValueError:
-        return raw.encode("utf-8")
+        key = raw.encode("utf-8")
+    # R13 LOW — MODEL_SIGNING_KEY/JWT_SECRET_KEY are floored at 32 bytes in
+    # prod startup (R4-12); enforce the floor here too so OAuth state can't be
+    # signed with a too-short key if that startup gate is ever bypassed.
+    if len(key) < 32:
+        raise StateError("server misconfigured: OAuth state signing key too short (<32 bytes)")
+    return key
 
 
 def _b64url(data: bytes) -> str:

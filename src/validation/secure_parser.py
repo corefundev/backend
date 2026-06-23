@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if suffix == ".csv":
             df_raw = _read_csv(input_path, args.max_rows, args.max_columns)
-        elif suffix in {".xlsx", ".xlsm"}:
+        elif suffix == ".xlsx":
             df_raw = _read_excel(input_path, args.max_rows, args.max_columns)
         else:
             raise ValueError(f"unsupported extension: {suffix!r}")

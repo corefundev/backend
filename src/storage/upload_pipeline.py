@@ -52,7 +52,10 @@ logger = logging.getLogger(__name__)
 # ── Upload limits (API layer also enforces, these are belt-and-suspenders) ─────
 
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # 50 MiB
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xlsm"}
+# .xlsm (macro-enabled Excel) dropped (R13 LOW): it parses identically to
+# .xlsx via openpyxl (macros are never executed), so it adds no capability —
+# only a macro-carrying format we don't need in the allowlist.
+ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 
 
 class UploadRejected(ValueError):

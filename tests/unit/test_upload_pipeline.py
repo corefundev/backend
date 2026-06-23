@@ -17,18 +17,13 @@ skipif-no-env.
 """
 from __future__ import annotations
 
-import io
-import os
-from pathlib import Path
-
-import pandas as pd
 import pytest
 
 from src.storage import zones
 from src.storage import backend as sb
 from src.storage import upload_registry as ur
 from src.storage import upload_pipeline as pipeline
-from src.storage.scanner import ScanResult, ScanVerdict, scan_bytes
+from src.storage.scanner import ScanVerdict, scan_bytes
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -202,6 +197,13 @@ def test_registry_terminal_states():
 def test_accept_upload_rejects_bad_extension():
     with pytest.raises(pipeline.UploadRejected, match="extension"):
         pipeline.accept_upload("acme", "malware.exe", b"AAA")
+
+
+def test_accept_upload_rejects_xlsm_macro_format():
+    # R13 LOW — .xlsm (macro-enabled Excel) dropped from the allowlist; it
+    # parses identically to .xlsx so it adds no capability, only a macro format.
+    with pytest.raises(pipeline.UploadRejected, match="extension"):
+        pipeline.accept_upload("acme", "book.xlsm", b"AAA")
 
 
 def test_accept_upload_rejects_empty():
