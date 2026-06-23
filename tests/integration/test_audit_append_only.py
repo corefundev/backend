@@ -39,11 +39,13 @@ def conn():
         c.close()
 
 
-def _insert_signed(cur, event_type="r13_3_trig"):
+def _insert_event(cur, event_type="r13_3_trig"):
+    # Unsigned row: the trigger blocks UPDATE/DELETE regardless of signature,
+    # and leaving signature NULL keeps these rows out of the verify_chain walk
+    # so they don't pollute the chain the no-gap test builds.
     cur.execute(
-        "INSERT INTO audit_log (event_type, success, prev_signature, signature) "
-        "VALUES (%s, TRUE, %s, %s) RETURNING id",
-        (event_type, "b" * 64, "a" * 64),
+        "INSERT INTO audit_log (event_type, success) VALUES (%s, TRUE) RETURNING id",
+        (event_type,),
     )
     return cur.fetchone()[0]
 
@@ -52,7 +54,7 @@ def _insert_signed(cur, event_type="r13_3_trig"):
 
 def test_trigger_blocks_update(conn):
     with conn.cursor() as cur:
-        rid = _insert_signed(cur)
+        rid = _insert_event(cur)
         with pytest.raises(psycopg2.Error) as ei:
             cur.execute("UPDATE audit_log SET success = FALSE WHERE id = %s", (rid,))
         assert "append-only" in str(ei.value).lower()
@@ -60,7 +62,7 @@ def test_trigger_blocks_update(conn):
 
 def test_trigger_blocks_delete(conn):
     with conn.cursor() as cur:
-        rid = _insert_signed(cur)
+        rid = _insert_event(cur)
         with pytest.raises(psycopg2.Error) as ei:
             cur.execute("DELETE FROM audit_log WHERE id = %s", (rid,))
         assert "append-only" in str(ei.value).lower()
