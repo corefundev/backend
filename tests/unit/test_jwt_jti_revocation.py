@@ -15,8 +15,6 @@ test env), exercising the full happy path + fail-open behaviour.
 """
 from __future__ import annotations
 
-import os
-
 import jwt as pyjwt
 import pytest
 
@@ -147,3 +145,71 @@ def test_legacy_token_without_jti_still_decodes(fresh_revocation):
     payload = decode_access_token(token)
     assert payload["client_id"] == "old_client"
     assert "jti" not in payload
+
+
+# ── R13-4: admin tokens fail CLOSED when the Redis denylist is unreachable ─
+
+class _BoomRedis:
+    """A reachable Redis client that errors mid-call."""
+    def exists(self, *a, **k):
+        raise RuntimeError("redis down mid-call")
+
+
+class _FakeRedis:
+    """A reachable, answering Redis client."""
+    def __init__(self, revoked):
+        self._revoked = revoked
+    def exists(self, key):
+        return 1 if self._revoked else 0
+
+
+def test_admin_fail_closed_when_redis_unreachable(fresh_revocation):
+    # client is None (Redis unreachable) + admin → deny (fail closed).
+    from src.auth.jwt_auth import is_token_revoked
+    assert is_token_revoked("j", redis=None, fail_closed=True) is True
+
+
+def test_non_admin_fail_open_when_redis_unreachable(fresh_revocation):
+    # Unchanged behaviour for everyone else — bounded fail-open.
+    from src.auth.jwt_auth import is_token_revoked
+    assert is_token_revoked("j", redis=None, fail_closed=False) is False
+
+
+def test_admin_fail_closed_on_redis_error(fresh_revocation):
+    from src.auth.jwt_auth import is_token_revoked
+    assert is_token_revoked("j", redis=_BoomRedis(), fail_closed=True) is True
+    assert is_token_revoked("j", redis=_BoomRedis(), fail_closed=False) is False
+
+
+def test_redis_answer_is_authoritative_over_fail_closed(fresh_revocation):
+    # When Redis answers, the denylist decides — fail_closed is irrelevant.
+    from src.auth.jwt_auth import is_token_revoked
+    assert is_token_revoked("j", redis=_FakeRedis(revoked=False), fail_closed=True) is False
+    assert is_token_revoked("j", redis=_FakeRedis(revoked=True), fail_closed=False) is True
+
+
+def test_inmem_revoked_wins_even_for_non_admin(fresh_revocation):
+    # A jti in the in-mem fallback is revoked regardless of fail_closed.
+    from src.auth.jwt_auth import revoke_token, is_token_revoked
+    revoke_token("jx", redis=None)   # lands in the in-mem set
+    assert is_token_revoked("jx", redis=None, fail_closed=False) is True
+
+
+def test_decode_admin_token_denied_during_redis_outage(fresh_revocation, monkeypatch):
+    # End-to-end wiring + the intended trade-off: with Redis unreachable, an
+    # admin token is denied (we can't confirm it wasn't revoked) while a
+    # non-admin token still decodes (bounded fail-open).
+    from fastapi import HTTPException
+    from src.auth import jwt_auth as mod
+    from src.auth.jwt_auth import create_access_token, decode_access_token
+    monkeypatch.setattr(mod, "_redis_client", lambda: None)
+
+    admin_token = create_access_token("admin_c", roles=["admin"])
+    user_token  = create_access_token("user_c", roles=["forecast"])
+
+    with pytest.raises(HTTPException) as exc:
+        decode_access_token(admin_token)
+    assert exc.value.status_code == 401
+
+    payload = decode_access_token(user_token)
+    assert payload["client_id"] == "user_c"

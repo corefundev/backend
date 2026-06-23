@@ -226,7 +226,9 @@ def decode_access_token(token: str) -> dict:
         )
 
     jti = payload.get("jti")
-    if jti and is_token_revoked(jti):
+    # Admin tokens fail CLOSED on a Redis outage (R13-4): a revoked admin
+    # session must not survive while the denylist is unreachable.
+    if jti and is_token_revoked(jti, fail_closed="admin" in (payload.get("roles") or [])):
         logger.info("rejected revoked token jti=%s sub=%s", jti, payload.get("sub"))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -333,8 +335,15 @@ def revoke_token(jti: str, *, redis=_USE_DEFAULT) -> None:
         _prune_inmem_revoked(now)
 
 
-def is_token_revoked(jti: str, *, redis=_USE_DEFAULT) -> bool:
+def is_token_revoked(jti: str, *, redis=_USE_DEFAULT, fail_closed: bool = False) -> bool:
     """True iff `jti` is in the revocation set.
+
+    When the authoritative Redis denylist can't be consulted (Redis
+    unreachable or erroring) and the jti isn't in the in-memory fallback,
+    `fail_closed` decides the answer for THIS token (R13-4): admin /
+    privileged callers pass `fail_closed=True` so a revoked admin session
+    cannot survive a Redis outage; everyone else keeps the bounded
+    fail-open (exposure capped at the JWT's ~1h lifetime).
 
     `redis`: R5-M7 DI hook (None = use canonical pool).
     """
@@ -347,14 +356,17 @@ def is_token_revoked(jti: str, *, redis=_USE_DEFAULT) -> bool:
         return True
     client = _redis_client() if redis is _USE_DEFAULT else redis
     if client is None:
-        return False
+        # No authoritative denylist available — deny for admin (fail
+        # closed), bounded fail-open for everyone else (R13-4).
+        return fail_closed
     try:
         return bool(client.exists(f"jwt:revoked:{jti}"))
     except Exception as e:
-        # Fail-open: a Redis hiccup must NOT brick auth. The 1h JWT
-        # exp still bounds exposure to the original max-lifetime risk.
-        logger.warning("Redis is_token_revoked failed for jti=%s: %s — failing open", jti, e)
-        return False
+        logger.warning(
+            "Redis is_token_revoked failed for jti=%s: %s — failing %s",
+            jti, e, "closed (admin)" if fail_closed else "open",
+        )
+        return fail_closed
 
 
 def reset_revocation_set_for_tests(*, redis=_USE_DEFAULT) -> None:
