@@ -449,6 +449,18 @@ def handle_update(update: dict) -> None:
             send_message(chat_id, "⚠ Не удалось сохранить привязку, попробуйте ещё раз.")
             return
 
+        # Audit the config mutation (R13 LOW): linking Telegram writes
+        # notifications.telegram into the client config — the same class of
+        # change as PUT/PATCH /config (#95) — so it must leave an audit trail
+        # too. record_event never raises (passive observer); no try/except.
+        from src.audit import EVT_PLAN_CHANGE, record_event
+        record_event(
+            event_type=EVT_PLAN_CHANGE, event_subtype="config_telegram_link",
+            client_id=client_id,
+            target_type="client_config", target_id=client_id,
+            metadata={"subtree": "notifications.telegram"},
+        )
+
         send_message(
             chat_id,
             f"✓ Готово! Этот чат привязан к аккаунту <code>{client_id}</code>.\n\n"
