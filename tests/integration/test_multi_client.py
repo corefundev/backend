@@ -90,7 +90,7 @@ def make_fast_config(
 @pytest.fixture(scope="module")
 def three_clients():
     """
-    Returns dict: {client_id: {data_path, config_path, output_dir}}
+    Returns dict: {client_id: {data_path, config_path}}
     for three clients each with different configs.
     """
     clients = {}
@@ -120,7 +120,6 @@ def three_clients():
         clients[client_id] = {
             "data_path":  data_path,
             "config_path": cfg_path,
-            "output_dir": str(d / "artifacts"),
             "n_skus":     n_skus,
             "horizon":    horizon,
         }

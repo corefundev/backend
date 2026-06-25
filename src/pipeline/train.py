@@ -102,7 +102,6 @@ def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
     client_id:  str = "default",
-    output_dir: str | None = None,
 ) -> dict:
     t0 = time.time()
     logger.info(f"=== Training pipeline START | client={client_id} ===")

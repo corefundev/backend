@@ -54,8 +54,10 @@ def _make_train_fn(config_path: str, workdir: str) -> Callable[[pd.DataFrame, di
             data_path=csv_path,
             config_path=config_path,
             client_id="backtest",
-            output_dir=os.path.join(workdir, "out"),
         )
+        # run_training_pipeline saves via ClientStorage and returns the real
+        # artifact path in result["model_path"] — that is what we load (the
+        # model location is owned by ClientStorage, not a caller-supplied dir).
         return load_model_any_format(result["model_path"], config)
 
     return train_fn
