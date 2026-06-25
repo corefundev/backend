@@ -68,6 +68,23 @@ def test_safe_join_refuses_traversal():
         zones.safe_join("client", "..", "data.csv")
 
 
+@pytest.mark.parametrize("bad", [
+    "..",          # parent traversal
+    "/abs",        # absolute / leading slash
+    "a/b",         # embedded separator
+    ".hidden",     # leading dot (component must start alphanumeric)
+    "a b",         # whitespace
+    "a\x00b",      # NUL byte
+    "",            # empty component
+    "x" * 129,     # over the 128-char cap
+])
+def test_safe_join_rejects_injection_vectors(bad):
+    # C2/#153 — every component runs validate_component; none of these escape
+    # the zone prefix or smuggle a separator.
+    with pytest.raises(ValueError):
+        zones.safe_join("client", bad)
+
+
 # ── LocalStorageBackend path traversal ────────────────────────────────────────
 
 def test_local_backend_rejects_absolute_path(tmp_path):
