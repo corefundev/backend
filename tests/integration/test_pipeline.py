@@ -90,7 +90,6 @@ class TestTrainingPipeline:
             data_path=tmp_workspace["data"],
             config_path=tmp_workspace["config"],
             client_id="test_client",
-            output_dir=tmp_workspace["output"],
         )
         assert "metrics" in result
         assert "model_path" in result
@@ -101,7 +100,6 @@ class TestTrainingPipeline:
             data_path=tmp_workspace["data"],
             config_path=tmp_workspace["config"],
             client_id="test_client2",
-            output_dir=tmp_workspace["output"],
         )
         agg = result["metrics"]
         for metric in ["wmape_mean", "wmape_median", "wmape_p90"]:
@@ -109,9 +107,8 @@ class TestTrainingPipeline:
             assert 0.0 <= agg[metric] <= 5.0, f"{metric} out of expected range"
 
     def test_model_file_is_valid(self, tmp_workspace):
-        import os
         os.environ["ARTIFACTS_DIR"] = tmp_workspace["output"]
-        result = run_training_pipeline(
+        run_training_pipeline(
             data_path=tmp_workspace["data"],
             config_path=tmp_workspace["config"],
             client_id="test_client3",
@@ -129,10 +126,8 @@ class TestTrainingPipeline:
         """Walk-forward must not use future data — verified by checking fold ordering."""
         import yaml
         from src.data.loader import load_data, validate_data
-        from src.features.engineering import build_features, get_feature_columns
-        from src.models.forecaster import SKUForecaster
-        from src.validation.walk_forward import walk_forward_validate, _get_split_points
-        import pandas as pd
+        from src.features.engineering import build_features
+        from src.validation.walk_forward import _get_split_points
 
         with open(tmp_workspace["config"]) as f:
             config = yaml.safe_load(f)
@@ -140,7 +135,6 @@ class TestTrainingPipeline:
         df = load_data(tmp_workspace["data"], config)
         df = validate_data(df, config)
         df = build_features(df, config)
-        feature_cols = get_feature_columns(df, config)
 
         dates = df["date"].sort_values().unique()
         splits = _get_split_points(dates, config["model"]["horizon"], config["validation"]["n_splits"])

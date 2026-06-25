@@ -53,13 +53,15 @@ def test_serve_fn_returns_only_point_forecast_columns(monkeypatch):
 def test_train_fn_uses_isolated_backtest_client_and_loads_model(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_run_training(data_path, config_path, client_id, output_dir):
+    def fake_run_training(data_path, config_path, client_id):
         # train_df must be materialised to a CSV path (pipeline is file-based)
         assert os.path.isfile(data_path), data_path
         seen["client_id"] = client_id
         seen["data_path"] = data_path
         seen["config_path"] = config_path
-        return {"model_path": os.path.join(output_dir, "model.pkl")}
+        # model_path is owned by ClientStorage; load_model_any_format is mocked,
+        # so the exact value is irrelevant to this test.
+        return {"model_path": "backtest/model.pkl"}
 
     sentinel_model = object()
     monkeypatch.setattr(runner, "run_training_pipeline", fake_run_training)
