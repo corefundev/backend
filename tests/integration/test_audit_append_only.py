@@ -28,6 +28,10 @@ pytestmark = pytest.mark.skipif(
     reason="integration test needs DATABASE_URL (CI postgres service)",
 )
 
+# Shared HMAC key so every signed row the suite appends verifies under the same
+# key — verify_chain validates the whole accumulated chain, not just one test's.
+_HMAC_KEY = "11" * 32
+
 
 @pytest.fixture
 def conn():
@@ -84,7 +88,7 @@ def test_prune_deletes_old_rows_through_trigger(conn):
 # ── verify_chain no-gap ─────────────────────────────────────────────────────
 
 def test_verify_chain_flags_deleted_row_in_span(conn, monkeypatch):
-    monkeypatch.setenv("AUDIT_LOG_HMAC_KEY", "11" * 32)
+    monkeypatch.setenv("AUDIT_LOG_HMAC_KEY", _HMAC_KEY)
     from src.audit import log as audit
 
     # Two real signed rows (chained) with a deletable UNSIGNED row between them.
@@ -115,3 +119,39 @@ def test_verify_chain_flags_deleted_row_in_span(conn, monkeypatch):
         tamper.close()
 
     assert audit.verify_chain().reason == "id_gap"
+
+
+def test_verify_chain_detects_an_edited_signed_row(conn, monkeypatch):
+    # C2/#153 — editing a signed row's content past the trigger (a privileged
+    # tamper) must be caught: verify_chain recomputes the HMAC over the new
+    # content, which no longer matches the stored signature → signature_mismatch
+    # at that row. The chain loop returns this before the no-gap check, so the
+    # earlier test's id-gap is irrelevant here. Runs last (leaves a broken row).
+    monkeypatch.setenv("AUDIT_LOG_HMAC_KEY", _HMAC_KEY)
+    from src.audit import log as audit
+
+    audit.record_event(event_type="r13_3_tamper_a")
+    audit.record_event(event_type="r13_3_tamper_b")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM audit_log WHERE event_type = 'r13_3_tamper_b' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        b_id = cur.fetchone()[0]
+
+    tamper = psycopg2.connect(DATABASE_URL)
+    try:
+        with tamper.cursor() as cur:
+            cur.execute("SET audit_log.allow_prune = 'on'")
+            cur.execute(
+                "UPDATE audit_log SET actor_email = 'attacker@evil' WHERE id = %s",
+                (b_id,),
+            )
+        tamper.commit()
+    finally:
+        tamper.close()
+
+    res = audit.verify_chain()
+    assert res.ok is False
+    assert res.reason == "signature_mismatch"
+    assert res.first_bad_id == b_id
