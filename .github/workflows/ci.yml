@@ -137,6 +137,35 @@ jobs:
           pip install pytest pydantic
           python -m pytest tests/lint/test_placeholder_constant_consistency.py -v
 
+  # ── 1d2. Lint (settings-field-usage — C1.4 / #174) ──────────────
+  # Guards src/settings.py against the blind spot that let ~95 dead
+  # pydantic fields accumulate before C1.1 (#171): flake8/vulture can't
+  # see an unread Settings field (the metaclass "uses" every field via
+  # introspection). SFU001 fails on a field with no `settings.<field>`
+  # reader; SFU002 fails on a direct `os.environ.get("FIELD")` that
+  # shadows a settings field (the divergent-default class — login_lockout
+  # was settings=5 vs os.environ=10). AST-based, not substring, so
+  # docstring examples don't false-match. ~10 ms static check.
+  lint-settings-field-usage:
+    name: Lint (settings-field-usage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run SFU linter against src/
+        run: |
+          python tools/lint/settings_field_usage.py src/ \
+            --settings-file src/settings.py \
+            --allow tools/lint/.settings_field_usage.allow
+      - name: Run SFU unit tests
+        run: |
+          # See NFOR job above for why `pydantic` is installed here.
+          pip install pytest pydantic
+          python -m pytest tests/lint/test_settings_field_usage.py -v
+
   # ── 1e. Alert acceptance (promtool test rules — R10 G1) ─────────
   # Behavioural coverage of docker/prometheus/alerts*.yml: feeds
   # synthetic time-series via `promtool test rules` and asserts which

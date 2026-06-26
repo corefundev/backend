@@ -1,0 +1,10 @@
+# Allowlist for settings-field-usage linter (SFU001 — dead field).
+#
+# Format:  <field_name><two-or-more-spaces><reason>
+# A reason is MANDATORY (the linter rejects entries without one).
+#
+# Only add a field here if it has a LEGITIMATE non-attribute reader the AST
+# scan can't see — e.g. accessed solely via getattr(settings, computed_name)
+# or enumerated by settings.model_dump(). A field that is simply "for later"
+# does NOT belong here: add it together with its consumer in the same PR
+# (C1.3 / #173 migration rule). Empty today — all fields have a direct reader.
