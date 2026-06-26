@@ -1,24 +1,23 @@
 """
-Regression tests for R5-M4 — central Settings (2026-05-18).
+Regression tests for central Settings (R5-M4 2026-05-18; C1.1 2026-06-26).
 
-Replaces 162+ scattered `os.environ.get(...)` calls with a typed
-`Settings` class in `src/settings.py`. This commit migrates the
-hot-path (signup_rate_limit) as a showcase + leaves the lazy
-migration to incremental future work.
+`src/settings.py` holds the STATIC, non-secret env configuration the service
+reads through a typed Pydantic class. C1.1 (#171) stripped it to the fields
+that actually have readers and removed the runtime-injected secret fields
+(which the import-time singleton could only ever serve as stale defaults).
 
 These tests pin:
-  - the Settings class loads + every documented field is present
+  - the Settings class loads cleanly (construction failure crashes every
+    importing module at load time)
+  - the live rate-limit fields keep sensible int defaults
   - env-var name → field-name mapping works (case-insensitive)
   - signup_rate_limit reads from settings, not raw os.environ
-  - default values are sensible (no `None`-explosion for required-
-    in-prod fields that have safe dev defaults)
+  - DYNAMIC/secret env vars are NOT settings fields (footgun guard)
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-
-import pytest
 
 
 _BACKEND = Path(__file__).resolve().parents[2]
@@ -33,9 +32,9 @@ def test_settings_module_imports_cleanly():
 
 
 def test_critical_rate_limit_fields_have_defaults():
-    """Each rate-limit field must have an int default — the dev/test
-    code paths construct Settings without env, and missing defaults
-    would crash with ValidationError."""
+    """Each live rate-limit / ceiling field must have a positive int
+    default — the dev/test code paths construct Settings without env,
+    and a missing default would crash with ValidationError."""
     from src.settings import settings
     for field in (
         "signup_attempt_per_hour_per_subnet",
@@ -44,8 +43,7 @@ def test_critical_rate_limit_fields_have_defaults():
         "login_attempt_per_hour_per_subnet",
         "otp_verify_per_hour_per_subnet",
         "rotate_attempt_per_hour_per_client",
-        "login_lockout_threshold",
-        "login_lockout_window_min",
+        "jwt_inmem_revoked_max",
     ):
         v = getattr(settings, field)
         assert isinstance(v, int) and v > 0, (
@@ -92,10 +90,6 @@ def test_signup_rate_limit_uses_settings_not_environ():
         code_lines.append(line)
     code = "\n".join(code_lines)
 
-    # Forbidden: os.environ.get on rate-limit knobs in executable code.
-    # (`os.environ.get("APP_ENV")` etc may legitimately remain for
-    # constants that aren't yet migrated — the test enforces the
-    # collapse-target fields specifically.)
     forbidden = (
         "TOKEN_ATTEMPT_PER_HOUR_PER_SUBNET",
         "LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET",
@@ -105,7 +99,6 @@ def test_signup_rate_limit_uses_settings_not_environ():
         "SIGNUP_SUCCESS_PER_DAY_PER_SUBNET",
     )
     for env_name in forbidden:
-        # Must not appear inside os.environ.get(...) in executable code.
         bad_pattern = f'os.environ.get("{env_name}"'
         assert bad_pattern not in code, (
             f"signup_rate_limit.py must not call os.environ.get on "
@@ -113,40 +106,26 @@ def test_signup_rate_limit_uses_settings_not_environ():
         )
 
 
-def test_settings_has_redis_and_jwt_fields():
-    """Smoke that the Settings class covers the next-target migration
-    paths (jwt_auth, redis_pool). Future migrations rely on these
-    fields being present."""
+def test_secrets_and_dynamic_vars_are_not_settings_fields():
+    """C1.1 footgun guard — runtime-injected secrets / DSN components MUST
+    NOT be Settings fields. The singleton snapshots the env at import; these
+    are injected by vault_agent AFTER import, so a field would serve a stale
+    pre-injection default (e.g. the dev JWT placeholder) in production. The
+    correct read is `os.environ` at call time (startup_safety, jwt_auth,
+    storage/backend, vault_agent all do)."""
     from src.settings import settings
-    # jwt_auth migration target
-    assert hasattr(settings, "jwt_secret_key")
-    assert hasattr(settings, "jwt_audience")
-    assert hasattr(settings, "jwt_inmem_revoked_max")
-    # redis_pool migration target
-    assert hasattr(settings, "redis_url")
-    assert hasattr(settings, "redis_pool_max")
-    assert hasattr(settings, "redis_health_check_interval")
-    # vault_agent migration target
-    assert hasattr(settings, "vault_addr")
-    assert hasattr(settings, "vault_token")
-    # YC Lockbox migration target
-    assert hasattr(settings, "yc_lockbox_secret_id")
-    assert hasattr(settings, "yc_sa_key_file")
-
-
-def test_settings_app_env_default():
-    """app_env defaults to `development` (NOT `production`) so a
-    misconfigured deploy lights up the startup_safety guard rather
-    than silently entering prod-mode."""
-    from src.settings import Settings
-    # Clear potentially-inherited APP_ENV from the shell.
-    original = os.environ.pop("APP_ENV", None)
-    try:
-        s = Settings()
-        assert s.app_env == "development", (
-            "app_env default must be 'development' so misconfigured "
-            "deploys don't silently enter prod (R5-M4)"
+    for field in (
+        "database_url", "database_url_replica", "db_host", "db_name", "db_port",
+        "app_env",
+        "jwt_secret_key", "model_signing_key", "api_key", "admin_api_key",
+        "audit_log_hmac_key",
+        "aws_secret_access_key", "smtp_password", "turnstile_secret_key",
+        "telegram_bot_token", "vault_token", "yc_lockbox_secret_id",
+        "yc_sa_key_file",
+    ):
+        assert not hasattr(settings, field), (
+            f"settings.{field} must NOT exist — it is runtime-injected into "
+            f"os.environ by vault_agent AFTER the settings singleton is built, "
+            f"so the field would serve a stale default. Read it via os.environ "
+            f"at call time. (C1.1 / #171)"
         )
-    finally:
-        if original is not None:
-            os.environ["APP_ENV"] = original
