@@ -1,223 +1,91 @@
 """
-src/settings.py — Central typed configuration (R5-M4, 2026-05-18).
+src/settings.py — Central typed configuration (R5-M4 2026-05-18; C1.1 2026-06-26).
 
-Replaces 162+ scattered `os.environ.get(...)` calls (across 43
-modules) with a single Pydantic Settings class. Loaded once at
-process startup; all modules import `settings` instead of reading
-the environment directly.
+Holds the **static** env-driven configuration the service reads at runtime
+through a single typed Pydantic class, so callers use `settings.<field>`
+instead of `int(os.environ.get(...))` scattered across modules.
 
-Benefits:
-  - Single source of truth: every env var the service consumes is
-    visible in one file, with type hint + default.
-  - Type safety: int / bool / float validation at construction
-    time instead of `int(os.environ.get(...))` scattered everywhere.
-  - Fail-fast in production: required fields raise at startup, not
-    on the first request that needs them.
-  - Easy enumeration for ops: `settings.model_dump()` dumps the
-    full config (string-typed secrets ARE included — wrap in
-    SecretStr if you need redaction).
-  - Test isolation: tests can override via env or construct
-    `Settings(...)` directly.
+──────────────────────────────────────────────────────────────────────────
+WHAT BELONGS HERE — and what MUST NOT (read before adding a field)
+──────────────────────────────────────────────────────────────────────────
+`settings = Settings()` is a **module-import-time singleton**: it snapshots
+the environment ONCE, when `src.settings` is first imported. Different entry
+points import it at different moments (api/worker run `_early_bootstrap()`
+first, but scripts/tests/some workers import it before any bootstrap), so the
+snapshot is only reliable for values already present in the container env at
+process start.
 
-Migration pattern for existing code:
-  # before
+  🟢 STATIC  — present in the container env at start (compose/.env), non-secret,
+               same for the process lifetime. THESE belong here.
+               e.g. rate limits, sandbox knobs, paths, feature flags.
+
+  🔴 DYNAMIC — runtime-injected into os.environ by `vault_agent`/Lockbox AFTER
+               import (every secret + the composed DSN components), or values
+               that may change per call. THESE MUST NOT be settings fields:
+               the singleton would capture a stale pre-injection default and
+               silently serve `""`/dev-placeholder in production.
+               Read them via `os.environ` at call time, e.g. startup_safety,
+               jwt_auth, storage/backend, vault_agent all do.
+               DYNAMIC set: DATABASE_URL(_REPLICA), POSTGRES_PASSWORD,
+               DB_HOST/PORT/NAME/USER, APP_ENV, JWT_SECRET_KEY, MODEL_SIGNING_KEY,
+               API_KEY, ADMIN_API_KEY, AUDIT_LOG_HMAC_KEY, AWS_*/S3_*_KEY,
+               SMTP_PASSWORD, RESEND_API_KEY, OAuth secrets, TELEGRAM_*_TOKEN,
+               *_WEBHOOK_SECRET, TURNSTILE_SECRET_KEY, METRICS_TOKEN, VAULT_*,
+               YC_LOCKBOX_SECRET_ID, YC_SA_KEY_FILE.
+
+C1.1 (#171) removed ~95 fields that had ZERO `settings.<field>` readers — the
+DYNAMIC/secret ones (a footgun: they shadowed injected secrets with stale
+defaults) and the not-yet-wired STATIC ones (dead scaffolding). The remaining
+STATIC env reads still live at their `os.environ` call sites; epic #157 / #173
+(C1.3) migrates them here **one module per PR, adding each field together with
+its consumer** so this file never again accumulates a field without a reader.
+
+Migration pattern (C1.3):
+  # before — at the call site
   limit = int(os.environ.get("LOGIN_ATTEMPT_PER_HOUR_PER_SUBNET", "20"))
-  # after
+  # after — add the field here AND switch the read in the SAME PR
   from src.settings import settings
   limit = settings.login_attempt_per_hour_per_subnet
 
-Bootstrapping note:
-  scripts/lockbox_bootstrap.sh injects env vars BEFORE Python
-  starts, so the singleton `settings = Settings()` at module
-  bottom reads a fully-populated environment. For tests that
-  need different values per-test, override via
-  `monkeypatch.setenv(...)` then construct a fresh `Settings()`
-  inside the test scope.
+Test isolation: construct a fresh `Settings()` after `monkeypatch.setenv(...)`
+(pydantic-settings re-reads the environment on each construction).
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """All env-driven configuration for the SKU Forecasting Platform.
+    """Static, non-secret env configuration. See module docstring for the
+    static-vs-dynamic rule — do NOT add runtime-injected secrets here.
 
-    Field naming: lowercase with underscores. pydantic-settings
-    matches case-insensitively against env vars, so
-    `signup_attempt_per_hour_per_subnet` reads from
+    Field naming: lowercase_with_underscores; pydantic-settings matches
+    case-insensitively, so `signup_attempt_per_hour_per_subnet` reads from
     `SIGNUP_ATTEMPT_PER_HOUR_PER_SUBNET`.
-
-    Adding a new field:
-      1. Decide on a default that works for dev/test (the simpler
-         the better — production overrides via env / Lockbox).
-      2. Annotate the type (int, bool, float, str, Optional[str]).
-      3. Group under an existing section comment, or add a new one.
-      4. Migrate the original `os.environ.get` callsite to
-         `settings.<field_name>`.
     """
     model_config = SettingsConfigDict(
-        env_file=None,           # Lockbox bootstrap handles env injection.
+        env_file=None,           # Lockbox/compose handle env injection.
         case_sensitive=False,    # env vars conventionally upper-case.
         extra="ignore",          # don't fail on unknown env vars.
-        # R6-2 (2026-05-18) — `model_signing_key` and `model_cache_max`
-        # collide with pydantic's reserved `model_` namespace (used for
-        # `model_config`, `model_validate`, `model_dump`, etc). Pydantic
-        # 2.x emits a UserWarning at class definition time; pydantic 3.x
-        # may upgrade that to a hard PydanticUserError, which would
-        # crash Settings construction → block app startup. Disabling
-        # the protected namespace check is the right shape here: our
-        # field names refer to the ML *model artefact* (not pydantic's
-        # data-model concept), they're already in Lockbox keys and
-        # .env.example across the org, and renaming would be a
-        # breaking change cross-repo for a cosmetic warning.
-        protected_namespaces=(),
+        protected_namespaces=(),  # allow `model_*` field names (none today).
     )
 
-    # ── Environment / bootstrap ───────────────────────────────────────
-    app_env: str = Field(
-        "development",
-        description="production | staging | development | test",
-    )
-    log_level: str = "INFO"
-    storage_backend: str = Field("local", description="local | s3")
-    artifacts_dir: str = "/tmp/artifacts"
-
-    # ── Database ─────────────────────────────────────────────────────
-    database_url: str = "postgresql://sku:sku@localhost:5432/sku_forecasting"
-    database_url_replica: Optional[str] = None
-    db_host: Optional[str] = None
-    db_host_override: Optional[str] = None
-    db_name: str = "sku_forecasting"
-    db_port: int = 5432
-
-    # ── Auth & secrets ──────────────────────────────────────────────
-    jwt_secret_key: str = "dev-jwt-secret-not-for-production-32chars"
-    jwt_audience: Optional[str] = None
-    jwt_issuer: Optional[str] = None
-    jwt_inmem_revoked_max: int = 10_000
-    api_key: str = "dev-api-key-not-for-production-32chars"
-    admin_api_key: Optional[str] = None
-    model_signing_key: Optional[str] = None
-    audit_log_hmac_key: Optional[str] = None
-    disable_captcha: bool = False
-
-    # ── Rate limits ──────────────────────────────────────────────────
+    # ── Rate limits (signup_rate_limit.py) ───────────────────────────
     signup_attempt_per_hour_per_subnet: int = 5
     signup_success_per_day_per_subnet: int = 20
     token_attempt_per_hour_per_subnet: int = 20
     login_attempt_per_hour_per_subnet: int = 20
     otp_verify_per_hour_per_subnet: int = 30
     rotate_attempt_per_hour_per_client: int = 5
-    login_lockout_threshold: int = 5
-    login_lockout_window_min: int = 15
 
-    # ── OTP ──────────────────────────────────────────────────────────
-    otp_ttl_minutes: int = 10
-    otp_max_attempts: int = 5
-    otp_store_path: str = "otp_store.json"
+    # ── JWT in-memory revocation ceiling (jwt_auth.py) ───────────────
+    jwt_inmem_revoked_max: int = 10_000
 
-    # ── Redis ────────────────────────────────────────────────────────
-    redis_url: str = "redis://localhost:6379"
-    redis_pool_max: int = 50
-    redis_health_check_interval: int = 30
-
-    # ── S3 (multi-zone) ─────────────────────────────────────────────
-    s3_endpoint_url: Optional[str] = None
-    s3_bucket: str = "sku-forecasting"
-    s3_key_prefix: str = ""
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
-    aws_default_region: str = "us-east-1"
-    s3_processed_endpoint_url: Optional[str] = None
-    s3_processed_access_key_id: Optional[str] = None
-    s3_processed_secret_access_key: Optional[str] = None
-    s3_processed_region: Optional[str] = None
-
-    # ── Lockbox / Vault ─────────────────────────────────────────────
-    yc_lockbox_endpoint: str = "https://payload.lockbox.api.cloud.yandex.net"
-    yc_iam_endpoint: str = "https://iam.api.cloud.yandex.net"
-    yc_lockbox_secret_id: Optional[str] = None
-    yc_sa_key_file: Optional[str] = None
-    vault_addr: Optional[str] = None
-    vault_token: Optional[str] = None
-    vault_role_id: Optional[str] = None
-    vault_secret_id: Optional[str] = None
-    vault_path: Optional[str] = None
-
-    # ── Email ────────────────────────────────────────────────────────
-    email_provider: str = Field("console", description="console | smtp | resend")
-    email_from: str = "noreply@example.com"
-    email_from_name: str = "SKU Forecasting"
-    email_reply_to: Optional[str] = None
-    email_unsubscribe: Optional[str] = None
-    smtp_host: Optional[str] = None
-    smtp_port: int = 465
-    smtp_user: Optional[str] = None
-    smtp_password: Optional[str] = None
-    smtp_use_tls: bool = True
-    resend_api_key: Optional[str] = None
-
-    # ── Telegram ────────────────────────────────────────────────────
-    telegram_bot_token: Optional[str] = None
-    telegram_bot_username: Optional[str] = None
-    telegram_webhook_secret: Optional[str] = None
-
-    # ── OAuth ────────────────────────────────────────────────────────
-    oauth_google_client_id: Optional[str] = None
-    oauth_google_client_secret: Optional[str] = None
-    oauth_google_redirect_uri: Optional[str] = None
-    oauth_yandex_client_id: Optional[str] = None
-    oauth_yandex_client_secret: Optional[str] = None
-    oauth_yandex_redirect_uri: Optional[str] = None
-
-    # ── Frontend / CORS / Captcha ──────────────────────────────────
-    frontend_url: Optional[str] = None
-    frontend_origins: Optional[str] = None
-    turnstile_secret_key: Optional[str] = None
+    # ── Trusted proxies for client-IP extraction (signup_rate_limit.py)
     trusted_proxies: str = "127.0.0.0/8"
 
-    # ── Sandbox ──────────────────────────────────────────────────────
-    sandbox_image: str = "sku-forecasting-sandbox"
-    sandbox_runtime: str = "runc"
-    sandbox_timeout_sec: int = 30
-    sandbox_mem_limit: str = "512m"
-    sandbox_cpus: float = 1.0
-    sandbox_max_rows: int = 5_000_000
-    sandbox_max_columns: int = 64
-    sandbox_work_dir: str = "/var/lib/sku-sandbox"
 
-    # ── ClamAV ──────────────────────────────────────────────────────
-    clamav_host: str = "clamav"
-    clamav_port: int = 3310
-    clamav_socket: Optional[str] = None
-    clamav_timeout_sec: int = 60
-    clamav_max_bytes: int = 52_428_800
-
-    # ── Uploads / paths ─────────────────────────────────────────────
-    max_upload_bytes: int = 52_428_800
-    allow_sync_upload_fallback: bool = False
-    disposable_domains_file: Optional[str] = None
-    registry_path: Optional[str] = None
-    upload_registry_path: Optional[str] = None
-
-    # ── Model cache ─────────────────────────────────────────────────
-    model_cache_max: int = 256
-
-    # ── MLflow / OTel ──────────────────────────────────────────────
-    mlflow_tracking_uri: Optional[str] = None
-    otel_exporter_otlp_endpoint: Optional[str] = None
-
-    # ── Webhooks ────────────────────────────────────────────────────
-    alert_webhook_url: Optional[str] = None
-    webhook_ip_whitelist: Optional[str] = None
-
-
-# Singleton — constructed once at process startup. Modules import
-# this directly: `from src.settings import settings`.
-#
-# For tests that need different values, construct a fresh Settings()
-# inside the test (pydantic-settings re-reads env on each construction).
+# Singleton — constructed once at process startup. Modules import this
+# directly: `from src.settings import settings`. For per-test overrides,
+# construct a fresh Settings() after monkeypatch.setenv(...).
 settings = Settings()
