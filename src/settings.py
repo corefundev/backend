@@ -84,19 +84,6 @@ class Settings(BaseSettings):
     # ── Trusted proxies for client-IP extraction (signup_rate_limit.py)
     trusted_proxies: str = "127.0.0.0/8"
 
-    # ── Sandbox (storage/sandbox.py, storage/sandbox_broker.py) ──────
-    # STATIC deployment knobs set in the container env by compose; the
-    # broker container sets them explicitly (it skips *common-env).
-    sandbox_image: str = "sku-forecasting-sandbox"
-    sandbox_timeout_sec: int = 30
-    sandbox_mem_limit: str = "512m"
-    sandbox_cpus: float = 1.0
-    sandbox_work_dir: str = "/var/lib/sku-sandbox"
-    sandbox_runtime: str = "runc"
-    sandbox_broker_url: str = ""
-    sandbox_max_rows: int = 5_000_000
-    sandbox_max_columns: int = 64
-
 
 # Singleton — constructed once at process startup. Modules import this
 # directly: `from src.settings import settings`. For per-test overrides,

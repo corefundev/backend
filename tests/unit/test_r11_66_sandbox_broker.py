@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 
 import src.storage.sandbox as sandbox_mod
 import src.storage.sandbox_broker as broker_mod
-from src.settings import settings
 from src.storage.sandbox import DockerSandbox, SandboxError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture()
 def broker(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "sandbox_work_dir", str(tmp_path))
+    monkeypatch.setenv("SANDBOX_WORK_DIR", str(tmp_path))
     monkeypatch.setattr(broker_mod, "_docker_client", object())  # never used
     return TestClient(broker_mod.app)
 
@@ -134,7 +133,7 @@ class _FakeHTTPResponse:
 
 
 def test_sandbox_broker_transport_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "sandbox_broker_url", "http://sandbox-broker:8100")
+    monkeypatch.setenv("SANDBOX_BROKER_URL", "http://sandbox-broker:8100")
     box = DockerSandbox(work_dir=tmp_path)
     assert box._client is None    # no docker SDK touched in broker mode
 
@@ -159,7 +158,7 @@ def test_sandbox_broker_transport_roundtrip(tmp_path, monkeypatch):
 
 
 def test_sandbox_broker_rejection_raises_and_cleans(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "sandbox_broker_url", "http://sandbox-broker:8100")
+    monkeypatch.setenv("SANDBOX_BROKER_URL", "http://sandbox-broker:8100")
     box = DockerSandbox(work_dir=tmp_path)
 
     import urllib.error
@@ -175,6 +174,7 @@ def test_sandbox_broker_rejection_raises_and_cleans(tmp_path, monkeypatch):
 
 
 def test_sandbox_local_mode_still_requires_docker(tmp_path, monkeypatch):
+    monkeypatch.delenv("SANDBOX_BROKER_URL", raising=False)
     captured = {}
 
     def fake_spawn(client, **kw):
