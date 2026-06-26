@@ -9,6 +9,11 @@ to bottom in the moment** — each file follows the same shape:
 4. **Verify** — how to know the fix worked.
 5. **Post-mortem** — what to record in memory afterwards.
 
+> **Not an incident?** For day-2 deployment/operations rules (CD scope,
+> `--force-recreate`, never-rerun-an-old-CD-run, secrets in Lockbox, the
+> overlay2 host pin, staleness-alert triage) see
+> [../OPERATIONS.md](../OPERATIONS.md).
+
 ## Playbooks
 
 | Scenario | File |
