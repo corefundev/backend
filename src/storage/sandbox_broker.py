@@ -26,13 +26,13 @@ regex-validated and resolved strictly inside SANDBOX_WORK_DIR.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.settings import settings
 from src.storage.sandbox import SandboxError, spawn_and_wait
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def _client():
 
 
 def _work_dir() -> Path:
-    return Path(settings.sandbox_work_dir)
+    return Path(os.environ.get("SANDBOX_WORK_DIR", "/var/lib/sku-sandbox"))
 
 
 class SpawnRequest(BaseModel):
@@ -106,16 +106,16 @@ def spawn(req: SpawnRequest) -> SpawnResponse:
     try:
         exit_code, timed_out, stdout, stderr = spawn_and_wait(
             _client(),
-            image=settings.sandbox_image,
+            image=os.environ.get("SANDBOX_IMAGE", "sku-forecasting-sandbox"),
             in_dir=in_dir,
             out_dir=out_dir,
             input_name=req.input_name,
             max_rows=req.max_rows,
             max_columns=req.max_columns,
-            timeout_sec=settings.sandbox_timeout_sec,
-            mem_limit=settings.sandbox_mem_limit,
-            cpus=settings.sandbox_cpus,
-            runtime=settings.sandbox_runtime,
+            timeout_sec=int(os.environ.get("SANDBOX_TIMEOUT_SEC", "30")),
+            mem_limit=os.environ.get("SANDBOX_MEM_LIMIT", "512m"),
+            cpus=float(os.environ.get("SANDBOX_CPUS", "1.0")),
+            runtime=os.environ.get("SANDBOX_RUNTIME", "runc"),
         )
     except SandboxError as e:
         logger.warning("spawn failed for %s: %s", req.job_dir, e)

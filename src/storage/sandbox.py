@@ -45,12 +45,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
-from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -189,15 +188,15 @@ class DockerSandbox:
         work_dir: Path | None = None,
         runtime: str | None = None,
     ):
-        self.image       = image or settings.sandbox_image
-        self.timeout_sec = int(timeout_sec or settings.sandbox_timeout_sec)
-        self.mem_limit   = mem_limit or settings.sandbox_mem_limit
-        self.cpus        = float(cpus or settings.sandbox_cpus)
-        self.work_dir    = Path(work_dir or settings.sandbox_work_dir)
-        self.runtime     = runtime or settings.sandbox_runtime
+        self.image       = image or os.environ.get("SANDBOX_IMAGE", "sku-forecasting-sandbox")
+        self.timeout_sec = int(timeout_sec or os.environ.get("SANDBOX_TIMEOUT_SEC", "30"))
+        self.mem_limit   = mem_limit or os.environ.get("SANDBOX_MEM_LIMIT", "512m")
+        self.cpus        = float(cpus or os.environ.get("SANDBOX_CPUS", "1.0"))
+        self.work_dir    = Path(work_dir or os.environ.get("SANDBOX_WORK_DIR", "/var/lib/sku-sandbox"))
+        self.runtime     = runtime or os.environ.get("SANDBOX_RUNTIME", "runc")
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
-        self.broker_url = (settings.sandbox_broker_url or "").rstrip("/")
+        self.broker_url = (os.environ.get("SANDBOX_BROKER_URL") or "").rstrip("/")
         self._client = None
         if not self.broker_url:
             try:
@@ -276,8 +275,8 @@ class DockerSandbox:
         input_path.write_bytes(input_bytes)
         input_path.chmod(0o444)
 
-        max_rows    = settings.sandbox_max_rows
-        max_columns = settings.sandbox_max_columns
+        max_rows    = int(os.environ.get("SANDBOX_MAX_ROWS",    "5000000"))
+        max_columns = int(os.environ.get("SANDBOX_MAX_COLUMNS", "64"))
 
         try:
             # timed_out is already folded into stderr by the spawn layer —
