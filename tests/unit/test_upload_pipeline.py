@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.settings import settings
 from src.storage import zones
 from src.storage import backend as sb
 from src.storage import upload_registry as ur
@@ -281,7 +282,7 @@ def test_scanner_parses_error():
 
 
 def test_scanner_rejects_oversize(monkeypatch):
-    monkeypatch.setenv("CLAMAV_MAX_BYTES", "8")
+    monkeypatch.setattr(settings, "clamav_max_bytes", 8)
     r = scan_bytes(b"X" * 100, _FakeClamd("stream: OK"))
     assert r.verdict == ScanVerdict.ERROR
     assert "too large" in r.raw_response

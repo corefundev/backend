@@ -23,11 +23,12 @@ Env vars
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import struct
 from dataclasses import dataclass
 from enum import Enum
+
+from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +70,10 @@ class ClamdClient:
         socket_path: str | None = None,
         timeout_sec: float | None = None,
     ):
-        self.host = host or os.environ.get("CLAMAV_HOST", "clamav")
-        self.port = int(port if port is not None else os.environ.get("CLAMAV_PORT", "3310"))
-        self.socket_path = socket_path or os.environ.get("CLAMAV_SOCKET")
-        self.timeout = float(timeout_sec or os.environ.get("CLAMAV_TIMEOUT_SEC", "60"))
+        self.host = host or settings.clamav_host
+        self.port = int(port if port is not None else settings.clamav_port)
+        self.socket_path = socket_path or settings.clamav_socket
+        self.timeout = float(timeout_sec or settings.clamav_timeout_sec)
 
     # ── connection ────────────────────────────────────────────────────────
 
@@ -141,7 +142,7 @@ def scan_bytes(data: bytes, client: ClamdClient | None = None) -> ScanResult:
     Raises ScannerError on transport failure — the caller MUST NOT interpret
     a transport error as "clean". Default-deny is the whole point.
     """
-    max_bytes = int(os.environ.get("CLAMAV_MAX_BYTES", str(50 * 1024 * 1024)))
+    max_bytes = settings.clamav_max_bytes
     if len(data) > max_bytes:
         return ScanResult(
             verdict=ScanVerdict.ERROR,

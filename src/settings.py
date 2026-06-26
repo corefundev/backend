@@ -52,6 +52,8 @@ Test isolation: construct a fresh `Settings()` after `monkeypatch.setenv(...)`
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -96,6 +98,13 @@ class Settings(BaseSettings):
     sandbox_broker_url: str = ""
     sandbox_max_rows: int = 5_000_000
     sandbox_max_columns: int = 64
+
+    # ── ClamAV scanner (storage/scanner.py) ─────────────────────────
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_socket: Optional[str] = None
+    clamav_timeout_sec: int = 60
+    clamav_max_bytes: int = 52_428_800
 
 
 # Singleton — constructed once at process startup. Modules import this
