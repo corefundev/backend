@@ -761,52 +761,39 @@ def enqueue_training(
         return job.id
 
     except Exception as e:
-        logger.warning(f"Redis unavailable ({e}); running training synchronously")
-        from src.pipeline.train import run_training_pipeline
-        # Synchronous path: still want the row marked finished/failed.
-        try:
-            from src.storage.training_runs import (
-                get_training_runs_registry, RUNNING, FINISHED, FAILED,
+        # #185 (BUG-1): the queue is unavailable (Redis blip at enqueue time).
+        # By DEFAULT do NOT silently run a degraded inline training — re-raise so
+        # the route releases the in-flight claim (R5-4) and returns 503; the
+        # caller retries when Redis recovers. The previous fallback called
+        # run_training_pipeline() directly, which DROPPED extend_from_paths (lost
+        # the client's accumulated history on incremental retrain), generated NO
+        # forecasts, and blocked the API event loop for the full training.
+        #
+        # The inline path is opt-in via ALLOW_SYNC_TRAINING_FALLBACK=1 (mirrors
+        # the upload pipeline's ALLOW_SYNC_UPLOAD_FALLBACK) and routes through the
+        # SAME orchestrator as the worker — `_training_job` — so it merges
+        # history, generates forecasts, flips sku_clients status, and notifies.
+        # NOTE: like the upload gate, the inline run ties up the caller for the
+        # full training duration; it is a single-node / dev convenience, not a
+        # prod-safe path.
+        if os.environ.get("ALLOW_SYNC_TRAINING_FALLBACK") != "1":
+            logger.error(
+                "training queue unavailable and sync fallback disabled "
+                "(set ALLOW_SYNC_TRAINING_FALLBACK=1 to run inline): %s", e
             )
-            from datetime import datetime, timezone
-            now = lambda: datetime.now(timezone.utc).isoformat()
-            runs = get_training_runs_registry() if run_id else None
-        except Exception:
-            runs = None
-        if runs is not None:
-            try:
-                runs.update(run_id, status=RUNNING, started_at=now())
-            except Exception:
-                pass
-        try:
-            result = run_training_pipeline(data_path, config_path, client_id)
-        except Exception as exc:
-            if runs is not None:
-                try:
-                    runs.update(run_id, status=FAILED, ended_at=now(), error=str(exc))
-                except Exception:
-                    pass
             raise
-        if runs is not None:
-            try:
-                metrics = result.get("metrics") or {}
-                runs.update(
-                    run_id,
-                    status=FINISHED,
-                    ended_at=now(),
-                    elapsed_sec=result.get("elapsed_sec"),
-                    n_skus=result.get("n_skus"),
-                    n_features=result.get("n_features"),
-                    n_rows=result.get("n_rows"),
-                    wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
-                    mase=metrics.get("mase_global",  metrics.get("mase_mean")),
-                    mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
-                    smape=metrics.get("smape_global", metrics.get("smape_mean")),
-                    model_path=result.get("model_path"),
-                    mlflow_run_id=result.get("mlflow_run_id"),
-                )
-            except Exception:
-                pass
+        logger.warning(
+            "training queue unavailable (%s); running inline via _training_job "
+            "(merges history + forecasts + status + notify)", e
+        )
+        _training_job(
+            client_id=client_id,
+            data_path=data_path,
+            config_path=config_path,
+            storage_backend=backend,
+            run_id=run_id,
+            extend_from_paths=extend_from_paths,
+        )
         return None
 
 

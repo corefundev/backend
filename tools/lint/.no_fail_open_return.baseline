@@ -20,10 +20,10 @@
 # training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:779  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04; +2 #181 mase_seasonal)
-src/pipeline/task_queue.py:774  R9-T4-001 — training fallback registry; closes in item #14 (+2 #181 mase_seasonal)
-src/pipeline/task_queue.py:787  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift; +2 #181 mase_seasonal)
-src/pipeline/task_queue.py:808  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift; +3 #181 mase_seasonal)
+# CLOSED by #185 (2026-06-28): the degraded sync-training fallback (4 broad
+# excepts doing partial run-status bookkeeping) was DELETED — the fallback now
+# routes through `_training_job` (gated by ALLOW_SYNC_TRAINING_FALLBACK), whose
+# error handling lives in named helpers. No task_queue.py NFOR entries remain.
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,
