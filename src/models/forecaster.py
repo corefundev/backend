@@ -72,7 +72,12 @@ class SKUForecaster:
         self.model: lgb.LGBMRegressor | None = None
         self.feature_cols: list[str] = []
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "SKUForecaster":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        sample_weight: np.ndarray | None = None,
+    ) -> "SKUForecaster":
         params = {
             "n_estimators": self.model_cfg.get("n_estimators", 1000),
             "learning_rate": self.model_cfg.get("learning_rate", 0.05),
@@ -96,10 +101,12 @@ class SKUForecaster:
             )
             y = y.clip(lower=0)
         self.model = lgb.LGBMRegressor(**params)
-        self.model.fit(
-            X, y,
-            callbacks=[lgb.log_evaluation(period=100)],
-        )
+        # #183: anomaly down-weighting — pass per-row sample_weight through to
+        # LightGBM so flagged outliers contribute less to the fit. None → unweighted.
+        fit_kwargs: dict = {"callbacks": [lgb.log_evaluation(period=100)]}
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = np.asarray(sample_weight)
+        self.model.fit(X, y, **fit_kwargs)
         logger.info(
             f"Model fitted on {len(X)} rows, {len(self.feature_cols)} features "
             f"(objective={params['objective']})"

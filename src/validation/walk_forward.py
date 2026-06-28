@@ -34,12 +34,18 @@ from src.validation.metrics import aggregate_metrics, compute_metrics_per_sku
 logger = logging.getLogger(__name__)
 
 
-def _fit_with_optional_groups(model, X, y, groups):
-    """Pass groups only to fit() that declares the parameter."""
-    if "groups" in inspect.signature(model.fit).parameters:
-        model.fit(X, y, groups=groups)
-    else:
-        model.fit(X, y)
+def _fit_with_optional_groups(model, X, y, groups, sample_weight=None):
+    """Pass groups / sample_weight only to a fit() that declares them.
+
+    Signature-driven so a stub model (or a fixed-arity test lambda) that doesn't
+    accept these kwargs still fits cleanly (#183 / feedback_signature_change_breaks_stubs)."""
+    params = inspect.signature(model.fit).parameters
+    kwargs = {}
+    if "groups" in params:
+        kwargs["groups"] = groups
+    if sample_weight is not None and "sample_weight" in params:
+        kwargs["sample_weight"] = sample_weight
+    model.fit(X, y, **kwargs)
 
 
 @dataclass
@@ -59,6 +65,7 @@ def walk_forward_validate(
     model,
     feature_cols: list[str],
     config: dict,
+    sample_weight_fn=None,
 ) -> WalkForwardResult:
     """
     Expanding-window walk-forward validation.
@@ -104,11 +111,16 @@ def walk_forward_validate(
             continue
 
         fold_model = model() if callable(model) else model
+        # #183: fold-aware anomaly weights — computed on THIS fold's train rows
+        # only (never test-fold data), so the validation metric reflects the
+        # same anomaly-weighted fit as the deployed final model with no leakage.
+        fold_weights = sample_weight_fn(train_df) if sample_weight_fn is not None else None
         _fit_with_optional_groups(
             fold_model,
             train_df[feature_cols],
             train_df[target_col],
             train_df[sku_col],
+            sample_weight=fold_weights,
         )
 
         # Ensemble: per-SKU blend weights from a recent training window.

@@ -74,6 +74,7 @@ class MIMOForecaster:
         X: pd.DataFrame,
         y: pd.Series,
         groups: pd.Series | None = None,
+        sample_weight: np.ndarray | None = None,
     ) -> "MIMOForecaster":
         """
         Fit H direct models. For step h, target = sales shifted h steps back.
@@ -85,9 +86,15 @@ class MIMOForecaster:
         NaN that get dropped. Without it the global `y.shift(-h)` smears the
         end of one SKU's series into the start of the next, polluting H≈14
         rows per SKU boundary with cross-SKU targets.
+
+        sample_weight: optional per-row weights aligned POSITIONALLY to X (#183,
+        anomaly down-weighting). Each horizon drops the NaN-target rows, so the
+        weight vector is sliced by the SAME boolean mask before the per-head fit.
+        None → unweighted.
         """
         self.feature_cols = list(X.columns)
         self.models_ = []
+        w = None if sample_weight is None else np.asarray(sample_weight)
 
         params = self._base_params()
         if params["objective"] in {"tweedie", "poisson"} and (y < 0).any():
@@ -107,8 +114,13 @@ class MIMOForecaster:
             X_h  = X[mask]
             y_h  = y_h[mask]
 
+            fit_kwargs: dict = {"callbacks": [lgb.log_evaluation(period=-1)]}
+            if w is not None:
+                # mask is index-aligned to X; .to_numpy() gives the positional
+                # boolean to slice the positional weight vector to the kept rows.
+                fit_kwargs["sample_weight"] = w[mask.to_numpy()]
             model = lgb.LGBMRegressor(**params)
-            model.fit(X_h, y_h, callbacks=[lgb.log_evaluation(period=-1)])
+            model.fit(X_h, y_h, **fit_kwargs)
             self.models_.append(model)
 
         logger.info(

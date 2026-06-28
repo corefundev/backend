@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 
 from src.data.loader import load_config, load_data, validate_data
@@ -176,20 +176,22 @@ def run_training_pipeline(
     df = validate_data(df, config)
     storage.save_raw_data(df)
 
-    # ── 3. Anomaly detection ──────────────────────────────────
+    # ── 3. Anomaly detection (configure) ──────────────────────
+    # #183: detection RUNS in step 4 (after build_features) so the global
+    # IsolationForest can see the lag_/rolling_ feature columns — running it
+    # here (pre-features) left those columns absent, so only per-SKU IQR ever
+    # fired. Build the detector now; apply it once features exist.
     _progress(3, 9, "Поиск аномалий")
     anom_cfg = config.get("anomaly_detection", {})
-    if anom_cfg.get("enabled", True):
-        detector = SalesAnomalyDetector(
+
+    def _new_detector() -> SalesAnomalyDetector:
+        return SalesAnomalyDetector(
             contamination=anom_cfg.get("contamination", 0.05),
             iqr_factor=anom_cfg.get("iqr_factor", 3.0),
             anomaly_weight=anom_cfg.get("anomaly_weight", 0.1),
         )
-        df, sample_weights_full = detector.fit_detect(
-            df,
-            sku_col=config["data"]["sku_col"],
-            target_col=config["data"]["target_col"],
-        )
+
+    anomaly_enabled = anom_cfg.get("enabled", True)
 
     # ── 4. Feature engineering ────────────────────────────────
     _progress(4, 9, "Построение признаков (календарь, лаги, погода, праздники)")
@@ -200,16 +202,31 @@ def run_training_pipeline(
 
     target_col = config["data"]["target_col"]
     sku_col    = config["data"]["sku_col"]
+
+    # #183: with features present, detect anomalies on the feature frame and
+    # build per-row sample weights for the FINAL fit. `is_anomaly` is excluded
+    # from feature_cols (get_feature_columns) so it never becomes a model input.
+    sample_weights_full: Optional[Any] = None
+    sample_weight_fn: Optional[Callable[[Any], Any]] = None
+    if anomaly_enabled:
+        df, sample_weights_full = _new_detector().fit_detect(
+            df, sku_col=sku_col, target_col=target_col,
+        )
+
+        # Fold-aware weights for honest walk-forward: each fold recomputes
+        # weights on its OWN train rows only — never test-fold data (avoids the
+        # L-A3 preprocessing-leakage trap) — so the reported metric reflects the
+        # same anomaly-weighted fit the final model uses (closes the M-A8 skew).
+        def _fold_weights(train_df: Any) -> Any:
+            _, w = _new_detector().fit_detect(
+                train_df, sku_col=sku_col, target_col=target_col,
+            )
+            return w
+
+        sample_weight_fn = _fold_weights
+
     X = df[feature_cols]
     y = df[target_col]
-
-    # Align sample weights to feature-engineered rows. The downstream
-    # ensemble/MIMO fit doesn't currently accept sample_weight; this
-    # block is a no-op until that wire-up lands. Keep the alignment
-    # so once we do plumb sample_weight through, the dataframe index
-    # math is already verified.
-    if anom_cfg.get("enabled", True) and "is_anomaly" in df.columns:
-        _ = sample_weights_full[df.index] if hasattr(sample_weights_full, '__getitem__') else None
 
     # ── 5. HPO (optional) ─────────────────────────────────────
     hpo_cfg = config.get("hpo", {})
@@ -250,7 +267,9 @@ def run_training_pipeline(
         val_factory = lambda: SKUForecaster(config)
         val_label = "lgbm-baseline"
     logger.info(f"  Walk-forward validator class: {val_label}")
-    wf_result = walk_forward_validate(df, val_factory, feature_cols, config)
+    wf_result = walk_forward_validate(
+        df, val_factory, feature_cols, config, sample_weight_fn=sample_weight_fn,
+    )
     agg = wf_result.aggregated
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
     storage.save_per_sku_metrics(wf_result.per_sku_metrics)
@@ -270,7 +289,7 @@ def run_training_pipeline(
         # accuracy gain on mixed catalogs. EnsembleForecaster was
         # already imported in step 6 for the validator factory.
         final_model = EnsembleForecaster(config)
-        final_model.fit(X, y, groups=df[sku_col])
+        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
         final_model.fit_quantiles(X, y, groups=df[sku_col])
         # Estimate per-SKU mixing weights from the most recent
         # window of training data. Needs the SKU + date columns
@@ -287,12 +306,12 @@ def run_training_pipeline(
         logger.info("  Ensemble (Tweedie+MAE+MSE) + quantile models fitted")
     elif model_type == "mimo":
         final_model = MIMOForecaster(config)
-        final_model.fit(X, y, groups=df[sku_col])
+        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
         final_model.fit_quantiles(X, y, groups=df[sku_col])
         logger.info("  MIMO model + quantile models fitted")
     else:
         final_model = SKUForecaster(config)
-        final_model.fit(X, y)
+        final_model.fit(X, y, sample_weight=sample_weights_full)
 
     # ── 8. Cold-start cluster fit ─────────────────────────────
     # Only the cluster forecaster is fit here; the cold-start router

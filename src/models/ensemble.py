@@ -78,8 +78,12 @@ class EnsembleForecaster:
         X: pd.DataFrame,
         y: pd.Series,
         groups: pd.Series | None = None,
+        sample_weight: np.ndarray | None = None,
     ) -> "EnsembleForecaster":
-        """Train one MIMO per objective on the same (X, y)."""
+        """Train one MIMO per objective on the same (X, y).
+
+        sample_weight (#183): per-row anomaly weights, passed through unchanged
+        to every child MIMO (each applies its own per-horizon mask)."""
         self.feature_cols = list(X.columns)
         self.models_ = {}
         for obj in self.objectives:
@@ -88,7 +92,7 @@ class EnsembleForecaster:
             cfg_copy["model"]["objective"] = obj
             child = MIMOForecaster(cfg_copy)
             logger.info(f"Ensemble: fitting child objective={obj}")
-            child.fit(X, y, groups=groups)
+            child.fit(X, y, groups=groups, sample_weight=sample_weight)
             self.models_[obj] = child
         logger.info(
             f"Ensemble: fitted {len(self.models_)} child models, "
