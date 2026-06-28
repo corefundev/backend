@@ -81,11 +81,12 @@ def _frontend_base_url() -> str:
 
 
 def _render_finished(
-    client_id:    str,
-    duration_sec: float | None,
-    n_skus:       int | None,
-    wmape:        float | None,
-    mase:         float | None,
+    client_id:     str,
+    duration_sec:  float | None,
+    n_skus:        int | None,
+    wmape:         float | None,
+    mase:          float | None,
+    mase_seasonal: float | None = None,
 ) -> tuple[str, str]:
     """Returns (subject, body) for a successful training run."""
     base = _frontend_base_url()
@@ -98,7 +99,8 @@ def _render_finished(
         f"  • Длительность:       {_format_duration(duration_sec)}",
         f"  • Товаров (SKU):      {n_skus if n_skus is not None else '—'}",
         f"  • WMAPE (точность):   {_format_pct(wmape)}  — чем меньше, тем точнее",
-        f"  • MASE:               {_format_num(mase)}  — < 1 значит лучше базового",
+        f"  • MASE:               {_format_num(mase)}  — < 1: лучше наивного «как вчера»",
+        f"  • MASE сезонный:      {_format_num(mase_seasonal)}  — < 1: лучше «как в этот день неделю назад» (базовая модель)",
         "",
         f"Прогноз для всех SKU уже посчитан и доступен:",
         f"  {base}/app/forecasts",
@@ -135,11 +137,12 @@ def _render_failed(client_id: str, error: str) -> tuple[str, str]:
 
 
 def notify_training_finished(
-    client_id:    str,
-    duration_sec: float | None = None,
-    n_skus:       int | None   = None,
-    wmape:        float | None = None,
-    mase:         float | None = None,
+    client_id:     str,
+    duration_sec:  float | None = None,
+    n_skus:        int | None   = None,
+    wmape:         float | None = None,
+    mase:          float | None = None,
+    mase_seasonal: float | None = None,
 ) -> None:
     """Best-effort email on successful training. Never raises."""
     try:
@@ -150,7 +153,9 @@ def notify_training_finished(
         if not to:
             logger.info("training notification skipped (no email): %s", client_id)
             return
-        subject, body = _render_finished(client_id, duration_sec, n_skus, wmape, mase)
+        subject, body = _render_finished(
+            client_id, duration_sec, n_skus, wmape, mase, mase_seasonal
+        )
         from src.auth.email_sender import get_email_sender
         get_email_sender().send(to=to, subject=subject, body=body)
         logger.info("training-complete email sent → %s (client=%s)", to, client_id)

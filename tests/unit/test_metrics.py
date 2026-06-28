@@ -5,7 +5,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.validation.metrics import mase, wmape, smape, compute_metrics_per_sku, aggregate_metrics
+from src.validation.metrics import (
+    mase, mase_seasonal, wmape, smape, compute_metrics_per_sku, aggregate_metrics,
+)
 
 
 class TestMASE:
@@ -25,6 +27,47 @@ class TestMASE:
         y_train = np.array([5.0, 5.0, 5.0])
         result = mase(np.array([5.0]), np.array([5.0]), y_train)
         assert np.isnan(result)
+
+    def test_m1_identical_to_legacy_diff_formula(self):
+        # The refactor (#181) must keep m=1 byte-identical to mean(|diff(y_train)|).
+        y_train = np.array([2.0, 5.0, 3.0, 8.0, 4.0])
+        y_true = np.array([10.0, 12.0])
+        y_pred = np.array([9.0, 15.0])
+        legacy = np.mean(np.abs(y_true - y_pred)) / np.mean(np.abs(np.diff(y_train)))
+        assert mase(y_true, y_pred, y_train) == pytest.approx(legacy)
+
+    def test_single_element_train_returns_nan_cleanly(self):
+        # Bonus: len(y_train) <= m now short-circuits to NaN (no RuntimeWarning).
+        assert np.isnan(mase(np.array([5.0]), np.array([4.0]), np.array([5.0])))
+
+
+class TestMASESeasonal:
+    def test_known_value_weekly(self):
+        # m=7 naive: |y_train[7:] - y_train[:-7]| = |[11,12]-[1,2]| = [10,10] -> mean 10.
+        y_train = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 11.0, 12.0])
+        y_true = np.array([20.0, 30.0])
+        y_pred = np.array([18.0, 33.0])  # MAE = mean(2,3) = 2.5
+        assert mase_seasonal(y_true, y_pred, y_train) == pytest.approx(2.5 / 10.0)
+
+    def test_history_shorter_than_period_returns_nan(self):
+        # < 8 days of history → the m=7 naive is undefined.
+        assert np.isnan(mase_seasonal(np.array([5.0]), np.array([4.0]), np.array([1.0, 2.0, 3.0])))
+
+    def test_seasonal_naive_stronger_than_m1_on_seasonal_series(self):
+        # Weekly-seasonal demand (big within-week swings, small week-over-week
+        # drift): the seasonal naive (m=7) error is SMALLER than the lag-1 error,
+        # so mase_seasonal > mase for the same forecast — the seasonal baseline
+        # is the harder, more honest bar. Deterministic, no perfect periodicity
+        # (which would make the seasonal naive error 0 → NaN).
+        week1 = [10.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+        week2 = [12.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]   # week-over-week drift
+        y_train = np.array(week1 + week2)
+        y_true = np.array([5.0])
+        y_pred = np.array([4.0])                        # MAE = 1
+        m1 = mase(y_true, y_pred, y_train)
+        seasonal = mase_seasonal(y_true, y_pred, y_train)
+        assert np.isfinite(m1) and np.isfinite(seasonal)
+        assert seasonal > m1
 
 
 class TestWMAPE:
@@ -83,6 +126,16 @@ class TestComputeMetricsPerSku:
         buggy_naive = np.mean(np.abs(np.diff(np.concatenate([train, train, train]))))
         assert got != pytest.approx(mae / buggy_naive)
 
+    def test_emits_mase_seasonal_column(self):
+        # #181: per-SKU frame must carry the additive mase_seasonal column.
+        train = np.arange(1.0, 15.0)  # 14 days > period(7), so m=7 is defined
+        df = pd.DataFrame([
+            {"sku": "A", "actual": 20.0, "predicted": 19.0, "train_values": train},
+        ])
+        out = compute_metrics_per_sku(df, "sku")
+        assert "mase_seasonal" in out.columns
+        assert not np.isnan(out["mase_seasonal"].iloc[0])
+
 
 class TestAggregation:
     def test_aggregate_metrics_keys(self):
@@ -97,6 +150,22 @@ class TestAggregation:
             assert f"{metric}_mean" in agg
             assert f"{metric}_median" in agg
             assert f"{metric}_p90" in agg
+
+    def test_aggregate_emits_seasonal_keys(self):
+        # #181: with raw_df carrying train_values >= 8 days, aggregate must emit
+        # both mase_global (m=1) and mase_seasonal_global (m=7), plus the per-SKU
+        # mase_seasonal_mean distribution key.
+        train = np.arange(1.0, 15.0)
+        raw = pd.DataFrame([
+            {"sku": "A", "actual": 20.0, "predicted": 19.0, "train_values": train},
+            {"sku": "A", "actual": 21.0, "predicted": 22.0, "train_values": train},
+        ])
+        per_sku = compute_metrics_per_sku(raw, "sku")
+        agg = aggregate_metrics(per_sku, raw_df=raw)
+        assert "mase_seasonal_global" in agg and not np.isnan(agg["mase_seasonal_global"])
+        assert "mase_seasonal_mean" in agg
+        # m=1 global must be unchanged in spirit (present + finite here).
+        assert "mase_global" in agg and not np.isnan(agg["mase_global"])
 
     def test_aggregate_metrics_all_nan_does_not_crash(self):
         """R11-H6: an all-zero-sales catalog makes every per-SKU metric

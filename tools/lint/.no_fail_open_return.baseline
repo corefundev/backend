@@ -20,10 +20,10 @@
 # training-runs API. No longer log-only → no baseline entry needed.
 
 # ── R9-B item #14 — task_queue.py exception narrowing ─────────────────────
-src/pipeline/task_queue.py:777  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04)
-src/pipeline/task_queue.py:772  R9-T4-001 — training fallback registry; closes in item #14
-src/pipeline/task_queue.py:785  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
-src/pipeline/task_queue.py:805  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift)
+src/pipeline/task_queue.py:779  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 _merged_cleanup_guard helper + contextlib import shift, 2026-06-04; +2 #181 mase_seasonal)
+src/pipeline/task_queue.py:774  R9-T4-001 — training fallback registry; closes in item #14 (+2 #181 mase_seasonal)
+src/pipeline/task_queue.py:787  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift; +2 #181 mase_seasonal)
+src/pipeline/task_queue.py:808  R9-T4-001 — training fallback registry; closes in item #14 (R11-M8 shift; +3 #181 mase_seasonal)
 
 # ── pre-R9 baseline — to be triaged in R10 maintenance ────────────────────
 # Each of these should either get narrowed to a specific exception type,

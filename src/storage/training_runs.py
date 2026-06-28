@@ -54,6 +54,7 @@ class TrainingRunRecord:
     n_rows:        Optional[int]   = None
     wmape:         Optional[float] = None
     mase:          Optional[float] = None
+    mase_seasonal: Optional[float] = None
     smape:         Optional[float] = None
     model_path:    Optional[str]   = None
     mlflow_run_id: Optional[str]   = None
@@ -67,7 +68,7 @@ class PostgresTrainingRunsRegistry:
     _UPDATABLE_COLUMNS = {
         "status", "job_id", "started_at", "ended_at", "elapsed_sec",
         "n_skus", "n_features", "n_rows",
-        "wmape", "mase", "smape",
+        "wmape", "mase", "mase_seasonal", "smape",
         "model_path", "mlflow_run_id", "error",
         "mlflow_logging_error",
     }
@@ -227,6 +228,7 @@ class PostgresTrainingRunsRegistry:
             n_rows=row.get("n_rows"),
             wmape=row.get("wmape"),
             mase=row.get("mase"),
+            mase_seasonal=row.get("mase_seasonal"),
             smape=row.get("smape"),
             model_path=row.get("model_path"),
             mlflow_run_id=row.get("mlflow_run_id"),
