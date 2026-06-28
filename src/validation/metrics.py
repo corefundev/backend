@@ -61,7 +61,25 @@ def compute_metrics_per_sku(
     for sku, group in results_df.groupby(sku_col):
         y_true = group[actual_col].values
         y_pred = group[pred_col].values
-        y_train = np.concatenate(group[train_col].values) if train_col in group.columns else y_true
+        # R14-3 (#182): every matched test row for a SKU carries the SAME
+        # per-SKU train series (broadcast by the walk_forward merge). The old
+        # `np.concatenate(group[train_col].values)` stitched K duplicate copies
+        # into one series, so np.diff() inside mase() saw K-1 phantom "junction"
+        # diffs (last value of one copy → first of the next) that inflated the
+        # naive_mae denominator and deflated per-SKU MASE (~-15% in repro). Take
+        # ONE representative series per SKU — matching the global path
+        # (aggregate_metrics uses iloc[0]). (Cross-fold window consistency is a
+        # separate, deeper point — L-A7, tracked in #186.)
+        if train_col in group.columns:
+            tv_first = group[train_col].iloc[0]
+            # Guard a missing (left-join NaN) series the same way the global
+            # path does (aggregate_metrics below), then use the single series.
+            if tv_first is None or (isinstance(tv_first, float) and np.isnan(tv_first)):
+                y_train = y_true
+            else:
+                y_train = np.asarray(tv_first)
+        else:
+            y_train = y_true
 
         records.append(
             {

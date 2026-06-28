@@ -55,6 +55,35 @@ class TestSMAPE:
         assert s1 == pytest.approx(s2)
 
 
+class TestComputeMetricsPerSku:
+    def test_mase_unaffected_by_duplicated_train_rows(self):
+        """R14-3 (#182): walk_forward broadcasts the SAME per-SKU train series
+        onto every matched test row. compute_metrics_per_sku must take ONE copy
+        (iloc[0]), NOT np.concatenate over all rows — otherwise K duplicate
+        copies inject phantom junction diffs into the MASE naive denominator
+        (measured ~-15% optimistic distortion). The per-SKU MASE must equal
+        MAE / naive_mae computed from a SINGLE copy of the train series,
+        regardless of how many test rows that SKU has."""
+        train = np.array([2.0, 4.0, 3.0, 5.0, 4.0, 6.0])
+        # K=3 matched test rows, each carrying the identical train array
+        # (exactly the shape the walk_forward merge produces).
+        df = pd.DataFrame([
+            {"sku": "A", "actual": 10.0, "predicted": 9.0,  "train_values": train},
+            {"sku": "A", "actual": 12.0, "predicted": 13.0, "train_values": train},
+            {"sku": "A", "actual": 11.0, "predicted": 10.0, "train_values": train},
+        ])
+        got = compute_metrics_per_sku(df, "sku")["mase"].iloc[0]
+
+        mae   = np.mean(np.abs(np.array([10., 12., 11.]) - np.array([9., 13., 10.])))
+        naive = np.mean(np.abs(np.diff(train)))           # ONE copy, no phantom junctions
+        assert got == pytest.approx(mae / naive)
+
+        # Guard against regression: the OLD concat-of-3-copies denominator
+        # would yield a different (smaller) MASE.
+        buggy_naive = np.mean(np.abs(np.diff(np.concatenate([train, train, train]))))
+        assert got != pytest.approx(mae / buggy_naive)
+
+
 class TestAggregation:
     def test_aggregate_metrics_keys(self):
         df = pd.DataFrame({
