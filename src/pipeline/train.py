@@ -13,6 +13,8 @@ import sys
 import time
 from typing import Any, Callable, Optional
 
+import pandas as pd
+
 
 from src.data.loader import load_config, load_data, validate_data
 from src.data.ge_validator import validate_with_great_expectations
@@ -96,6 +98,18 @@ def _save_and_log_to_mlflow(
                 _os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _hpo_tune_slice(df: pd.DataFrame, date_col: str, report_tail_days: int) -> pd.DataFrame:
+    """#180: the inner slice HPO tunes on = `df` minus the final report-tail
+    window (the last `report_tail_days` days, which walk-forward later TESTS on).
+
+    Holding that tail out of HPO makes the reported walk-forward metric (step 6,
+    on the full df) an honest OUT-OF-SAMPLE estimate instead of the HPO selection
+    objective — HPO can no longer tune against the very windows it's graded on.
+    """
+    cutoff = df[date_col].max() - pd.Timedelta(days=report_tail_days)
+    return df[df[date_col] <= cutoff]
 
 
 def run_training_pipeline(
@@ -229,14 +243,39 @@ def run_training_pipeline(
     y = df[target_col]
 
     # ── 5. HPO (optional) ─────────────────────────────────────
+    # #180: tune HPO on an INNER slice that EXCLUDES the walk-forward report tail
+    # (the last n_splits*horizon days step 6 tests on). Otherwise HPO minimizes
+    # error on the very windows the reported metric is then computed on →
+    # selection bias → an optimistically-low number shown to the customer. If
+    # history is too short to hold a tail out, SKIP HPO entirely so the reported
+    # metric stays unbiased (no tuning ⇒ nothing to over-fit against).
     hpo_cfg = config.get("hpo", {})
     if hpo_cfg.get("enabled", False):
-        _progress(5, 9, "Подбор гиперпараметров (Optuna)")
-        from src.models.hpo import run_hpo
-        best_params = run_hpo(df, feature_cols, config, hpo_cfg.get("n_trials", 30))
-        if best_params:
-            config["model"].update(best_params)
-            logger.info(f"  HPO best params: {best_params}")
+        horizon  = int(config["model"]["horizon"])
+        date_col = config["data"]["date_col"]
+        n_splits = int(config.get("validation", {}).get("n_splits", 3))
+        trial_horizon = int(hpo_cfg.get("trial_horizon", min(horizon, 5)))
+        df_tune = _hpo_tune_slice(df, date_col, report_tail_days=n_splits * horizon)
+        # HPO needs enough inner history for its OWN walk-forward folds.
+        min_tune_dates = 2 * n_splits * trial_horizon
+        n_tune_dates   = int(df_tune[date_col].nunique())
+        if n_tune_dates >= min_tune_dates:
+            _progress(5, 9, "Подбор гиперпараметров (Optuna)")
+            from src.models.hpo import run_hpo
+            best_params = run_hpo(df_tune, feature_cols, config, hpo_cfg.get("n_trials", 30))
+            if best_params:
+                config["model"].update(best_params)
+                logger.info(
+                    "  HPO best params (tuned on held-out inner slice, %d/%d dates): %s",
+                    n_tune_dates, int(df[date_col].nunique()), best_params,
+                )
+        else:
+            _progress(5, 9, "HPO пропущен (история коротка для honest-holdout)")
+            logger.warning(
+                "#180: history too short for a held-out HPO split (%d tune-dates "
+                "< %d) — skipping HPO so the reported metric stays unbiased",
+                n_tune_dates, min_tune_dates,
+            )
     else:
         _progress(5, 9, "HPO пропущен")
 
