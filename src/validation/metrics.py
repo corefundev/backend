@@ -8,17 +8,55 @@ import numpy as np
 import pandas as pd
 
 
-def mase(y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray) -> float:
+# Weekly seasonality — matches the deployed SeasonalNaiveModel(seasonality=7)
+# fallback (src/models/fallback.py). The seasonal MASE (#181 / R14-2) scales
+# against THIS baseline, which the product actually serves.
+SEASONAL_PERIOD = 7
+
+
+def _scaled_error(
+    y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray, m: int
+) -> float:
+    """MAE scaled by the in-sample m-step naive forecast error — the MASE core.
+
+    m=1 → random-walk ("same as yesterday") baseline; m=7 → weekly-seasonal
+    ("same as this day last week") baseline. Returns NaN when the training
+    history is too short for the m-step naive (len <= m) or the naive error is
+    ~0 (a flat series), so the ratio is undefined.
     """
-    Mean Absolute Scaled Error.
-    Scales MAE by the in-sample naive (lag-1) forecast error.
-    Scale-invariant and interpretable: MASE < 1 beats naive.
-    """
-    mae = np.mean(np.abs(y_true - y_pred))
-    naive_mae = np.mean(np.abs(np.diff(y_train)))
+    y_train = np.asarray(y_train, dtype=float)
+    if len(y_train) <= m:
+        return np.nan
+    naive_mae = np.mean(np.abs(y_train[m:] - y_train[:-m]))
     if naive_mae < 1e-10:
         return np.nan
+    mae = np.mean(np.abs(y_true - y_pred))
     return mae / naive_mae
+
+
+def mase(y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray) -> float:
+    """
+    Mean Absolute Scaled Error vs the in-sample lag-1 (m=1) naive.
+    Scale-invariant: MASE < 1 beats a random-walk ("same as yesterday") forecast.
+
+    NOTE (#181): m=1 is the WEAKEST baseline for weekly-seasonal demand — see
+    `mase_seasonal`, which scales against the seasonal naive the product itself
+    deploys as its fallback. m=1 here is identical to the historical
+    np.diff-based formula (mean(|y[1:]-y[:-1]|)), so stored values are unchanged.
+    """
+    return _scaled_error(y_true, y_pred, y_train, 1)
+
+
+def mase_seasonal(
+    y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray, m: int = SEASONAL_PERIOD
+) -> float:
+    """
+    Seasonal MASE — MAE scaled by the in-sample m-step (default weekly, m=7) naive,
+    i.e. "same as this day last week". This is the baseline the product serves as
+    its own fallback (SeasonalNaiveModel(7)), so `mase_seasonal < 1` means the model
+    beats the seasonal naive — a stronger, more honest claim than `mase` (m=1). (#181)
+    """
+    return _scaled_error(y_true, y_pred, y_train, m)
 
 
 def wmape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -85,6 +123,7 @@ def compute_metrics_per_sku(
             {
                 sku_col: sku,
                 "mase": mase(y_true, y_pred, y_train),
+                "mase_seasonal": mase_seasonal(y_true, y_pred, y_train),
                 "wmape": wmape(y_true, y_pred),
                 "smape": smape(y_true, y_pred),
                 "n_obs": len(y_true),
@@ -123,7 +162,11 @@ def aggregate_metrics(
     per-fold wmape_mean. global pooling avoids that pathology.
     """
     agg: dict = {}
-    for metric in ["mase", "wmape", "smape"]:
+    # mase_seasonal (#181) is additive; skip it gracefully if a caller passes a
+    # metrics_df built before it existed (the live pipeline always includes it).
+    for metric in ["mase", "mase_seasonal", "wmape", "smape"]:
+        if metric not in metrics_df.columns:
+            continue
         vals = metrics_df[metric].dropna()
         # R11-H6: an all-zero-sales catalog (or a fold where every SKU has
         # sum(actual)==0) makes every per-SKU metric NaN → dropna() empties
@@ -148,8 +191,12 @@ def aggregate_metrics(
         # naive_mae from each SKU's training values (deduped per SKU
         # so we don't repeat the same series for every test row).
         if train_col in raw_df.columns:
-            naive_errors: list[float] = []
-            mae_errors:   list[float] = []
+            # R11-L16: MASE is a per-SKU ratio — average the per-SKU MASE values,
+            # NOT (mean MAE)/(mean naive), which is dominated by high-volume SKUs.
+            # #181: compute the seasonal (m=7) variant alongside the m=1 one from
+            # the SAME per-SKU train series (deduped via iloc[0]).
+            per_sku_mase: list[float] = []
+            per_sku_mase_seasonal: list[float] = []
             for _, group in raw_df.groupby(sku_col):
                 yt = group[actual_col].to_numpy(dtype=float)
                 yp = group[pred_col].to_numpy(dtype=float)
@@ -157,25 +204,24 @@ def aggregate_metrics(
                 if tv_first is None or (isinstance(tv_first, float) and np.isnan(tv_first)):
                     continue
                 tv = np.asarray(tv_first, dtype=float)
-                if len(tv) < 2:
-                    continue
-                naive_errors.append(float(np.mean(np.abs(np.diff(tv)))))
-                mae_errors.append(float(np.mean(np.abs(yt - yp))))
-            if naive_errors:
-                # R11-L16: MASE is a per-SKU ratio — average the per-SKU MASE
-                # values, NOT (mean MAE)/(mean naive). The old ratio-of-means
-                # was a biased estimator (dominated by high-volume SKUs whose
-                # absolute MAE/naive dwarf the rest).
-                per_sku_mase = [
-                    mae / naive
-                    for mae, naive in zip(mae_errors, naive_errors)
-                    if naive > 1e-10
-                ]
-                agg["mase_global"] = (
-                    float(np.mean(per_sku_mase)) if per_sku_mase else float("nan")
-                )
-            else:
-                agg["mase_global"] = float("nan")
+                mae = float(np.mean(np.abs(yt - yp)))
+                if len(tv) >= 2:
+                    naive1 = float(np.mean(np.abs(np.diff(tv))))
+                    if naive1 > 1e-10:
+                        per_sku_mase.append(mae / naive1)
+                if len(tv) > SEASONAL_PERIOD:
+                    naive_s = float(
+                        np.mean(np.abs(tv[SEASONAL_PERIOD:] - tv[:-SEASONAL_PERIOD]))
+                    )
+                    if naive_s > 1e-10:
+                        per_sku_mase_seasonal.append(mae / naive_s)
+            agg["mase_global"] = (
+                float(np.mean(per_sku_mase)) if per_sku_mase else float("nan")
+            )
+            agg["mase_seasonal_global"] = (
+                float(np.mean(per_sku_mase_seasonal)) if per_sku_mase_seasonal else float("nan")
+            )
         else:
             agg["mase_global"] = float("nan")
+            agg["mase_seasonal_global"] = float("nan")
     return agg

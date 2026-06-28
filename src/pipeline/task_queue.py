@@ -250,6 +250,7 @@ def _record_run_finished(
                 n_rows=result.get("n_rows"),
                 wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
                 mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+                mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
                 smape=metrics.get("smape_global", metrics.get("smape_mean")),
                 model_path=result.get("model_path"),
                 mlflow_run_id=result.get("mlflow_run_id"),
@@ -293,6 +294,7 @@ def _notify_finished_idempotent(
         n_skus=result.get("n_skus"),
         wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
         mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+        mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
     )
 
     should_notify = True
@@ -798,6 +800,7 @@ def enqueue_training(
                     n_rows=result.get("n_rows"),
                     wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
                     mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+                    mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
                     smape=metrics.get("smape_global", metrics.get("smape_mean")),
                     model_path=result.get("model_path"),
                     mlflow_run_id=result.get("mlflow_run_id"),
