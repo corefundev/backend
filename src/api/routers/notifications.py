@@ -27,6 +27,7 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
 from src.clients.registry import get_registry
@@ -148,7 +149,10 @@ async def telegram_webhook(request: Request):
 
     try:
         update = await request.json()
-        handle_update(update)
+        # #184: handle_update does blocking time.sleep + urllib.urlopen (up to
+        # ~37s on a slow Telegram API) — run it in the threadpool so the webhook
+        # never blocks the event loop.
+        await run_in_threadpool(handle_update, update)
     except Exception as e:    # noqa: BLE001
         logger.warning("telegram webhook handling failed: %s", e)
     return {"ok": True}

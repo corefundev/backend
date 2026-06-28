@@ -98,7 +98,7 @@ class TokenResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════
 
 @router.post("/auth/token", response_model=TokenResponse)
-async def get_token(req: TokenRequest, http_req: Request):
+def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcrypt cost-12) → threadpool, off the event loop
     """
     Exchange client_id + secret for JWT.
 

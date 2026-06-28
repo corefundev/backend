@@ -49,6 +49,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.api.loaders import CONFIG_PATH, load_service_for_client
@@ -362,8 +363,12 @@ async def list_upload_skus(
     return {"upload_id": upload_id, "count": len(skus), "skus": skus}
 
 
+# #184: declared `def` (NOT async) on purpose — the body is entirely synchronous
+# (psycopg2 registry read, S3 model load, bcrypt-free, CPU-heavy pandas/ML), so
+# FastAPI runs it in the threadpool and the event loop stays free for other
+# tenants. predict_batch invokes it via run_in_threadpool for real concurrency.
 @router.post("/clients/{client_id}/predict", response_model=PredictResponse)
-async def predict(
+def predict(
     client_id: str,
     req: PredictRequest,
     auth: AuthContext = Depends(get_current_client),
@@ -513,10 +518,13 @@ async def predict_batch(
     require_client_access(client_id, auth)
 
     import asyncio as _asyncio
-    # No outer lock — R5-2 deadlock fix. Inner predict()->get_or_load
-    # handles cache coherency.
+    # #184: each predict() now runs in the threadpool (run_in_threadpool), so
+    # gather gives REAL parallelism across worker threads — not the previous
+    # illusory concurrency where the gathered sync coroutines ran serially on a
+    # blocked event loop. R5-2 (no outer lock) still holds: inner predict() →
+    # get_or_load handles per-client cache coherency across threads.
     results = await _asyncio.gather(
-        *(predict(client_id, r, auth) for r in req.requests),
+        *(run_in_threadpool(predict, client_id, r, auth) for r in req.requests),
         return_exceptions=False,
     )
 
