@@ -19,7 +19,13 @@ def load_config(path: str = "configs/config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def load_data(path: str | Path, config: dict) -> pd.DataFrame:
+def load_data(
+    path: str | Path,
+    config: dict,
+    *,
+    sku: str | None = None,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
     """
     Load CSV/Parquet and enforce schema.
 
@@ -29,19 +35,39 @@ def load_data(path: str | Path, config: dict) -> pd.DataFrame:
         (extra dependency) AND wrapping s3:// in pathlib.Path() collapses
         the double slash into s3:/, which breaks every reader.
       • Anything else — treat as a local filesystem path.
+
+    PERF-1 (#186): single-SKU serve callers (/predict, /sku-history) used to load
+    the WHOLE multi-SKU processed parquet and filter in memory. `sku` pushes a
+    `(sku_col == sku)` predicate into the parquet read (pyarrow skips non-matching
+    row groups → far less parse + memory), and `columns` projects only the needed
+    columns. Both are OPTIONAL — the training path calls without them and gets the
+    full frame, unchanged. (Parquet only; CSV uploads fall back to an in-memory
+    filter since the format has no predicate pushdown.)
     """
+    sku_col  = config["data"]["sku_col"]
+    date_col = config["data"]["date_col"]
+    filters  = [(sku_col, "==", sku)] if sku is not None else None
+
     path_str = str(path)
     if path_str.startswith("s3://"):
-        df = _read_parquet_from_s3(path_str)
+        df = _read_parquet_from_s3(path_str, columns=columns, filters=filters)
     else:
         local = Path(path_str)
         if local.suffix == ".parquet":
-            df = pd.read_parquet(local)
+            df = pd.read_parquet(local, columns=columns, filters=filters)
         else:
-            df = pd.read_csv(local, parse_dates=[config["data"]["date_col"]])
+            df = pd.read_csv(local, parse_dates=[date_col])
+            if sku is not None and sku_col in df.columns:
+                df = df[df[sku_col] == sku]
+            if columns is not None:
+                df = df[[c for c in columns if c in df.columns]]
 
-    df[config["data"]["date_col"]] = pd.to_datetime(df[config["data"]["date_col"]])
-    df = df.sort_values([config["data"]["sku_col"], config["data"]["date_col"]])
+    # Schema enforcement only when the relevant columns survived the projection.
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col])
+    sort_cols = [c for c in (sku_col, date_col) if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols)
     return df
 
 
@@ -86,11 +112,22 @@ def _get_processed_s3_client():
     return _processed_s3_client
 
 
-def _read_parquet_from_s3(s3_url: str) -> pd.DataFrame:
+def _read_parquet_from_s3(
+    s3_url: str,
+    *,
+    columns: list[str] | None = None,
+    filters: list | None = None,
+) -> pd.DataFrame:
     """
     Download an S3 parquet to a tempfile and read it. Uses the PROCESSED
     zone credentials (where the trainer's input lives) — same boto3
     client the storage backend uses, no env mutation.
+
+    `columns`/`filters` are pushed into the parquet read (column projection +
+    row-group skipping), trimming parse + memory for single-SKU serve callers
+    (PERF-1). The object is still fully downloaded; true network-level pushdown
+    (read only matching row groups over the wire) would need a pyarrow S3
+    filesystem — tracked as a follow-up.
     """
     import tempfile
 
@@ -103,7 +140,7 @@ def _read_parquet_from_s3(s3_url: str) -> pd.DataFrame:
         s3.download_fileobj(bucket, key, tmp)
         tmp_path = tmp.name
     try:
-        return pd.read_parquet(tmp_path)
+        return pd.read_parquet(tmp_path, columns=columns, filters=filters)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
