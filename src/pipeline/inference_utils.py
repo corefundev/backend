@@ -206,7 +206,12 @@ def recursive_forecast(
     ]
     carry_values = {c: h[c].iloc[-1] for c in carry_cols}
 
-    last_row = h.iloc[[-1]]
+    # PERF-2 (#186): maintain the TARGET history as a plain list (append is O(1))
+    # instead of pd.concat-ing the whole frame each step — the old loop was
+    # O(horizon × history) per SKU. lag/rolling read from this list; the
+    # carry-source fallback uses the (constant) original last row.
+    target_hist = [float(v) for v in h[target_col].tolist()]
+    orig_last_row = h.iloc[[-1]]
     for step in range(1, horizon + 1):
         forecast_date = last_date + pd.Timedelta(days=step)
 
@@ -237,23 +242,23 @@ def recursive_forecast(
             new_row[c] = v
 
         # ── Lag features: lag_k = target value k rows back ────────
-        target_series = h[target_col]
+        n_hist = len(target_hist)
         for lag in lags:
-            if len(target_series) >= lag:
-                new_row[f"lag_{lag}"] = float(target_series.iloc[-lag])
-            else:
-                new_row[f"lag_{lag}"] = float("nan")
+            new_row[f"lag_{lag}"] = (
+                float(target_hist[-lag]) if n_hist >= lag else float("nan")
+            )
 
         # ── Rolling features: window of last w values, EXCLUDING
         #    the row we're about to predict (engineering.py uses
-        #    .shift(1) for this — match that). ──────────────────
+        #    .shift(1) for this — match that). std uses ddof=1 to
+        #    match pandas Series.std(). ─────────────────────────
         for w in windows:
-            window = target_series.tail(w)
-            if len(window) == 0:
+            window = np.asarray(target_hist[-w:], dtype=float)
+            if window.size == 0:
                 mean_v = std_v = max_v = min_v = float("nan")
             else:
                 mean_v = float(window.mean())
-                std_v  = float(window.std() if len(window) > 1 else 0.0)
+                std_v  = float(np.std(window, ddof=1)) if window.size > 1 else 0.0
                 max_v  = float(window.max())
                 min_v  = float(window.min())
             new_row[f"rolling_mean_{w}"] = mean_v
@@ -276,7 +281,7 @@ def recursive_forecast(
         # gets a valid (if mediocre) number rather than a corruption.
         for c in feature_cols:
             if c not in cur_df.columns:
-                val = last_row[c].iloc[0] if c in last_row.columns else 0.0
+                val = orig_last_row[c].iloc[0] if c in orig_last_row.columns else 0.0
                 cur_df[c] = val if pd.notna(val) else 0.0
 
         # Pass the FULL cur_df (with sku_col + carry cols), not just the
@@ -336,11 +341,10 @@ def recursive_forecast(
             "source":          source,
         })
 
-        # Append predicted row to history so next step's lag/rolling
-        # features include it.
+        # Append the prediction to the target history so next step's
+        # lag/rolling features include it (O(1), no frame rebuild).
         new_row[target_col] = pred
-        h = pd.concat([h, pd.DataFrame([new_row])], ignore_index=True)
-        last_row = h.iloc[[-1]]
+        target_hist.append(pred)
 
     return rows
 
