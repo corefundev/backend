@@ -191,7 +191,9 @@ def _load_processed_for_sku(
 
     path = get_processed_path(urec)
     config = _get_cfg(CONFIG_PATH)
-    df = load_data(path, config)
+    # PERF-1 (#186): push the SKU filter into the parquet read instead of loading
+    # the whole multi-SKU frame and filtering in memory on every /predict.
+    df = load_data(path, config, sku=sku)
 
     sku_col  = config["data"]["sku_col"]
     date_col = config["data"]["date_col"]
@@ -199,7 +201,7 @@ def _load_processed_for_sku(
     if sku_col not in df.columns:
         raise HTTPException(500, detail=f"processed parquet missing column '{sku_col}'")
 
-    sub = df[df[sku_col] == sku]
+    sub = df[df[sku_col] == sku]   # defensive no-op: the read above already filtered
     if len(sub) == 0:
         raise HTTPException(
             404, detail=f"SKU {sku!r} not found in upload {upload_id!r}"
@@ -348,7 +350,9 @@ async def list_upload_skus(
     config   = _get_cfg(CONFIG_PATH)
     sku_col  = config["data"]["sku_col"]
     date_col = config["data"]["date_col"]
-    df = load_data(get_processed_path(urec), config)
+    # PERF-1 (#186): only the sku + date columns are needed to list SKUs —
+    # project them instead of parsing every feature column.
+    df = load_data(get_processed_path(urec), config, columns=[sku_col, date_col])
 
     grouped = df.groupby(sku_col)
     skus: list[dict] = []
