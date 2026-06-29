@@ -30,7 +30,14 @@ from src.auth.signup_rate_limit import (
     check_rotate_attempt,
     client_ip,
 )
+from src.clients.config_manager import validate_client_config
 from src.clients.registry import ClientRecord, get_registry
+from src.plans.enforcement import (
+    PlanDenied,
+    PlanLimitExceeded,
+    assert_config_keys_allowed,
+    assert_horizon_within_plan,
+)
 from src.plans.plans import Plan, get_plan_spec
 from src.storage.backend import ClientStorage
 
@@ -123,6 +130,25 @@ async def register_client(
         plan=plan.value,
         api_key_hash=key_hash,
     )
+
+    # SEC-1 (#186): run the SAME validation the PUT/PATCH config path uses, so
+    # the R13-1 forbidden-server-managed-key guard (*_path/*_dir/mlflow.*/api.*),
+    # value-range checks, and plan-tier key/horizon enforcement fire on THIS
+    # write path too. register_client used to store `req.config` verbatim,
+    # bypassing all of them — an admin token could seed a client with a
+    # filesystem-path override that a later parquet/cache write would honour.
+    cfg_errors = validate_client_config(req.config)
+    if cfg_errors:
+        raise HTTPException(status_code=422, detail="; ".join(cfg_errors))
+    try:
+        assert_config_keys_allowed(record, req.config)
+    except PlanDenied as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    try:
+        assert_horizon_within_plan(record, req.config)
+    except PlanLimitExceeded as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     registry.register(record)
     return {
         "client_id":    req.client_id,

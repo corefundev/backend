@@ -81,6 +81,10 @@ _ALLOWED_RANGES: dict[str, tuple] = {
     "anomaly_detection.iqr_factor":    (1.0, 10.0),
     "hpo.n_trials":                    (1, 500),
     "hpo.timeout_sec":                 (30, 86400),
+    # Weather coords (#186 BUG-2): validated HERE — the shared range block below
+    # catches non-numeric input → 422; the old ad-hoc `float(lat)` 500'd on it.
+    "features.weather.latitude":       (-90, 90),
+    "features.weather.longitude":      (-180, 180),
 }
 
 _ALLOWED_MODEL_TYPES = {"lgbm", "mimo"}
@@ -248,13 +252,8 @@ def validate_client_config(client_override: dict) -> list[str]:
             f"Supported: {sorted(_ALLOWED_COUNTRIES)}"
         )
 
-    # features.weather lat/lon
-    lat = _get_nested(client_override, "features.weather.latitude")
-    lon = _get_nested(client_override, "features.weather.longitude")
-    if lat is not None and not (-90 <= float(lat) <= 90):
-        errors.append(f"features.weather.latitude={lat} must be in [-90, 90]")
-    if lon is not None and not (-180 <= float(lon) <= 180):
-        errors.append(f"features.weather.longitude={lon} must be in [-180, 180]")
+    # (features.weather lat/lon are validated via _ALLOWED_RANGES above — #186
+    # BUG-2 moved them there so non-numeric input yields a 422, not a 500.)
 
     # quantiles must be sorted list of floats in (0,1)
     qs = _get_nested(client_override, "model.quantiles")
