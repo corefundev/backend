@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -62,22 +63,41 @@ def compute_holiday_features(
         return None
 
     holiday_dates = set(country_hols.keys())
-    all_ts = [pd.Timestamp(d) for d in sorted(holiday_dates)]
 
-    def days_to_next(d: pd.Timestamp) -> int:
-        future = [t for t in all_ts if t > d]
-        return (future[0] - d).days if future else 0
+    # PERF-3 (#186): vectorize days-to/since via binary search on the sorted
+    # holiday array instead of a per-row Python scan over EVERY holiday
+    # (O(rows × holidays) → O(rows × log holidays)). Behaviour identical:
+    #   days_to   = (first holiday strictly AFTER d) − d   (0 if none)
+    #   days_since = d − (last holiday ON/BEFORE d)        (0 if none)
+    # searchsorted(side="right") splits the array at d: indices [0, idx) are
+    # ≤ d, [idx, n) are > d — so all_ts[idx] is the next holiday and
+    # all_ts[idx-1] the previous one.
+    all_idx = pd.DatetimeIndex(sorted(pd.Timestamp(d) for d in holiday_dates))
+    all_np  = all_idx.values                    # sorted datetime64[ns]
+    dt_np   = dt.values
+    n       = len(all_np)
 
-    def days_since_last(d: pd.Timestamp) -> int:
-        past = [t for t in all_ts if t <= d]
-        return (d - past[-1]).days if past else 0
+    if n == 0:
+        days_to    = np.zeros(len(dt), dtype=int)
+        days_since = np.zeros(len(dt), dtype=int)
+    else:
+        idx = np.searchsorted(all_np, dt_np, side="right")
+        nxt = np.clip(idx, 0, n - 1)
+        prv = np.clip(idx - 1, 0, n - 1)
+        one_day = np.timedelta64(1, "D")
+        days_to = np.where(
+            idx < n, (all_np[nxt] - dt_np) / one_day, 0.0
+        ).astype(int)
+        days_since = np.where(
+            idx > 0, (dt_np - all_np[prv]) / one_day, 0.0
+        ).astype(int)
 
     out = pd.DataFrame(index=dt.index)
-    out["is_holiday"]         = dt.dt.date.apply(lambda d: int(d in holiday_dates))
-    out["days_to_holiday"]    = dt.apply(days_to_next)
-    out["days_since_holiday"] = dt.apply(days_since_last)
-    out["is_pre_holiday"]     = out["days_to_holiday"].between(1, 3).astype(int)
-    out["is_post_holiday"]    = out["days_since_holiday"].between(1, 2).astype(int)
+    out["is_holiday"]         = dt.dt.normalize().isin(all_idx).astype(int)
+    out["days_to_holiday"]    = days_to
+    out["days_since_holiday"] = days_since
+    out["is_pre_holiday"]     = ((days_to >= 1) & (days_to <= 3)).astype(int)
+    out["is_post_holiday"]    = ((days_since >= 1) & (days_since <= 2)).astype(int)
     return out
 
 

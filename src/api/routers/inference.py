@@ -228,8 +228,11 @@ def _load_processed_for_sku(
 
 # ── Routes ──────────────────────────────────────────────────────────────
 
+# PERF-4 (#186): `def` (not async) — the body is a synchronous psycopg2 read, so
+# FastAPI runs it in the threadpool instead of blocking the event loop. (Connection
+# pooling is handled by pgbouncer in front of postgres; no app-level pool needed.)
 @router.get("/clients/{client_id}/forecasts")
-async def list_forecasts(
+def list_forecasts(
     client_id: str,
     sku: Optional[str] = None,
     auth: AuthContext = Depends(get_current_client),
@@ -301,8 +304,9 @@ async def list_forecasts(
     }
 
 
+# PERF-4 (#186): `def` — synchronous psycopg2 read → threadpool, off the loop.
 @router.get("/clients/{client_id}/anomalies")
-async def list_anomalies(
+def list_anomalies(
     client_id: str,
     sku: Optional[str] = None,
     auth: AuthContext = Depends(get_current_client),
