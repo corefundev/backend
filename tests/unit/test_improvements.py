@@ -72,17 +72,35 @@ class TestMIMOForecaster:
         assert (preds >= 0).all(), "No negative predictions"
 
     def test_no_recursive_leakage(self):
-        """Each direct model uses same features — not previous step's prediction."""
+        """MIMO is DIRECT: H independent heads predicted in one shot — no step
+        consumes a prior step's prediction, and the target is never a feature.
+
+        (TEST-1 / #186 — the old assertion only compared feature_cols and proved
+        nothing about leakage; a recursive/target-leaking model would have passed.)
+        """
         from src.models.mimo import MIMOForecaster
         from src.features.engineering import build_features, get_feature_columns
         df     = _make_df(n_skus=2, n_days=80)
-        config = _make_config(horizon=3)
+        config = _make_config(horizon=4)
         df     = build_features(df, config)
         fc     = get_feature_columns(df, config)
         model  = MIMOForecaster(config)
-        model.fit(df[fc], df["sales"])
-        # All H models must have the same feature_cols
-        assert model.feature_cols == fc
+        model.fit(df[fc], df["sales"], groups=df["sku"])
+
+        H = config["model"]["horizon"]
+        # (1) H DISTINCT direct heads — not one head reused recursively.
+        assert len(model.models_) == H
+        assert len({id(m) for m in model.models_}) == H
+
+        # (2) the TARGET is never a feature (no target/look-ahead leakage), and
+        #     no head trains on a "predicted_*" column fed back from a prior step.
+        assert "sales" not in model.feature_cols
+        assert not any(c.startswith(("predicted", "lag_0")) for c in model.feature_cols)
+
+        # (3) predict returns ALL H steps in a SINGLE direct call (shape (N, H)),
+        #     so step h structurally cannot depend on step h-1's output.
+        preds = model.predict(df[fc].head(1))
+        assert preds.shape == (1, H)
 
     def test_quantile_predict_ordering(self):
         """p10 <= p50 <= p90 for all rows."""
