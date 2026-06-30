@@ -395,10 +395,16 @@ async def list_training_runs(
     require_client_access(client_id, auth)
     if limit < 1 or limit > 200:
         raise HTTPException(422, detail="limit must be between 1 and 200")
+    # CONTRACT-1 (#207): a real backend failure (DB down, query error) must NOT
+    # masquerade as "this client has no training history". An empty result set is
+    # a legitimate 200 with runs=[]; a lookup *failure* is a 503 so the UI and
+    # HTTP-status monitoring can tell an outage apart from genuine emptiness.
     try:
         from src.storage.training_runs import get_training_runs_registry, to_dict
         runs = get_training_runs_registry().list_for_client(client_id, limit=limit)
     except Exception as e:    # noqa: BLE001
         logger.warning("training_runs listing failed: %s", e)
-        return {"runs": [], "count": 0}
+        raise HTTPException(
+            503, detail="training history temporarily unavailable"
+        ) from e
     return {"runs": [to_dict(r) for r in runs], "count": len(runs)}
