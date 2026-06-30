@@ -680,40 +680,6 @@ def _detect_and_store_anomalies(
     )
 
 
-def _batch_inference_job(
-    client_id: str,
-    data_path: str,
-    config_path: str = "configs/config.yaml",
-    output_date: str | None = None,
-) -> dict:
-    """Batch inference job executed inside an rq worker."""
-    from datetime import date
-    from src.pipeline.batch_inference import run_batch_inference
-    from src.storage.backend import ClientStorage
-
-    storage   = ClientStorage(client_id)
-    out_date  = output_date or date.today().isoformat()
-    model_key = f"{client_id}/models/model.pkl"
-
-    if not storage.model_exists():
-        raise FileNotFoundError(f"No model found for client {client_id}")
-
-    import tempfile, os
-    with tempfile.TemporaryDirectory() as tmp:
-        local_model = os.path.join(tmp, "model.pkl")
-        storage.backend.download(model_key, local_model)
-
-        df = run_batch_inference(
-            data_path=data_path,
-            model_path=local_model,
-            config_path=config_path,
-            client_id=client_id,
-        )
-
-    storage.save_predictions(df, out_date)
-    return {"client_id": client_id, "date": out_date, "n_rows": len(df)}
-
-
 # ── Enqueue helpers (called from API) ─────────────────────────────────────────
 
 def enqueue_training(

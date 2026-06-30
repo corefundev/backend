@@ -115,15 +115,3 @@ class RateLimiter:
             "X-RateLimit-Reset":     str(reset_at),
         }
         return allowed, headers
-
-
-# Global singleton
-_limiter: RateLimiter | None = None
-
-
-def get_limiter() -> RateLimiter:
-    global _limiter
-    if _limiter is None:
-        import os
-        _limiter = RateLimiter(redis_url=os.environ.get("REDIS_URL"))
-    return _limiter
