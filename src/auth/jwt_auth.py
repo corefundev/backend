@@ -111,20 +111,12 @@ def _get_api_key() -> str:
     return _static_api_key_cache
 
 
-# Обратная совместимость — свойства читаются lazy
-class _LazyStr(str):
-    """Строка которая подставляет реальное значение при первом использовании."""
-    pass
-
-
-def _jwt_secret_prop():
-    return _get_jwt_secret()
-
-
-# Для совместимости с кодом который делает `from src.auth.jwt_auth import JWT_SECRET`
-# используем property-like подход через module __getattr__
-JWT_SECRET     = None   # будет установлен через __getattr__
-STATIC_API_KEY = None   # будет установлен через __getattr__
+# Module-level globals for code doing `from src.auth.jwt_auth import JWT_SECRET`.
+# They start None and are populated by _ensure_secrets_loaded() below — there is
+# NO module __getattr__ (#186 DEAD-2 removed the abandoned _LazyStr /
+# _jwt_secret_prop scaffold and this stale "set via __getattr__" comment).
+JWT_SECRET     = None
+STATIC_API_KEY = None
 
 
 def _ensure_secrets_loaded():
