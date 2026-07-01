@@ -78,6 +78,37 @@ class TestBuildFeatures:
         one_cols = get_feature_columns(build_features(one, cfg), cfg)
         assert set(full) == set(one_cols)
 
+    def test_serve_parity_at_value_level(self):
+        # TEST-5 (#186): column-set equality (above) only proves the same
+        # feature NAMES exist. This proves the same feature VALUES: a SKU's
+        # features computed on the full multi-SKU frame must equal the ones
+        # computed on that SKU's slice alone — row for row. A feature that
+        # leaked cross-SKU (a global rolling stat, the old order-dependent
+        # sku_encoded, etc.) would pass the set check but FAIL here. This is
+        # the actual guarantee that /predict (single-SKU serve) sees the same
+        # numbers training saw (multi-SKU frame).
+        cfg = make_config()
+        np.random.seed(20240628)               # one deterministic frame, sliced two ways
+        base = make_test_df(n_skus=5, n_days=80)
+        feat_cols = get_feature_columns(build_features(base.copy(), cfg), cfg)
+
+        full = build_features(base.copy(), cfg)
+        full_002 = full[full["sku"] == "SKU_002"][["date", *feat_cols]]
+
+        slice_in = base[base["sku"] == "SKU_002"].copy()
+        sliced = build_features(slice_in, cfg)[["date", *feat_cols]]
+
+        merged = full_002.merge(sliced, on="date", suffixes=("_full", "_slice"))
+        # Dates must line up 1:1 — same warmup drop on both paths.
+        assert len(merged) == len(full_002) == len(sliced) > 0
+
+        for col in feat_cols:
+            a = merged[f"{col}_full"].to_numpy(dtype=float)
+            b = merged[f"{col}_slice"].to_numpy(dtype=float)
+            assert np.allclose(a, b, equal_nan=True), (
+                f"train/serve VALUE mismatch in feature {col!r} — cross-SKU leak"
+            )
+
     def test_no_future_in_rolling(self):
         """rolling_mean_7 must use shift(1) — value at t cannot include sales at t."""
         df = make_test_df(n_skus=1, n_days=60)
