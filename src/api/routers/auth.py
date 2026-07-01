@@ -274,6 +274,69 @@ def _verify_captcha_or_400(token: Optional[str]) -> None:
         raise HTTPException(status_code=503, detail="Captcha unavailable")
 
 
+def _assert_otp_verify_rate_ok(http_req: Request) -> None:
+    """Audit R4-4 — per-IP (/24-subnet) cap on OTP verify. Lockout-via-
+    audit_log keys on actor_email, so an attacker rotating across many
+    emails never trips a per-email limit; this bucket turns cross-email
+    OTP-spray into a per-network cost. Shared by /auth/signup/verify and
+    /auth/login/verify (ARCH-2 #206 — was verbatim-duplicated in both)."""
+    try:
+        check_otp_verify_attempt(client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)},
+        )
+
+
+def _assert_not_locked_out(
+    canonical: str,
+    http_req: Request,
+    *,
+    event_type: str,
+    event_subtype: str,
+    attempt_label: str,
+) -> None:
+    """Per-email brute-force lockout over a sliding audit-log window.
+
+    Shared by /auth/signup/verify and /auth/login/verify (ARCH-2 #206). The
+    two endpoints MUST enforce the SAME window/threshold, or an attacker
+    dodges the cap by alternating them against one email — a correctness
+    invariant a shared helper now guarantees structurally (previously two
+    verbatim copies that had to be kept in sync by hand).
+
+    Fail-closed when enabled; fail-open if the audit DB is unavailable
+    (recent_failed_logins returns 0). `event_type`/`event_subtype` and
+    `attempt_label` are the only per-endpoint differences.
+    """
+    threshold  = int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10"))
+    window_min = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
+    if threshold <= 0:
+        return
+    recent_fails = recent_failed_logins(canonical, window_minutes=window_min)
+    if recent_fails < threshold:
+        return
+    record_event(
+        event_type=event_type, event_subtype=event_subtype,
+        actor_email=canonical,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        success=False,
+        metadata={
+            "recent_fails":  recent_fails,
+            "window_min":    window_min,
+            "threshold":     threshold,
+        },
+    )
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"Too many failed {attempt_label}; try again in "
+            f"{window_min} minutes."
+        ),
+        headers={"Retry-After": str(window_min * 60)},
+    )
+
+
 @router.post("/auth/signup", response_model=SignupAcceptedResponse)
 async def auth_signup(req: SignupRequest, http_req: Request):
     """
@@ -429,17 +492,7 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     """
     from src.auth.email_normalize import canonical_email
 
-    # Audit R4-4 — per-IP cap on OTP verify. Lockout-via-audit_log keys
-    # on actor_email, so an attacker rotating across many emails never
-    # trips a per-email limit. The /24-subnet bucket here turns OTP-
-    # spray into a per-network cost.
-    try:
-        check_otp_verify_attempt(client_ip(http_req))
-    except RateLimited as e:
-        raise HTTPException(
-            status_code=429, detail=str(e),
-            headers={"Retry-After": str(e.retry_after_sec or 60)},
-        )
+    _assert_otp_verify_rate_ok(http_req)
 
     email = _validate_email_or_400(req.email)
     try:
@@ -453,29 +506,11 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     # Per-email brute-force lockout — shares the audit-window with
     # login_verify so an attacker can't dodge the cap by alternating
     # /auth/login/verify and /auth/signup/verify against the same email.
-    LOCKOUT_THRESHOLD = int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10"))
-    LOCKOUT_WINDOW_MIN = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
-    if LOCKOUT_THRESHOLD > 0:
-        recent_fails = recent_failed_logins(canonical, window_minutes=LOCKOUT_WINDOW_MIN)
-        if recent_fails >= LOCKOUT_THRESHOLD:
-            record_event(
-                event_type=EVT_OTP_VERIFY, event_subtype="locked_out_signup",
-                actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
-                success=False,
-                metadata={
-                    "recent_fails":  recent_fails,
-                    "window_min":    LOCKOUT_WINDOW_MIN,
-                    "threshold":     LOCKOUT_THRESHOLD,
-                },
-            )
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Too many failed attempts; try again in "
-                    f"{LOCKOUT_WINDOW_MIN} minutes."
-                ),
-                headers={"Retry-After": str(LOCKOUT_WINDOW_MIN * 60)},
-            )
+    _assert_not_locked_out(
+        canonical, http_req,
+        event_type=EVT_OTP_VERIFY, event_subtype="locked_out_signup",
+        attempt_label="attempts",
+    )
 
     # Daily cap pre-check — fail fast before touching the DB.
     ip = client_ip(http_req) or "0.0.0.0"
@@ -707,14 +742,7 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
     SINGLE OTP — a credential-stuffer can issue a fresh OTP, fail max-attempts,
     issue another, repeat. The audit_log window catches that pattern.
     """
-    # Audit R4-4 — per-IP cap on OTP verify (parallel to signup-verify).
-    try:
-        check_otp_verify_attempt(client_ip(http_req))
-    except RateLimited as e:
-        raise HTTPException(
-            status_code=429, detail=str(e),
-            headers={"Retry-After": str(e.retry_after_sec or 60)},
-        )
+    _assert_otp_verify_rate_ok(http_req)
 
     email = _validate_email_or_400(req.email)
     from src.auth.email_normalize import canonical_email
@@ -728,29 +756,11 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
 
     # ── Brute-force lockout (fail-closed when enabled, fail-open if
     # the audit DB is unavailable: recent_failed_logins returns 0). ──
-    LOCKOUT_THRESHOLD = int(os.environ.get("LOGIN_LOCKOUT_THRESHOLD", "10"))
-    LOCKOUT_WINDOW_MIN = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
-    if LOCKOUT_THRESHOLD > 0:
-        recent_fails = recent_failed_logins(canonical, window_minutes=LOCKOUT_WINDOW_MIN)
-        if recent_fails >= LOCKOUT_THRESHOLD:
-            record_event(
-                event_type=EVT_LOGIN, event_subtype="locked_out",
-                actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
-                success=False,
-                metadata={
-                    "recent_fails":  recent_fails,
-                    "window_min":    LOCKOUT_WINDOW_MIN,
-                    "threshold":     LOCKOUT_THRESHOLD,
-                },
-            )
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Too many failed login attempts; try again in "
-                    f"{LOCKOUT_WINDOW_MIN} minutes."
-                ),
-                headers={"Retry-After": str(LOCKOUT_WINDOW_MIN * 60)},
-            )
+    _assert_not_locked_out(
+        canonical, http_req,
+        event_type=EVT_LOGIN, event_subtype="locked_out",
+        attempt_label="login attempts",
+    )
 
     from src.auth.otp import verify_otp
     from src.auth.otp_store import get_otp_store, otp_max_attempts, PURPOSE_LOGIN

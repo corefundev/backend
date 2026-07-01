@@ -278,16 +278,20 @@ def test_auth_login_route_calls_check_login_attempt():
 
 
 def test_auth_signup_verify_calls_check_otp_verify_attempt():
+    # ARCH-2 (#206): the R4-4 per-IP OTP cap moved into the shared
+    # `_assert_otp_verify_rate_ok` helper (deduped with login/verify). The
+    # endpoint still enforces it — now via delegation.
     block = _auth_handler_block(_auth_module_text(), "async def auth_signup_verify")
-    assert "check_otp_verify_attempt" in block, (
-        "/auth/signup/verify must wire check_otp_verify_attempt (R4-4)"
+    assert "_assert_otp_verify_rate_ok(http_req)" in block, (
+        "/auth/signup/verify must wire the per-IP OTP cap (R4-4) via the shared guard"
     )
 
 
 def test_auth_login_verify_calls_check_otp_verify_attempt():
+    # ARCH-2 (#206): see above — deduped into `_assert_otp_verify_rate_ok`.
     block = _auth_handler_block(_auth_module_text(), "async def auth_login_verify")
-    assert "check_otp_verify_attempt" in block, (
-        "/auth/login/verify must wire check_otp_verify_attempt (R4-4)"
+    assert "_assert_otp_verify_rate_ok(http_req)" in block, (
+        "/auth/login/verify must wire the per-IP OTP cap (R4-4) via the shared guard"
     )
 
 
