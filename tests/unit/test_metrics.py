@@ -97,6 +97,30 @@ class TestSMAPE:
         s2 = smape(y_pred, y_true)
         assert s1 == pytest.approx(s2)
 
+    # ── TEST-3 (#186): pin the exact formula so the factor-of-2 and the
+    # [0,2] bound can't silently drift. smape = mean( 2·|t−p| / (|t|+|p|) ).
+    def test_known_value_single(self):
+        # 2·|10−15| / (10+15) = 10/25 = 0.4
+        assert smape(np.array([10.0]), np.array([15.0])) == pytest.approx(0.4)
+
+    def test_known_value_factor_of_two(self):
+        # 2·|1−3| / (1+3) = 4/4 = 1.0 — a MISSING ×2 would give 0.5,
+        # a DOUBLED ×2 would give 2.0. Pins the coefficient.
+        assert smape(np.array([1.0]), np.array([3.0])) == pytest.approx(1.0)
+
+    def test_upper_bound_is_two(self):
+        # Prediction of 0 against a positive actual is the worst case:
+        # 2·|5−0| / (5+0) = 2.0 — the theoretical maximum. Guards the bound.
+        assert smape(np.array([5.0]), np.array([0.0])) == pytest.approx(2.0)
+
+    def test_averaging_over_elements(self):
+        # element errors [0.4, 1.0] → mean 0.7. Pins the mean (not sum).
+        assert smape(np.array([10.0, 1.0]), np.array([15.0, 3.0])) == pytest.approx(0.7)
+
+    def test_all_zero_denominator_returns_nan(self):
+        # |t|+|p| == 0 everywhere → the mask is empty → NaN, not a 0/0 crash.
+        assert np.isnan(smape(np.array([0.0]), np.array([0.0])))
+
 
 class TestComputeMetricsPerSku:
     def test_mase_unaffected_by_duplicated_train_rows(self):
