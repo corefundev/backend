@@ -94,6 +94,23 @@ def walk_forward_validate(
     direct = _is_direct_multi_step(probe)
     mode_label = "direct multi-step" if direct else "1-day baseline"
 
+    # L-A9 (#186): a non-direct model (e.g. the non-default single-step
+    # `type: lgbm`) is validated 1-day-ahead here via `_predict_baseline`, but
+    # its production serve is RECURSIVE (`recursive_forecast` feeds each step's
+    # prediction back as the next step's lag), so error compounds across the
+    # horizon. The reported metric is therefore OPTIMISTIC relative to what the
+    # client sees. Make that explicit rather than trust it silently — the real
+    # fix (validate recursively for single-step models) is tracked in #158. The
+    # default MIMO/Ensemble path is direct end-to-end and unaffected.
+    if not direct:
+        logger.warning(
+            "walk-forward: model is single-step — validating 1-day-ahead "
+            "(_predict_baseline) while production serve is recursive; the "
+            "reported metric is optimistic vs the horizon a client sees "
+            "(recursive validation tracked in #158, L-A9). Prefer the default "
+            "direct MIMO/Ensemble."
+        )
+
     all_results: list[pd.DataFrame] = []
     fold_aggs:   list[dict]         = []
 

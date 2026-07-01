@@ -179,15 +179,21 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             f"Target missing ratio {miss_ratio:.2%} exceeds threshold {max_missing:.2%}"
         )
 
-    # 5. Fill missing optional columns with sensible defaults
-    # Use .loc to avoid SettingWithCopyWarning on optional columns
+    # 5. Continuity check — fill gaps with zero sales
+    df = _fill_time_gaps(df, date_col, sku_col, target_col)
+
+    # 6. Fill missing optional-column values with sensible defaults.
+    # L-A11 (#186): this runs AFTER _fill_time_gaps on purpose. Gap-fill
+    # reindexes each SKU to a continuous daily range, so every imputed row
+    # arrives with NaN in every non-target column. Filling BEFORE gap-fill
+    # (the old order) left those imputed days with promo=NaN — violating the
+    # promo=0 contract the model relies on. price/stock default to NaN either
+    # way (LightGBM handles it natively); promo must be a real 0 everywhere.
+    # Use .loc to avoid SettingWithCopyWarning on optional columns.
     df = df.copy()
     for col, default in [("price", np.nan), ("promo", 0), ("stock", np.nan)]:
         if col in df.columns:
             df.loc[:, col] = df[col].fillna(default)
-
-    # 6. Continuity check — fill gaps with zero sales
-    df = _fill_time_gaps(df, date_col, sku_col, target_col)
 
     logger.info(f"Validation passed: {df[sku_col].nunique()} SKUs, {len(df)} rows")
     return df
