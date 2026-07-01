@@ -191,6 +191,16 @@ def recursive_forecast(
     # Carry-forward columns that the model uses but the user can't
     # provide for future dates (price, promo, stock, weather, …) —
     # we use the last observed value as the "default future".
+    #
+    # L-A4 (#186) — KNOWN train/serve skew, documented not silently hidden.
+    # At TRAIN time the model saw the TRUE same-day value of these regressors;
+    # at serve we can only carry the last observed one forward. For weather/FX
+    # especially, that means a contemporaneous regressor helps the training
+    # metric more than it helps production (the future value it keys on isn't
+    # actually known). Eliminating the skew is a *measured* feature-design
+    # change — lag the regressor to a value known at serve time, or drop it —
+    # not a safe in-place hack here; it belongs with the forecast-quality
+    # roadmap (weather is off by default; FX currency is opt-in / paid-gated).
     carry_cols = [
         c for c in h.columns
         if c not in (sku_col, date_col, target_col)

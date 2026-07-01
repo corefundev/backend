@@ -197,7 +197,15 @@ def aggregate_metrics(
             # the SAME per-SKU train series (deduped via iloc[0]).
             per_sku_mase: list[float] = []
             per_sku_mase_seasonal: list[float] = []
-            for _, group in raw_df.groupby(sku_col):
+            # L-A7 (#186): when the rows span multiple walk-forward folds (a
+            # "fold" column is present), group by (sku, fold) so each MASE
+            # ratio's numerator — that fold's test errors — is divided by the
+            # SAME fold's naive baseline. Grouping by sku alone divided every
+            # fold's pooled errors by fold-0's (shortest) train series' naive,
+            # an inconsistent-window ratio. Absent a fold column (e.g. a
+            # hand-built raw_df) behaviour is unchanged.
+            group_keys = [sku_col, "fold"] if "fold" in raw_df.columns else sku_col
+            for _, group in raw_df.groupby(group_keys):
                 yt = group[actual_col].to_numpy(dtype=float)
                 yp = group[pred_col].to_numpy(dtype=float)
                 tv_first = group[train_col].iloc[0]
