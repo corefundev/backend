@@ -65,6 +65,7 @@ model:
   feature_fraction: 0.8
   bagging_fraction: 0.8
   bagging_freq: 5
+  random_state: 42               # L-A10: pin the RNG so training is reproducible (bagging/feature sub-sampling). Change to re-draw.
   early_stopping_rounds: 50
 
 cold_start:

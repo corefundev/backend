@@ -57,7 +57,12 @@ class MIMOForecaster:
             feature_fraction = m.get("feature_fraction", 0.8),
             bagging_fraction = m.get("bagging_fraction", 0.8),
             bagging_freq    = m.get("bagging_freq",    5),
-            n_jobs          = -1,
+            # L-A10 (#186): seed the RNG so every direct head (and quantile
+            # sub-model — `extra` overrides objective/alpha only, not this) is
+            # reproducible. Default 42; config `model.random_state` overrides.
+            # n_jobs config-driven (default -1; tests pin 1 for reproducibility).
+            random_state    = m.get("random_state",    42),
+            n_jobs          = m.get("n_jobs",          -1),
             verbose         = -1,
             **lgb_objective_params(m),
         )

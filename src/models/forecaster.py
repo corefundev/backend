@@ -86,7 +86,14 @@ class SKUForecaster:
             "feature_fraction": self.model_cfg.get("feature_fraction", 0.8),
             "bagging_fraction": self.model_cfg.get("bagging_fraction", 0.8),
             "bagging_freq": self.model_cfg.get("bagging_freq", 5),
-            "n_jobs": -1,
+            # L-A10 (#186): pin the RNG so training is reproducible. Without a
+            # seed, bagging/feature sub-sampling draws differed run-to-run,
+            # making backtest-gate deltas and champion/challenger comparisons
+            # confound model variance with the real change. Default 42;
+            # override via config `model.random_state`. n_jobs is config-driven
+            # too (default -1 = all cores; tests pin 1 for bit-reproducibility).
+            "random_state": self.model_cfg.get("random_state", 42),
+            "n_jobs": self.model_cfg.get("n_jobs", -1),
             "verbose": -1,
             **lgb_objective_params(self.model_cfg),
         }
