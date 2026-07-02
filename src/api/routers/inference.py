@@ -502,6 +502,13 @@ async def predict_batch(
     """
     Batch inference: many predict requests for one client in parallel.
 
+    Contract (CONTRACT-batch, #186): PARTIAL SUCCESS. The response is
+    always 200 with per-item results in request order — a successful item
+    carries the same payload as single /predict; a failed item carries
+    {"error": {"status", "detail"}} in its slot. Top-level `succeeded` /
+    `failed` counters summarise. Rate limiting is work-based (N items =
+    N tokens); a rate-limited item errors individually.
+
     Concurrency: N predict calls run concurrently via `asyncio.gather`
     (vs sequential awaits which made batch latency = N × single).
 
@@ -531,9 +538,41 @@ async def predict_batch(
     # illusory concurrency where the gathered sync coroutines ran serially on a
     # blocked event loop. R5-2 (no outer lock) still holds: inner predict() →
     # get_or_load handles per-client cache coherency across threads.
+    #
+    # CONTRACT-batch (#186): partial success, not all-or-nothing. With
+    # return_exceptions=False the FIRST failing item (a 422 horizon, a 404
+    # sku, a 429 rate-limit) destroyed the WHOLE batch — including the items
+    # that had already succeeded and the rate-limit tokens they consumed
+    # (work spent, nothing returned). Now each item resolves independently:
+    # success keeps the exact single-predict payload; failure becomes
+    # {"error": {"status", "detail"}} in the same slot (order preserved).
+    # Rate limiting stays work-based — N items cost N tokens — but a 429 on
+    # item k no longer voids items 1..k-1.
     results = await _asyncio.gather(
         *(run_in_threadpool(predict, client_id, r, auth) for r in req.requests),
-        return_exceptions=False,
+        return_exceptions=True,
     )
 
-    return {"client_id": client_id, "results": list(results), "count": len(results)}
+    payload: list[dict] = []
+    succeeded = 0
+    for i, res in enumerate(results):
+        if isinstance(res, HTTPException):
+            payload.append({"error": {"status": res.status_code, "detail": res.detail}})
+        elif isinstance(res, BaseException):
+            # predict() already maps internal errors to a trace_id'd 500, so
+            # this branch is unexpected machinery failure (R11-H5: log the
+            # real error server-side, return a generic message).
+            logger.error("predict_batch item %d unexpected error: %s",
+                         i, res, exc_info=res)
+            payload.append({"error": {"status": 500, "detail": "internal error"}})
+        else:
+            succeeded += 1
+            payload.append(res)
+
+    return {
+        "client_id": client_id,
+        "results":   payload,
+        "count":     len(payload),
+        "succeeded": succeeded,
+        "failed":    len(payload) - succeeded,
+    }
