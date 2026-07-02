@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
 
@@ -41,6 +42,13 @@ class RateLimiter:
     def __init__(self, redis_url: str | None = None):
         self._redis = None
         self._memory: dict[str, list[float]] = defaultdict(list)
+        # ASYNC-race (#186): the in-memory fallback is a read-modify-write on
+        # shared state (evict → count → append). Under concurrent threads
+        # (FastAPI runs sync handlers in a threadpool) interleaved calls could
+        # both pass the `count < limit` check and over-admit past the limit.
+        # The Redis path is already atomic (one pipeline); this lock gives the
+        # fallback the same guarantee.
+        self._memory_lock = threading.Lock()
 
         if redis_url:
             try:
@@ -98,13 +106,14 @@ class RateLimiter:
     def _check_memory(
         self, client_id: str, limit: int, now: float, window_start: float
     ) -> tuple[bool, dict]:
-        timestamps = self._memory[client_id]
-        # Evict old entries
-        self._memory[client_id] = [t for t in timestamps if t > window_start]
-        count = len(self._memory[client_id])
+        with self._memory_lock:
+            timestamps = self._memory[client_id]
+            # Evict old entries
+            self._memory[client_id] = [t for t in timestamps if t > window_start]
+            count = len(self._memory[client_id])
 
-        if count < limit:
-            self._memory[client_id].append(now)
+            if count < limit:
+                self._memory[client_id].append(now)
 
         remaining = max(0, limit - count - 1)
         reset_at  = int(now) + WINDOW_SECONDS
