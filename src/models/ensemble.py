@@ -113,6 +113,14 @@ class EnsembleForecaster:
         self.models_[self.primary_objective].fit_quantiles(X, y, quantiles, groups=groups)
         return self
 
+    def calibrate_conformal(self, *args, **kwargs) -> dict:
+        """#151 CQR — delegated to the primary child, which owns the quantile
+        sub-models (predict_quantiles already delegates there, so the stored
+        corrections apply automatically at serve)."""
+        if not self.models_:
+            raise RuntimeError("Call fit() before calibrate_conformal()")
+        return self.models_[self.primary_objective].calibrate_conformal(*args, **kwargs)
+
     def compute_blend_weights(
         self,
         df_full:    pd.DataFrame,

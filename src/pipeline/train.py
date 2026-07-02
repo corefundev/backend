@@ -112,6 +112,58 @@ def _hpo_tune_slice(df: pd.DataFrame, date_col: str, report_tail_days: int) -> p
     return df[df[date_col] <= cutoff]
 
 
+def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg) -> None:
+    """#151 CQR: fit the quantile heads on a temporal PROPER subset (rows
+    before the calibration window), then calibrate their coverage on the
+    held-out most-recent `conformal_cal_days` — see src/models/conformal.py.
+
+    The POINT-forecast heads keep the full history (they are not
+    conformalized); only the quantile sub-models give up the tail, which is
+    what makes the conformity scores honest (the quantile models never saw
+    those targets). Too-short history → quantiles fit on full data, raw
+    intervals served, loud warning (never a broken/∞ band).
+
+    Scalar calibration metrics are merged into `agg` (flat floats only — the
+    dict flows to MLflow log_metrics and sku_training_runs).
+    """
+    sku_col   = config["data"]["sku_col"]
+    date_col  = config["data"]["date_col"]
+    model_cfg = config.get("model", {})
+    enabled   = bool(model_cfg.get("conformal_enabled", True))
+    cal_days  = int(model_cfg.get("conformal_cal_days", 28))
+    alpha     = float(model_cfg.get("conformal_alpha", 0.2))
+    horizon   = int(model_cfg.get("horizon", 14))
+
+    dates     = pd.to_datetime(df[date_col])
+    cal_start = dates.max() - pd.Timedelta(days=cal_days - 1)
+    proper    = dates < cal_start
+    proper_dates = int(dates[proper].nunique())
+
+    if not enabled or proper_dates <= 2 * horizon:
+        if enabled:
+            logger.warning(
+                "#151: history too short for a conformal calibration split "
+                "(%d proper dates ≤ 2×horizon=%d) — quantile heads fit on full "
+                "data, RAW (uncalibrated) intervals served",
+                proper_dates, 2 * horizon,
+            )
+        final_model.fit_quantiles(X, y, groups=df[sku_col])
+        return
+
+    final_model.fit_quantiles(X[proper], y[proper], groups=df[sku_col][proper])
+    summary = final_model.calibrate_conformal(
+        X, y, dates=dates, cal_start=cal_start, groups=df[sku_col], alpha=alpha,
+    )
+    if summary:
+        agg["conformal_alpha"]           = summary["alpha"]
+        agg["conformal_n_cal"]           = summary["n_cal"]
+        agg["conformal_coverage_pre"]    = summary["coverage_pre"]
+        agg["conformal_coverage_post"]   = summary["coverage_post"]
+        agg["conformal_correction_mean"] = summary["correction_mean"]
+        agg["pinball_p10_post"]          = summary["pinball_lo_post"]
+        agg["pinball_p90_post"]          = summary["pinball_hi_post"]
+
+
 def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
@@ -329,7 +381,7 @@ def run_training_pipeline(
         # already imported in step 6 for the validator factory.
         final_model = EnsembleForecaster(config)
         final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
-        final_model.fit_quantiles(X, y, groups=df[sku_col])
+        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg)
         # Estimate per-SKU mixing weights from the most recent
         # window of training data. Needs the SKU + date columns
         # alongside the targets, so we pass df rather than X.
@@ -346,7 +398,7 @@ def run_training_pipeline(
     elif model_type == "mimo":
         final_model = MIMOForecaster(config)
         final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
-        final_model.fit_quantiles(X, y, groups=df[sku_col])
+        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg)
         logger.info("  MIMO model + quantile models fitted")
     else:
         final_model = SKUForecaster(config)
