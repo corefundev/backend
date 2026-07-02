@@ -85,6 +85,10 @@ _ALLOWED_RANGES: dict[str, tuple] = {
     # catches non-numeric input → 422; the old ad-hoc `float(lat)` 500'd on it.
     "features.weather.latitude":       (-90, 90),
     "features.weather.longitude":      (-180, 180),
+    # #151 CQR knobs: alpha outside (0, 0.5] makes the finite-sample quantile
+    # degenerate; a cal window under a week starves every head into fallback.
+    "model.conformal_alpha":           (0.01, 0.5),
+    "model.conformal_cal_days":        (7, 90),
 }
 
 _ALLOWED_MODEL_TYPES = {"lgbm", "mimo"}

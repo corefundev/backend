@@ -185,19 +185,144 @@ class MIMOForecaster:
         """
         return self.predict(X_last)[0]
 
+    def calibrate_conformal(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        dates: pd.Series,
+        cal_start: pd.Timestamp,
+        groups: pd.Series | None = None,
+        alpha: float = 0.2,
+        lo_key: str = "p10",
+        hi_key: str = "p90",
+    ) -> dict:
+        """CQR calibration (#151) — see src/models/conformal.py for the method.
+
+        PRECONDITION: fit_quantiles() was trained on the PROPER subset only
+        (rows whose shifted targets all predate `cal_start`) — the temporal
+        split lives in the caller (train.py); this method scores the heads on
+        the held-out calibration targets and stores one correction per head
+        in `self.conformal_`, which predict_quantiles() then applies.
+
+        Calibration rows for head h: rows whose TARGET date (t+h) falls on or
+        after `cal_start` — exactly the targets the quantile models never saw.
+        Returns a summary dict (pooled + per-band coverage pre/post, pinball
+        pre/post) for logging/metrics; {} when nothing could be calibrated.
+        """
+        from src.models.conformal import (
+            conformity_scores, empirical_coverage, per_head_corrections,
+            pinball_loss,
+        )
+        if not self.q_models_ or lo_key not in self.q_models_ or hi_key not in self.q_models_:
+            raise RuntimeError("Call fit_quantiles() first (lo/hi heads required)")
+
+        dates = pd.to_datetime(dates)
+        scores_by_head: list[np.ndarray] = []
+        # Flat per-row collectors for the summary (pooled + stratified).
+        col_y, col_lo, col_hi, col_head, col_sku = [], [], [], [], []
+
+        for h in range(1, self.horizon + 1):
+            if groups is None:
+                y_h = y.shift(-h)
+                d_h = dates.shift(-h)
+            else:
+                y_h = y.groupby(groups).shift(-h)
+                d_h = dates.groupby(groups).shift(-h)
+            mask = y_h.notna() & (d_h >= cal_start)
+            if not bool(mask.any()):
+                scores_by_head.append(np.empty(0))
+                continue
+            X_m  = X[mask][self.feature_cols]
+            y_m  = y_h[mask].to_numpy(dtype=float)
+            lo_m = self.q_models_[lo_key][h - 1].predict(X_m)
+            hi_m = self.q_models_[hi_key][h - 1].predict(X_m)
+            scores_by_head.append(conformity_scores(y_m, lo_m, hi_m))
+            col_y.append(y_m)
+            col_lo.append(lo_m)
+            col_hi.append(hi_m)
+            col_head.append(np.full(len(y_m), h))
+            if groups is not None:
+                col_sku.append(groups[mask].to_numpy())
+
+        if not col_y:
+            logger.warning("conformal: empty calibration window — skipping (raw quantiles served)")
+            return {}
+
+        corrections, info = per_head_corrections(scores_by_head, alpha)
+        self.conformal_ = {
+            "lo_key": lo_key, "hi_key": hi_key, "alpha": alpha,
+            "corrections": corrections, "info": info,
+        }
+
+        # ── summary (observability; the guarantee itself is by construction) ──
+        yv  = np.concatenate(col_y)
+        lov = np.concatenate(col_lo)
+        hiv = np.concatenate(col_hi)
+        hv  = np.concatenate(col_head).astype(int)
+        adj = corrections[hv - 1]
+        summary: dict = {
+            "alpha":            alpha,
+            "n_cal":            int(len(yv)),
+            "coverage_pre":     empirical_coverage(yv, lov, hiv),
+            "coverage_post":    empirical_coverage(yv, lov - adj, hiv + adj),
+            "correction_mean":  float(np.mean(corrections)),
+            "fallback_heads":   info["fallback_heads"],
+            "pinball_lo_pre":   pinball_loss(yv, lov, 0.5 * alpha),
+            "pinball_lo_post":  pinball_loss(yv, np.clip(lov - adj, 0, None), 0.5 * alpha),
+            "pinball_hi_pre":   pinball_loss(yv, hiv, 1.0 - 0.5 * alpha),
+            "pinball_hi_post":  pinball_loss(yv, hiv + adj, 1.0 - 0.5 * alpha),
+        }
+        # Stratified coverage: horizon step × SKU volume band (terciles by
+        # mean calibration target). A pooled 90% can hide under-coverage on
+        # slow movers — exactly where stockouts hurt (#151).
+        if col_sku:
+            sk = np.concatenate(col_sku)
+            sku_mean = pd.Series(yv).groupby(pd.Series(sk)).transform("mean").to_numpy()
+            qs = np.quantile(np.unique(sku_mean), [1 / 3, 2 / 3]) if len(np.unique(sku_mean)) >= 3 else None
+            if qs is not None:
+                band = np.digitize(sku_mean, qs)          # 0=slow 1=mid 2=fast
+                for b, name in enumerate(("slow", "mid", "fast")):
+                    m = band == b
+                    if m.any():
+                        summary[f"coverage_post_{name}"] = empirical_coverage(
+                            yv[m], (lov - adj)[m], (hiv + adj)[m]
+                        )
+        per_head_cov = {
+            int(h): empirical_coverage(yv[hv == h], (lov - adj)[hv == h], (hiv + adj)[hv == h])
+            for h in np.unique(hv)
+        }
+        summary["coverage_post_by_head"] = per_head_cov
+        logger.info(
+            "conformal (#151): n_cal=%d coverage %.3f → %.3f (nominal %.2f), "
+            "mean correction %+.3f, fallback heads=%s",
+            summary["n_cal"], summary["coverage_pre"], summary["coverage_post"],
+            1 - alpha, summary["correction_mean"], info["fallback_heads"],
+        )
+        return summary
+
     def predict_quantiles(self, X: pd.DataFrame) -> dict[str, np.ndarray]:
         """
         Return {p10, p50, p90} each shape (N, H).
+
+        #151: when `calibrate_conformal` ran, the stored per-head CQR
+        corrections widen (or tighten) the lo/hi pair before the ≥0 clip —
+        models pickled before #151 lack the attribute and serve raw quantiles
+        exactly as before.
         """
         if not self.q_models_:
             raise RuntimeError("Call fit_quantiles() first")
-        return {
-            key: np.clip(
-                np.stack([m.predict(X[self.feature_cols]) for m in models], axis=1),
-                0, None,
-            )
+        out = {
+            key: np.stack([m.predict(X[self.feature_cols]) for m in models], axis=1)
             for key, models in self.q_models_.items()
         }
+        conf = getattr(self, "conformal_", None)
+        if conf:
+            c = np.asarray(conf["corrections"], dtype=float)   # (H,) broadcasts over (N, H)
+            if conf["lo_key"] in out:
+                out[conf["lo_key"]] = out[conf["lo_key"]] - c
+            if conf["hi_key"] in out:
+                out[conf["hi_key"]] = out[conf["hi_key"]] + c
+        return {k: np.clip(v, 0, None) for k, v in out.items()}
 
     def feature_importance(self) -> pd.DataFrame:
         """Mean LightGBM gain importance across the H direct heads.

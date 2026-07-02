@@ -31,8 +31,8 @@
 # branch as deliberate (and then move out of "broad except" to a typed one).
 src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
 src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
-src/pipeline/train.py:139  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :125, +14 #180 _hpo_tune_slice helper + import, 2026-06-29)
-src/pipeline/train.py:177  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :163, +14 #180 _hpo_tune_slice helper + import, 2026-06-29)
+src/pipeline/train.py:191  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :139, +52 #151 _fit_quantiles_with_conformal helper, 2026-07-02)
+src/pipeline/train.py:229  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :177, +52 #151 _fit_quantiles_with_conformal helper, 2026-07-02)
 src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
 src/pipeline/inference_utils.py:341  pre-R9 baseline (was :331, +10 L-A4 #186 doc-comment); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
