@@ -70,7 +70,7 @@ def test_inverse_wmape_weighting_known_values():
     # y_next = [1,2,3,4] (volume 10). good: predicts 2.5 → err |1-2.5|+...=|…|
     good, bad = _Const(2.5), _Const(100.0)
     per_sku, defaults = EnsembleForecaster._estimate_weights_on_window(
-        {"g": good, "b": bad}, ["f"], ("g", "b"),
+        {"g": good, "b": bad}, ("g", "b"),
         recent, "sku", "date", "sales", eps=1e-3,
     )
     w = per_sku["A"]
@@ -84,7 +84,7 @@ def test_alignment_is_next_day_not_same_row():
     recent = _window()
     oracle, naive = _NextDayOracle(), _Const(0.0)
     per_sku, _ = EnsembleForecaster._estimate_weights_on_window(
-        {"o": oracle, "n": naive}, ["f"], ("o", "n"),
+        {"o": oracle, "n": naive}, ("o", "n"),
         recent, "sku", "date", "sales", eps=1e-3,
     )
     # Correct alignment → oracle error 0 (wmape floored at eps) → weight ≈ 1.
@@ -95,7 +95,7 @@ def test_alignment_is_next_day_not_same_row():
 def test_short_groups_and_zero_volume_are_skipped():
     recent = _window(n=2)                                  # < 3 rows → skipped
     per_sku, defaults = EnsembleForecaster._estimate_weights_on_window(
-        {"g": _Const(1.0)}, ["f"], ("g",),
+        {"g": _Const(1.0)}, ("g",),
         recent, "sku", "date", "sales", eps=1e-3,
     )
     assert per_sku == {} and defaults is None

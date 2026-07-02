@@ -89,6 +89,8 @@ _ALLOWED_RANGES: dict[str, tuple] = {
     # degenerate; a cal window under a week starves every head into fallback.
     "model.conformal_alpha":           (0.01, 0.5),
     "model.conformal_cal_days":        (7, 90),
+    # #154 Croston smoothing: α→0 freezes on the first demand, α>0.5 chases noise.
+    "model.croston_alpha":             (0.01, 0.5),
 }
 
 _ALLOWED_MODEL_TYPES = {"lgbm", "mimo"}

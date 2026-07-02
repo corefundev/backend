@@ -94,6 +94,25 @@ class EnsembleForecaster:
             logger.info(f"Ensemble: fitting child objective={obj}")
             child.fit(X, y, groups=groups, sample_weight=sample_weight)
             self.models_[obj] = child
+
+        # #154 (A3): Croston-SBA side child for intermittent/lumpy SKUs.
+        # Cheap (no LightGBM). It enters a SKU's blend ONLY when the SKU is
+        # classified croston-eligible at weight-estimation time; it never
+        # enters default (cold-start) weights, and it lives outside models_
+        # so quantiles / feature_importance / child iteration stay untouched.
+        self.croston_ = None
+        if bool(self.config.get("model", {}).get("intermittent_croston", True)):
+            if groups is None:
+                logger.warning(
+                    "#154: intermittent_croston enabled but fit() got no "
+                    "groups (per-SKU labels) — skipping the Croston child"
+                )
+            else:
+                from src.models.intermittent import CrostonSBA
+                alpha = float(self.config["model"].get("croston_alpha", 0.1))
+                self.croston_ = CrostonSBA(self.config, alpha=alpha).fit(
+                    X, y, groups=groups,
+                )
         logger.info(
             f"Ensemble: fitted {len(self.models_)} child models, "
             f"{len(self.feature_cols)} features"
@@ -124,13 +143,13 @@ class EnsembleForecaster:
     @staticmethod
     def _estimate_weights_on_window(
         models:       dict,
-        feature_cols: list[str],
         objectives:   tuple[str, ...],
         recent:       pd.DataFrame,
         sku_col:      str,
         date_col:     str,
         target_col:   str,
         eps:          float,
+        gated_models: dict | None = None,
     ) -> tuple[dict[str, dict[str, float]], dict[str, float] | None]:
         """Shared per-SKU inverse-WMAPE weight estimation on a window.
 
@@ -139,7 +158,14 @@ class EnsembleForecaster:
         children that never saw `recent`). Returns (per_sku_weights,
         volume-weighted default_weights or None when the window carried no
         measurable volume).
+
+        gated_models (#154): {name: (model, eligible_sku_set)} — side children
+        (Croston) that compete for a SKU's weight ONLY when the SKU is in
+        their eligibility set, and NEVER enter the default (cold-start)
+        weights — a cold SKU has no classification, so routing it to a
+        rate-based method would be a guess.
         """
+        gated_models = gated_models or {}
         per_sku_w: dict[str, dict[str, float]] = {}
         global_err: dict[str, float] = {o: 0.0 for o in objectives}
         global_act: float = 0.0
@@ -155,7 +181,9 @@ class EnsembleForecaster:
             g = group.sort_values(date_col).reset_index(drop=True)
             if len(g) < 3:
                 continue
-            X_in    = g[feature_cols].iloc[:-1]                    # rows 0..N-2
+            # Full-column slice: MIMO children select their own feature_cols;
+            # gated children (Croston) read the SKU column instead (#154).
+            X_in    = g.iloc[:-1]                                  # rows 0..N-2
             y_next  = g[target_col].iloc[1:].to_numpy(dtype=float)  # rows 1..N-1
             sku_volume = float(np.abs(y_next).sum())
             global_act += sku_volume
@@ -167,6 +195,12 @@ class EnsembleForecaster:
                 if sku_volume < eps:
                     continue
                 obj_wmape[obj] = err / sku_volume
+            if sku_volume >= eps:
+                for name, (gmodel, eligible) in gated_models.items():
+                    if str(sku) not in eligible:
+                        continue
+                    preds = np.clip(gmodel.predict(X_in), 0, None)[:, 0]
+                    obj_wmape[name] = float(np.abs(y_next - preds).sum()) / sku_volume
             if not obj_wmape:
                 continue
             inv = {o: 1.0 / max(w, eps) for o, w in obj_wmape.items()}
@@ -176,6 +210,7 @@ class EnsembleForecaster:
         # Cold-start / unknown-SKU fallback at predict time. Volume-
         # weighted global WMAPE per objective so high-volume SKUs
         # dominate the default mix (matches WMAPE's own weighting).
+        # Gated children are deliberately absent here (see docstring).
         default_weights = None
         if global_act > eps:
             default_inv = {
@@ -221,9 +256,18 @@ class EnsembleForecaster:
             )
             return self
 
+        # #154: the served Croston child competes for eligible SKUs' weight.
+        # NB in THIS legacy path the croston rates saw the window too (same
+        # pseudo-holdout bias class as the LGBM children here) — the clean
+        # path below is the honest default.
+        croston = getattr(self, "croston_", None)
+        gated = (
+            {"croston": (croston, croston.eligible_skus())} if croston else None
+        )
         per_sku_w, default_weights = self._estimate_weights_on_window(
-            self.models_, self.feature_cols, self.objectives,
+            self.models_, self.objectives,
             recent, sku_col, date_col, target_col, eps,
+            gated_models=gated,
         )
         self.weights_ = per_sku_w
         if default_weights is not None:
@@ -293,9 +337,17 @@ class EnsembleForecaster:
             groups=None if groups is None else groups[proper],
             sample_weight=None if sample_weight is None else np.asarray(sample_weight)[mask_np],
         )
+        # #154: temp croston was fit on the proper subset too → its window
+        # WMAPE is as honest as the temp LGBM children's.
+        temp_croston = getattr(temp, "croston_", None)
+        gated = (
+            {"croston": (temp_croston, temp_croston.eligible_skus())}
+            if temp_croston else None
+        )
         per_sku_w, default_weights = self._estimate_weights_on_window(
-            temp.models_, temp.feature_cols, self.objectives,
+            temp.models_, self.objectives,
             recent, sku_col, date_col, target_col, eps,
+            gated_models=gated,
         )
         del temp   # free the throwaway children BEFORE the final fit
 
@@ -327,6 +379,13 @@ class EnsembleForecaster:
             obj: np.clip(model.predict(X), 0, None)
             for obj, model in self.models_.items()
         }
+        # #154: the Croston side child's flat rate joins the blend; it only
+        # contributes where a SKU's weight dict carries a "croston" key
+        # (eligible SKUs — the loop below does w.get(obj, 0.0)). getattr:
+        # pre-#154 pickles lack the attribute → blend unchanged.
+        croston = getattr(self, "croston_", None)
+        if croston is not None:
+            per_obj_preds["croston"] = np.clip(croston.predict(X), 0, None)
         n_rows = len(X)
         skus = (
             X[sku_col].astype(str).tolist()
