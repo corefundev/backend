@@ -132,6 +132,11 @@ async def readyz():
     Readiness probe — returns 503 if any hard dependency is unreachable.
     Used by load balancers to stop sending traffic to a failing replica
     without killing it (avoids spurious restarts during transient blips).
+
+    Contract note (CONTRACT-2, #208): the 503 body here is the PROBE payload
+    {"ready": bool, "checks": {...}} — intentionally NOT the API error
+    envelope ({"detail": ...}). Probes/LBs consume this shape; it is part of
+    the health contract, not an error response for API clients.
     """
     checks: dict[str, dict] = {}
     overall_ok = True

@@ -252,6 +252,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CONTRACT-2 (#208): one error contract — 422 keeps the standard pydantic
+# detail list + gains an additive `message` string; unhandled exceptions
+# return JSON with a trace_id instead of Starlette's text/plain page.
+from src.api.error_handlers import register_error_handlers
+register_error_handlers(app)
+
 # ══════════════════════════════════════════════════════════════════
 # CORS — backend + frontend are on different hosts.
 # FRONTEND_ORIGINS env is a comma-separated list (no wildcards in prod).
@@ -292,6 +298,11 @@ async def trace_id_middleware(request: Request, call_next):
     )
     incoming = request.headers.get("x-request-id", "").strip()
     trace_id = incoming if incoming and len(incoming) <= 64 else new_trace_id()
+    # CONTRACT-2 (#208): the unhandled-exception handler runs in Starlette's
+    # OUTERMOST ring, after this middleware's `finally` has reset the
+    # ContextVar and outside this middleware's header stamping — request.state
+    # is the only channel that survives to it (same scope dict).
+    request.state.trace_id = trace_id
     token = set_trace_id(trace_id)
     try:
         response = await call_next(request)
