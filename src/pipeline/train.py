@@ -380,20 +380,38 @@ def run_training_pipeline(
         # accuracy gain on mixed catalogs. EnsembleForecaster was
         # already imported in step 6 for the validator factory.
         final_model = EnsembleForecaster(config)
+        blend_lookback = int(
+            config.get("model", {}).get("ensemble_lookback_days", 28)
+        )
+        # #152 (A1): blend weights from a CLEAN holdout — temp children fit
+        # on history-minus-window, weights estimated on the window they never
+        # saw. Runs BEFORE the final fit so the throwaway children are freed
+        # first (peak memory stays at one ensemble — the 1.5GiB worker
+        # ceiling). Short history → False → legacy pseudo-holdout after fit.
+        clean_weights = False
+        if bool(config.get("model", {}).get("blend_clean_holdout", True)):
+            clean_weights = final_model.compute_blend_weights_clean(
+                df_full=df, X=X, y=y,
+                sku_col=sku_col,
+                date_col=config["data"]["date_col"],
+                target_col=target_col,
+                groups=df[sku_col],
+                sample_weight=sample_weights_full,
+                lookback_days=blend_lookback,
+            )
         final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
         _fit_quantiles_with_conformal(final_model, df, X, y, config, agg)
-        # Estimate per-SKU mixing weights from the most recent
-        # window of training data. Needs the SKU + date columns
-        # alongside the targets, so we pass df rather than X.
-        final_model.compute_blend_weights(
-            df_full=df,
-            sku_col=sku_col,
-            date_col=config["data"]["date_col"],
-            target_col=target_col,
-            lookback_days=int(
-                config.get("model", {}).get("ensemble_lookback_days", 28)
-            ),
-        )
+        if not clean_weights:
+            # Legacy pseudo-holdout (window seen by the children) — only the
+            # short-history / disabled fallback since #152.
+            final_model.compute_blend_weights(
+                df_full=df,
+                sku_col=sku_col,
+                date_col=config["data"]["date_col"],
+                target_col=target_col,
+                lookback_days=blend_lookback,
+            )
+        agg["blend_weights_clean"] = float(clean_weights)
         logger.info("  Ensemble (Tweedie+MAE+MSE) + quantile models fitted")
     elif model_type == "mimo":
         final_model = MIMOForecaster(config)
