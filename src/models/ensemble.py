@@ -121,42 +121,27 @@ class EnsembleForecaster:
             raise RuntimeError("Call fit() before calibrate_conformal()")
         return self.models_[self.primary_objective].calibrate_conformal(*args, **kwargs)
 
-    def compute_blend_weights(
-        self,
-        df_full:    pd.DataFrame,
-        sku_col:    str,
-        date_col:   str,
-        target_col: str,
-        lookback_days: int = 28,
-        eps:        float = 1e-3,
-    ) -> "EnsembleForecaster":
+    @staticmethod
+    def _estimate_weights_on_window(
+        models:       dict,
+        feature_cols: list[str],
+        objectives:   tuple[str, ...],
+        recent:       pd.DataFrame,
+        sku_col:      str,
+        date_col:     str,
+        target_col:   str,
+        eps:          float,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, float] | None]:
+        """Shared per-SKU inverse-WMAPE weight estimation on a window.
+
+        Used by BOTH the legacy pseudo-holdout path (models = the served,
+        full-data children) and the clean-holdout path (#152: models = temp
+        children that never saw `recent`). Returns (per_sku_weights,
+        volume-weighted default_weights or None when the window carried no
+        measurable volume).
         """
-        Estimate per-SKU mixing weights from the most recent
-        `lookback_days` of training data.
-
-        Bias note: this window WAS seen by the children during fit,
-        so the WMAPE numbers are optimistic in absolute terms. But
-        the RELATIVE ranking of objectives per SKU is what matters
-        for the blend, and that ranking is preserved.
-
-        Cleaner alternative (future): hold out the window before fit,
-        train on everything-except, compute weights, refit on full.
-        Costs ~33% more training time. Skipped for v1.
-        """
-        if not self.models_:
-            raise RuntimeError("Call fit() before compute_blend_weights()")
-
-        df = df_full.sort_values(date_col)
-        cutoff = df[date_col].max() - pd.Timedelta(days=lookback_days)
-        recent = df[df[date_col] > cutoff]
-        if recent.empty:
-            logger.warning(
-                "Ensemble: holdout window empty, falling back to equal weights"
-            )
-            return self
-
         per_sku_w: dict[str, dict[str, float]] = {}
-        global_err: dict[str, float] = {o: 0.0 for o in self.objectives}
+        global_err: dict[str, float] = {o: 0.0 for o in objectives}
         global_act: float = 0.0
 
         for sku, group in recent.groupby(sku_col, sort=False):
@@ -170,12 +155,12 @@ class EnsembleForecaster:
             g = group.sort_values(date_col).reset_index(drop=True)
             if len(g) < 3:
                 continue
-            X_in    = g[self.feature_cols].iloc[:-1]              # rows 0..N-2
-            y_next  = g[target_col].iloc[1:].to_numpy(dtype=float) # rows 1..N-1
+            X_in    = g[feature_cols].iloc[:-1]                    # rows 0..N-2
+            y_next  = g[target_col].iloc[1:].to_numpy(dtype=float)  # rows 1..N-1
             sku_volume = float(np.abs(y_next).sum())
             global_act += sku_volume
             obj_wmape: dict[str, float] = {}
-            for obj, model in self.models_.items():
+            for obj, model in models.items():
                 preds = np.clip(model.predict(X_in), 0, None)[:, 0]
                 err = float(np.abs(y_next - preds).sum())
                 global_err[obj] += err
@@ -188,18 +173,61 @@ class EnsembleForecaster:
             total = sum(inv.values())
             per_sku_w[str(sku)] = {o: inv[o] / total for o in inv}
 
-        self.weights_ = per_sku_w
-
         # Cold-start / unknown-SKU fallback at predict time. Volume-
         # weighted global WMAPE per objective so high-volume SKUs
         # dominate the default mix (matches WMAPE's own weighting).
+        default_weights = None
         if global_act > eps:
             default_inv = {
                 o: 1.0 / max(global_err[o] / global_act, eps)
-                for o in self.objectives
+                for o in objectives
             }
             total = sum(default_inv.values())
-            self.default_weights = {o: default_inv[o] / total for o in default_inv}
+            default_weights = {o: default_inv[o] / total for o in default_inv}
+        return per_sku_w, default_weights
+
+    def compute_blend_weights(
+        self,
+        df_full:    pd.DataFrame,
+        sku_col:    str,
+        date_col:   str,
+        target_col: str,
+        lookback_days: int = 28,
+        eps:        float = 1e-3,
+    ) -> "EnsembleForecaster":
+        """
+        LEGACY pseudo-holdout path: estimate per-SKU mixing weights from
+        the most recent `lookback_days` of training data.
+
+        Bias note: this window WAS seen by the children during fit,
+        so the WMAPE numbers are optimistic in absolute terms and the
+        ranking tilts toward whichever child overfits the window most.
+        #152 fixes this with `compute_blend_weights_clean` (temp children
+        that never saw the window); THIS path remains as the short-history
+        fallback and as the per-fold estimator inside walk-forward
+        validation (where the clean variant would double the fold cost —
+        the resulting reported metric is a conservative lower bound of the
+        clean-weights production procedure).
+        """
+        if not self.models_:
+            raise RuntimeError("Call fit() before compute_blend_weights()")
+
+        df = df_full.sort_values(date_col)
+        cutoff = df[date_col].max() - pd.Timedelta(days=lookback_days)
+        recent = df[df[date_col] > cutoff]
+        if recent.empty:
+            logger.warning(
+                "Ensemble: holdout window empty, falling back to equal weights"
+            )
+            return self
+
+        per_sku_w, default_weights = self._estimate_weights_on_window(
+            self.models_, self.feature_cols, self.objectives,
+            recent, sku_col, date_col, target_col, eps,
+        )
+        self.weights_ = per_sku_w
+        if default_weights is not None:
+            self.default_weights = default_weights
 
         logger.info(
             "Ensemble: blend weights computed for %d SKUs "
@@ -208,6 +236,78 @@ class EnsembleForecaster:
             {o: round(w, 3) for o, w in self.default_weights.items()},
         )
         return self
+
+    def compute_blend_weights_clean(
+        self,
+        df_full:    pd.DataFrame,
+        X:          pd.DataFrame,
+        y:          pd.Series,
+        sku_col:    str,
+        date_col:   str,
+        target_col: str,
+        groups:     pd.Series | None = None,
+        sample_weight: np.ndarray | None = None,
+        lookback_days: int = 28,
+        eps:        float = 1e-3,
+    ) -> bool:
+        """#152 (A1): estimate blend weights on a CLEAN holdout.
+
+        Temp children are fit on everything BEFORE the window, weights are
+        estimated on the window they never saw (honest per-SKU WMAPE ranking),
+        the temp children are discarded, and the weights are stored on self —
+        the caller then fits the SERVED children on the FULL history.
+
+        Call BEFORE self.fit(): the temp ensemble is freed before the final
+        children exist, so peak memory stays at one ensemble's worth (the
+        1.5GiB worker ceiling stays respected); the cost is training time
+        only (+K temp child fits).
+
+        Returns True when clean weights were stored; False when the history
+        is too short for a meaningful split (caller falls back to the legacy
+        pseudo-holdout path after fitting).
+        """
+        dates  = pd.to_datetime(df_full[date_col])
+        cutoff = dates.max() - pd.Timedelta(days=lookback_days)
+        proper = dates <= cutoff
+        recent = df_full[dates > cutoff]
+        horizon = int(self.config["model"].get("horizon", 14))
+        proper_dates = int(dates[proper].nunique())
+
+        if recent.empty or proper_dates <= 2 * horizon:
+            logger.warning(
+                "#152: history too short for a clean blend-weight holdout "
+                "(%d proper dates ≤ 2×horizon=%d) — falling back to the "
+                "legacy pseudo-holdout weights",
+                proper_dates, 2 * horizon,
+            )
+            return False
+
+        temp = EnsembleForecaster(self.config, objectives=self.objectives)
+        mask_np = proper.to_numpy()
+        logger.info(
+            "#152: fitting temp children on %d/%d rows for clean blend weights",
+            int(mask_np.sum()), len(df_full),
+        )
+        temp.fit(
+            X[proper], y[proper],
+            groups=None if groups is None else groups[proper],
+            sample_weight=None if sample_weight is None else np.asarray(sample_weight)[mask_np],
+        )
+        per_sku_w, default_weights = self._estimate_weights_on_window(
+            temp.models_, temp.feature_cols, self.objectives,
+            recent, sku_col, date_col, target_col, eps,
+        )
+        del temp   # free the throwaway children BEFORE the final fit
+
+        self.weights_ = per_sku_w
+        if default_weights is not None:
+            self.default_weights = default_weights
+        logger.info(
+            "Ensemble (#152): CLEAN blend weights for %d SKUs (defaults: %s)",
+            len(self.weights_),
+            {o: round(w, 3) for o, w in self.default_weights.items()},
+        )
+        return True
 
     # ── Prediction ────────────────────────────────────────────
 

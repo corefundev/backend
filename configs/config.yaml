@@ -64,6 +64,10 @@ model:
   conformal_enabled: true
   conformal_cal_days: 28
   conformal_alpha: 0.2
+  # #152 A1: ensemble blend weights from a CLEAN holdout (temp children fit on
+  # history-minus-window, weights on the unseen window; +K temp child fits of
+  # training time, peak memory unchanged). false → legacy pseudo-holdout.
+  blend_clean_holdout: true
   n_estimators: 500
   learning_rate: 0.05
   num_leaves: 64
