@@ -19,7 +19,6 @@ import re
 from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 
 import src.pipeline.post_training as pt
 import src.pipeline.task_queue as tr
@@ -57,7 +56,8 @@ def test_post_training_imported_locally_not_at_module_level():
 # ── 2a. generate_and_store_forecasts ──────────────────────────────────────────
 
 def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
-                       user_horizon=30, plan_max=7, plan_max_skus=30):
+                       user_horizon=30, plan_max=7, plan_max_skus=30,
+                       model_horizon=28):
     captured: dict = {}
 
     monkeypatch.setattr(pt, "get_registry",
@@ -77,7 +77,7 @@ def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
     class _Storage:
         def __init__(self, cid): pass
         def model_exists(self): return model_exists
-        def load_model(self): return object()
+        def load_model(self): return SimpleNamespace(horizon=model_horizon)
     monkeypatch.setattr(pt, "ClientStorage", _Storage)
     monkeypatch.setattr(pt, "serve_feature_set", lambda m: ([], []))
     monkeypatch.setattr(pt, "build_features", lambda df, config, **k: df)
@@ -176,3 +176,23 @@ def test_anomalies_none_flagged_persists_empty(monkeypatch):
     pt.detect_and_store_anomalies(client_id="acme", data_path="d", config_path="c",
                                   run_id="r1")
     assert cap["rows"] == []   # explicit empty replace, not skipped
+
+
+def test_forecasts_suppress_intervals_beyond_direct_heads(monkeypatch):
+    # #158 interim guard: horizon > the model's direct heads → the serve path
+    # is recursive and p10/p90 are NOT coverage-calibrated (#151 calibrated the
+    # direct process) — the band is suppressed (None → FE hides the ribbon),
+    # the point forecast stays.
+    fc = pd.DataFrame({
+        "sku":             ["A"],
+        "date":            [pd.Timestamp("2026-01-01")],
+        "predicted_sales": [10.0],
+        "p10":             [8.0],
+        "p90":             [12.0],
+    })
+    cap = _wire_forecast_env(monkeypatch, forecasts_df=fc,
+                             user_horizon=30, plan_max=90, model_horizon=14)
+    pt.generate_and_store_forecasts(client_id="acme", data_path="d",
+                                    model_path="m.pkl", config_path="c", run_id="r1")
+    assert cap["horizon"] == 30                      # recursive regime engaged
+    assert cap["rows"] == [("A", "2026-01-01", 10.0, None, None)]
