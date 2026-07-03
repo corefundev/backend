@@ -83,6 +83,81 @@ def pinball_loss(y: np.ndarray, q: np.ndarray, tau: float) -> float:
     return float(np.mean(np.maximum(tau * diff, (tau - 1.0) * diff)))
 
 
+#: Mondrian horizon-block width (#219): h1-7 → block 0, h8-14 → block 1, …
+#: Blocks trade per-head granularity for ~7× calibration mass per stratum,
+#: so the thin-strata fallback rarely engages even on sliced bands.
+BLOCK_SIZE = 7
+
+
+def block_of_head(h: int, block_size: int = BLOCK_SIZE) -> int:
+    """0-based horizon block for 1-based head h."""
+    return (h - 1) // block_size
+
+
+def mondrian_correction_table(
+    scores: np.ndarray,
+    heads:  np.ndarray,
+    bands:  np.ndarray,
+    n_heads: int,
+    n_bands: int,
+    alpha: float,
+    block_size: int = BLOCK_SIZE,
+) -> tuple[np.ndarray, dict]:
+    """#219 band-conditional (Mondrian) CQR: one correction per
+    (horizon-block × volume band), fallback-resolved at CALIBRATION time so
+    serve is a plain table lookup.
+
+    Inputs are flat per-calibration-row arrays: conformity `scores`, 1-based
+    `heads`, and integer `bands` (0..n_bands−1). Returns
+    ``(table, info)`` where ``table`` has shape ``(n_bands + 1, n_heads)`` —
+    row ``b`` is the correction per head for band ``b``, and the LAST row is
+    the band-agnostic fallback used for unseen/absent-SKU rows at serve.
+
+    Fallback chain per stratum: (block, band) → block (all bands pooled) →
+    global (everything) → 0.0 — the same thin-strata discipline as #151;
+    ``info`` records which strata fell back.
+    """
+    scores = np.asarray(scores, float)
+    heads  = np.asarray(heads, int)
+    bands  = np.asarray(bands, int)
+    n_blocks = block_of_head(n_heads, block_size) + 1
+    blocks = (heads - 1) // block_size
+
+    global_q = cqr_correction(scores, alpha)
+    per_block: list[float | None] = []
+    for blk in range(n_blocks):
+        per_block.append(cqr_correction(scores[blocks == blk], alpha))
+
+    table = np.zeros((n_bands + 1, n_heads), dtype=float)
+    fallbacks: list[str] = []
+    for h in range(1, n_heads + 1):
+        blk = block_of_head(h, block_size)
+        blk_q = per_block[blk]
+        # band-agnostic row (serve fallback for unknown SKUs): block → global → 0
+        if blk_q is not None:
+            table[n_bands, h - 1] = blk_q
+        elif global_q is not None:
+            table[n_bands, h - 1] = global_q
+        else:
+            table[n_bands, h - 1] = 0.0
+        for b in range(n_bands):
+            own = cqr_correction(scores[(blocks == blk) & (bands == b)], alpha)
+            if own is not None:
+                table[b, h - 1] = own
+            else:
+                table[b, h - 1] = table[n_bands, h - 1]
+                fallbacks.append(f"block{blk}/band{b}")
+
+    info = {
+        "alpha":      alpha,
+        "block_size": block_size,
+        "n_blocks":   n_blocks,
+        "global":     global_q,
+        "fallbacks":  sorted(set(fallbacks)),
+    }
+    return table, info
+
+
 def per_head_corrections(
     scores_by_head: list[np.ndarray], alpha: float
 ) -> tuple[np.ndarray, dict]:

@@ -142,12 +142,15 @@ def test_mimo_cqr_end_to_end_guarantees_calibration_coverage():
     assert set(summary) >= {"coverage_pre", "pinball_lo_post", "pinball_hi_post",
                             "coverage_post_by_head", "correction_mean"}
 
-    # serve path applies the stored per-head corrections (band widens/tightens
-    # by exactly the correction, before the ≥0 clip)
+    # serve path applies the stored corrections (band widens/tightens by
+    # exactly the correction, before the ≥0 clip). Since #219 the default
+    # mode is mondrian; this X carries no sku column → every row resolves to
+    # the band-agnostic fallback row of the table.
     adj = m.predict_quantiles(X.head(5))
-    c = m.conformal_["corrections"]
-    assert c.shape == (3,)
-    expected_hi = np.clip(raw["p90"] + c, 0, None)
+    assert m.conformal_["corrections"].shape == (3,)           # per-head layer kept
+    assert m.conformal_.get("mode") == "mondrian"
+    c_row = np.asarray(m.conformal_["table"])[-1]              # fallback row (H,)
+    expected_hi = np.clip(raw["p90"] + c_row, 0, None)
     assert np.allclose(adj["p90"], expected_hi)
     assert np.all(adj["p10"] <= adj["p90"] + 1e-9)             # ordering holds
 

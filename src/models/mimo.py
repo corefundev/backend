@@ -254,12 +254,55 @@ class MIMOForecaster:
             "corrections": corrections, "info": info,
         }
 
-        # ── summary (observability; the guarantee itself is by construction) ──
         yv  = np.concatenate(col_y)
         lov = np.concatenate(col_lo)
         hiv = np.concatenate(col_hi)
         hv  = np.concatenate(col_head).astype(int)
         adj = corrections[hv - 1]
+
+        # ── #219 Mondrian: (horizon-block × volume band) corrections ─────────
+        # Bands = terciles of per-SKU mean demand over the passed (train)
+        # rows; the SKU→band map is persisted with the model so serve can
+        # look a row's band up from its sku column (unseen/absent → the
+        # band-agnostic fallback row). Enabled by config; needs groups and
+        # ≥3 distinct SKU volumes to form terciles — else per-head (#151)
+        # behaviour stands.
+        mondrian_on = bool(
+            self.config.get("model", {}).get("conformal_mondrian", True)
+        )
+        if mondrian_on and groups is not None and col_sku:
+            from src.models.conformal import mondrian_correction_table
+            sku_mean = y.groupby(groups).mean()
+            uniq = np.unique(sku_mean.to_numpy(dtype=float))
+            if len(uniq) >= 3:
+                qs = np.quantile(uniq, [1 / 3, 2 / 3])
+                band_of_sku = {
+                    str(s): int(np.digitize(v, qs)) for s, v in sku_mean.items()
+                }
+                sk = np.concatenate(col_sku).astype(str)
+                bands_rows = np.array([band_of_sku[s] for s in sk])
+                scores_flat = np.concatenate(scores_by_head)
+                table, minfo = mondrian_correction_table(
+                    scores=scores_flat, heads=hv, bands=bands_rows,
+                    n_heads=self.horizon, n_bands=3, alpha=alpha,
+                )
+                self.conformal_.update({
+                    "mode": "mondrian",
+                    "table": table,
+                    "band_of_sku": band_of_sku,
+                    "mondrian_info": minfo,
+                })
+                # summary reflects what will be SERVED: per-row (band, head)
+                adj = table[bands_rows, hv - 1]
+                logger.info(
+                    "conformal (#219): mondrian table %s, %d strata fell back (%s)",
+                    table.shape, len(minfo["fallbacks"]), minfo["fallbacks"][:6],
+                )
+            else:
+                logger.warning(
+                    "#219: <3 distinct SKU volumes — mondrian skipped, "
+                    "per-head corrections served"
+                )
         summary: dict = {
             "alpha":            alpha,
             "n_cal":            int(len(yv)),
@@ -317,7 +360,24 @@ class MIMOForecaster:
         }
         conf = getattr(self, "conformal_", None)
         if conf:
-            c = np.asarray(conf["corrections"], dtype=float)   # (H,) broadcasts over (N, H)
+            if conf.get("mode") == "mondrian":
+                # #219: per-row (band × head) lookup. The table's LAST row is
+                # the band-agnostic fallback — used when the frame carries no
+                # sku column or the SKU wasn't in the calibration map.
+                table = np.asarray(conf["table"], dtype=float)
+                band_map = conf["band_of_sku"]
+                fallback_row = table.shape[0] - 1
+                sku_col = self.config.get("data", {}).get("sku_col", "sku")
+                if sku_col in X.columns:
+                    idx = (
+                        X[sku_col].astype(str).map(band_map)
+                        .fillna(fallback_row).astype(int).to_numpy()
+                    )
+                else:
+                    idx = np.full(len(X), fallback_row)
+                c = table[idx]                                 # (N, H)
+            else:
+                c = np.asarray(conf["corrections"], dtype=float)  # (H,) broadcasts
             if conf["lo_key"] in out:
                 out[conf["lo_key"]] = out[conf["lo_key"]] - c
             if conf["hi_key"] in out:

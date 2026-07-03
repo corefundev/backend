@@ -64,6 +64,10 @@ model:
   conformal_enabled: true
   conformal_cal_days: 28
   conformal_alpha: 0.2
+  # #219 Mondrian: corrections per (horizon-block × SKU volume band) instead of
+  # per-head-global — fixes band-specific under-coverage (fast movers were ~0.70
+  # vs 80% nominal). Fallback chain (block,band) → block → global → 0.
+  conformal_mondrian: true
   # #152 A1: ensemble blend weights from a CLEAN holdout (temp children fit on
   # history-minus-window, weights on the unseen window; +K temp child fits of
   # training time, peak memory unchanged). false → legacy pseudo-holdout.
