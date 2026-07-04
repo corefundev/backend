@@ -171,16 +171,26 @@ def notify_training_finished(
     wmape:         Optional[float] = None,
     mase:          Optional[float] = None,
     mase_seasonal: Optional[float] = None,
+    gate_passed:   Optional[bool]  = None,
 ) -> None:
-    """Best-effort Telegram nudge on successful training. Never raises."""
+    """Best-effort Telegram nudge on successful training. Never raises.
+
+    QW2-4 #227: gate_passed=False → честный заголовок — новая модель не
+    прошла контроль качества, продолжает работать предыдущая."""
     try:
         chat_id, opted_in = _client_telegram(client_id)
         if chat_id is None or not opted_in:
             return
         base = _frontend_base_url()
-        text = (
+        header = (
+            "<b>⚠ Обучение завершено — модель не прошла контроль качества</b>\n"
+            "Продолжает работать предыдущая модель.\n\n"
+            if gate_passed is False else
             "<b>✓ Обучение завершено</b>\n\n"
-            f"Аккаунт: <code>{client_id}</code>\n"
+        )
+        text = (
+            header
+            + f"Аккаунт: <code>{client_id}</code>\n"
             f"Длительность: {_format_duration(duration_sec)}\n"
             f"SKU: {n_skus if n_skus is not None else '—'}\n"
             f"WMAPE: <b>{_format_pct(wmape)}</b> (чем меньше, тем точнее)\n"

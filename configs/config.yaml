@@ -82,6 +82,12 @@ model:
   # ensemble child — a measured per-SKU floor: competes for blend weight only
   # where it wins the clean window; never in cold-start defaults.
   naive_child: true
+  # #227 QW2-4: champion/challenger promotion gate — a challenger that fails
+  # the fail-closed gate (must beat seasonal-naive AND not regress vs the
+  # champion beyond gate_tolerance) is NOT saved; the champion keeps serving.
+  # First model (no champion) always promotes, verdict persisted.
+  promotion_gate: true
+  gate_tolerance: 0.02
   n_estimators: 500
   learning_rate: 0.05
   num_leaves: 64
