@@ -88,6 +88,9 @@ model:
   # First model (no champion) always promotes, verdict persisted.
   promotion_gate: true
   gate_tolerance: 0.02
+  # #228 QW2-B1: OOS demand censoring — target days with stock==0 are dropped
+  # from training (zero sales there ≠ zero demand). No stock column → no-op.
+  oos_censoring: true
   n_estimators: 500
   learning_rate: 0.05
   num_leaves: 64

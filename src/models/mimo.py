@@ -80,6 +80,7 @@ class MIMOForecaster:
         y: pd.Series,
         groups: pd.Series | None = None,
         sample_weight: np.ndarray | None = None,
+        target_censor: pd.Series | None = None,
     ) -> "MIMOForecaster":
         """
         Fit H direct models. For step h, target = sales shifted h steps back.
@@ -96,6 +97,12 @@ class MIMOForecaster:
         anomaly down-weighting). Each horizon drops the NaN-target rows, so the
         weight vector is sliced by the SAME boolean mask before the per-head fit.
         None → unweighted.
+
+        target_censor (#228): optional 0/1 series aligned like `y` marking
+        days whose OBSERVED sales are censored (out-of-stock: zero sales ≠
+        zero demand). Rows whose TARGET day (t+h) is censored are DROPPED
+        from head h's fit — keyed to the target day, not the input row, so
+        one OOS day removes exactly the examples it corrupts.
         """
         self.feature_cols = list(X.columns)
         self.models_ = []
@@ -116,6 +123,10 @@ class MIMOForecaster:
             else:
                 y_h = y.groupby(groups).shift(-h)
             mask = y_h.notna()
+            if target_censor is not None:
+                c_h = (target_censor.shift(-h) if groups is None
+                       else target_censor.groupby(groups).shift(-h))
+                mask &= ~(c_h.fillna(0) > 0)          # drop censored-target rows (#228)
             X_h  = X[mask]
             y_h  = y_h[mask]
 
@@ -140,8 +151,13 @@ class MIMOForecaster:
         y: pd.Series,
         quantiles: list[float] | None = None,
         groups: pd.Series | None = None,
+        target_censor: pd.Series | None = None,
     ) -> "MIMOForecaster":
-        """Fit quantile models for interval forecasts (p10/p50/p90)."""
+        """Fit quantile models for interval forecasts (p10/p50/p90).
+
+        target_censor (#228): censored-target rows are dropped per head —
+        OOS zeros corrupt the demand distribution the quantiles learn just
+        as much as the point forecast."""
         if quantiles is None:
             quantiles = [0.1, 0.5, 0.9]
         self.feature_cols = list(X.columns)
@@ -156,6 +172,10 @@ class MIMOForecaster:
                 else:
                     y_h = y.groupby(groups).shift(-h)
                 mask = y_h.notna()
+                if target_censor is not None:
+                    c_h = (target_censor.shift(-h) if groups is None
+                           else target_censor.groupby(groups).shift(-h))
+                    mask &= ~(c_h.fillna(0) > 0)      # #228
                 model = lgb.LGBMRegressor(
                     **self._base_params({"objective": "quantile", "alpha": q})
                 )
@@ -195,6 +215,7 @@ class MIMOForecaster:
         alpha: float = 0.2,
         lo_key: str = "p10",
         hi_key: str = "p90",
+        target_censor: pd.Series | None = None,
     ) -> dict:
         """CQR calibration (#151) — see src/models/conformal.py for the method.
 
@@ -229,6 +250,11 @@ class MIMOForecaster:
                 y_h = y.groupby(groups).shift(-h)
                 d_h = dates.groupby(groups).shift(-h)
             mask = y_h.notna() & (d_h >= cal_start)
+            if target_censor is not None:
+                c_h = (target_censor.shift(-h) if groups is None
+                       else target_censor.groupby(groups).shift(-h))
+                # #228: censored actuals are corrupted ground truth
+                mask &= ~(c_h.fillna(0) > 0)
             if not bool(mask.any()):
                 scores_by_head.append(np.empty(0))
                 continue

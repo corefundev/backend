@@ -176,7 +176,7 @@ def test_train_wires_clean_before_fit_and_legacy_as_fallback():
     from pathlib import Path
     src = Path("src/pipeline/train.py").read_text()
     i_clean  = src.index("compute_blend_weights_clean(")
-    i_fit    = src.index("final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)")
+    i_fit    = src.index("final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full,")
     i_legacy = src.index("final_model.compute_blend_weights(")
     assert i_clean < i_fit < i_legacy, (
         "clean weights must run BEFORE the final fit (temp children freed "
