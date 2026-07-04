@@ -1009,6 +1009,9 @@ tests:
         alertname: ModelStale
         exp_alerts:
           - exp_labels: {client_id: "acme", instance: "sku-forecasting", job: "model_age_check", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "Client acme model is stale (>45d)"
+              description: "The newest FINISHED training run for client acme is older than 45 days. Measured drift (#151/#219): interval coverage degrades from 0.805 toward ~0.75 over 1-3 months. Nudge the client to retrain, or investigate why their retraining stopped."
 
   - interval: 1m
     name: "ModelStale does NOT fire under the 45-day threshold"

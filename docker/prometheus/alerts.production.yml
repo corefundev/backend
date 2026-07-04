@@ -242,7 +242,7 @@ groups:
           team:     forecasting
         annotations:
           summary:     "Client {{ $labels.client_id }} model is stale (>45d)"
-          description: "The newest FINISHED training run for client {{ $labels.client_id }} is older than 45 days ({{ $value | humanizeDuration }}). Measured drift (#151/#219): interval coverage degrades from 0.805 toward ~0.75 over 1-3 months. Nudge the client to retrain (Settings → Обучить), or investigate why their scheduled retraining stopped."
+          description: "The newest FINISHED training run for client {{ $labels.client_id }} is older than 45 days. Measured drift (#151/#219): interval coverage degrades from 0.805 toward ~0.75 over 1-3 months. Nudge the client to retrain, or investigate why their retraining stopped."
 
       # NOTE: no absent() arm — on a fresh deploy the metric appears within
       # the first hourly cron tick, and a dead crond is already caught by the
