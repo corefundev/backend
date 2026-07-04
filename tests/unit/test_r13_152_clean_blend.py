@@ -146,7 +146,10 @@ def test_clean_path_stores_weights_and_discards_temp_children():
     assert set(ens.weights_) == {"S0", "S1", "S2"}
     for w in ens.weights_.values():
         assert abs(sum(w.values()) - 1.0) < 1e-9
-        assert set(w) == {"tweedie", "regression"}
+        # LGBM objectives always present; gated side children (#154 croston,
+        # #225 naive) may add keys where the SKU is eligible.
+        assert {"tweedie", "regression"} <= set(w)
+        assert set(w) <= {"tweedie", "regression", "croston", "naive"}
     assert abs(sum(ens.default_weights.values()) - 1.0) < 1e-9
 
     # final fit must NOT wipe the clean weights
