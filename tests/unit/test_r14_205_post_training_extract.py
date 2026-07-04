@@ -178,21 +178,25 @@ def test_anomalies_none_flagged_persists_empty(monkeypatch):
     assert cap["rows"] == []   # explicit empty replace, not skipped
 
 
-def test_forecasts_suppress_intervals_beyond_direct_heads(monkeypatch):
-    # #158 interim guard: horizon > the model's direct heads → the serve path
-    # is recursive and p10/p90 are NOT coverage-calibrated (#151 calibrated the
-    # direct process) — the band is suppressed (None → FE hides the ribbon),
-    # the point forecast stays.
+def test_forecasts_interval_honesty_is_per_row(monkeypatch):
+    # #158 → QW2-1 (#224): interval honesty moved to the serve SOURCE — the
+    # chained dispatcher emits calibrated bands on the direct segment and
+    # None on the recursive tail. post_training must pass both through
+    # per-row (no run-level suppression): a banded row stores its band, a
+    # None/NaN row stores None.
     fc = pd.DataFrame({
-        "sku":             ["A"],
-        "date":            [pd.Timestamp("2026-01-01")],
-        "predicted_sales": [10.0],
-        "p10":             [8.0],
-        "p90":             [12.0],
+        "sku":             ["A", "A"],
+        "date":            [pd.Timestamp("2026-01-01"), pd.Timestamp("2026-01-20")],
+        "predicted_sales": [10.0, 11.0],
+        "p10":             [8.0, None],               # tail row: band suppressed at source
+        "p90":             [12.0, None],
     })
     cap = _wire_forecast_env(monkeypatch, forecasts_df=fc,
                              user_horizon=30, plan_max=90, model_horizon=14)
     pt.generate_and_store_forecasts(client_id="acme", data_path="d",
                                     model_path="m.pkl", config_path="c", run_id="r1")
-    assert cap["horizon"] == 30                      # recursive regime engaged
-    assert cap["rows"] == [("A", "2026-01-01", 10.0, None, None)]
+    assert cap["horizon"] == 30
+    assert cap["rows"] == [
+        ("A", "2026-01-01", 10.0, 8.0, 12.0),        # direct segment: band kept
+        ("A", "2026-01-20", 11.0, None, None),       # recursive tail: point-only
+    ]

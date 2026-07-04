@@ -470,8 +470,40 @@ def serve_forecast(
         except Exception as e:    # noqa: BLE001
             logger.warning("direct_forecast failed for sku=%s (%s) — recursive fallback", sku, e)
     elif is_direct and model_h and int(horizon) > model_h:
-        logger.debug("serve horizon %d > model horizon %d (sku=%s) — recursive "
-                     "until horizon-alignment", horizon, model_h, sku)
+        # QW2-1 (#224): horizon-alignment. Previously this fell through to a
+        # FULL recursive serve, wasting every direct head — measured −11.3%
+        # global / −17.1% far-heads vs direct (#158 A/B). Now: serve
+        # h1..model_h from the direct heads, extend the history with those
+        # predictions as pseudo-actuals (same carry semantics the recursive
+        # path itself uses), and recurse ONLY the tail.
+        try:
+            head_rows = direct_forecast(model, history, feature_cols, model_h,
+                                        sku, sku_col, date_col, target_col)
+        except Exception as e:    # noqa: BLE001
+            logger.warning("direct head-segment failed for sku=%s (%s) — full "
+                           "recursive fallback", sku, e)
+            head_rows = []
+        if head_rows:
+            last = history.iloc[[-1]]
+            ext = []
+            for r in head_rows:
+                row = last.copy()
+                row[date_col] = pd.Timestamp(r["date"])
+                row[target_col] = float(r["predicted_sales"])
+                ext.append(row)
+            hist_ext = pd.concat([history, *ext], ignore_index=True)
+            tail_rows = recursive_forecast(
+                model, hist_ext, feature_cols, int(horizon) - model_h, sku,
+                sku_col, date_col, target_col, predict_fn, config=config,
+            )
+            # Honesty (#158, refined per-date): the tail is the recursive
+            # regime — its bands are conditional on fed-back medians and NOT
+            # covered by the #151/#219 calibration. The direct segment keeps
+            # its calibrated bands; the tail serves point-only.
+            for r in tail_rows:
+                r["p10"] = None
+                r["p90"] = None
+            return head_rows + tail_rows
 
     return recursive_forecast(model, history, feature_cols, horizon, sku,
                               sku_col, date_col, target_col, predict_fn,

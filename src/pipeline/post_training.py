@@ -119,24 +119,23 @@ def generate_and_store_forecasts(
     # without quantile sub-models leave those columns as NaN/missing —
     # we surface that as None so the frontend can hide the ribbon.
     #
-    # #158 interim guard: past the model's direct heads the serve path is
-    # RECURSIVE — p10/p90 there are conditional on fed-back medians, a
-    # different generating process than the #151 conformal calibration, so
-    # the "80% band" label would be statistically unfounded. Until the
-    # recursive regime gets its own conformal calibration (#158), suppress
-    # the band rather than serve it mislabelled: None reuses the existing
-    # FE semantics (ribbon hidden), no schema/FE change.
+    # Interval honesty (#158, refined per-date by QW2-1 #224): the serve
+    # dispatcher now handles this at the SOURCE — beyond the model's direct
+    # heads the recursive-tail rows arrive with p10/p90 already None (their
+    # bands are conditional on fed-back medians, not covered by the #151/#219
+    # calibration), while the direct segment keeps its calibrated bands. The
+    # per-row pd.notna handling below stores None as None, so no run-level
+    # suppression is needed here anymore.
     model_h = int(getattr(model, "horizon", 0) or 0)
-    intervals_calibrated = bool(model_h) and horizon <= model_h
-    if not intervals_calibrated:
-        logger.warning(
-            "post-training forecasts: horizon %d exceeds the model's %d direct "
-            "heads (recursive regime) — p10/p90 suppressed as not "
-            "coverage-calibrated (#158)", horizon, model_h,
+    if model_h and horizon > model_h:
+        logger.info(
+            "post-training forecasts: horizon %d > %d direct heads — days "
+            "%d..%d serve point-only (recursive tail, bands uncalibrated; "
+            "#158/#224)", horizon, model_h, model_h + 1, horizon,
         )
     rows: list[tuple[str, str, float, "float | None", "float | None"]] = []
-    has_p10 = intervals_calibrated and "p10" in forecasts.columns
-    has_p90 = intervals_calibrated and "p90" in forecasts.columns
+    has_p10 = "p10" in forecasts.columns
+    has_p90 = "p90" in forecasts.columns
     for _, r in forecasts.iterrows():
         d = r["date"]
         if hasattr(d, "strftime"):
