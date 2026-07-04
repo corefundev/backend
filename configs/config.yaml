@@ -78,6 +78,10 @@ model:
   # defaults. Ensemble (paid) tiers only — the single-MIMO path is untouched.
   intermittent_croston: true
   croston_alpha: 0.1
+  # #225 QW2-2: seasonal-naive (weekday profile, last 4 weeks) as a gated
+  # ensemble child — a measured per-SKU floor: competes for blend weight only
+  # where it wins the clean window; never in cold-start defaults.
+  naive_child: true
   n_estimators: 500
   learning_rate: 0.05
   num_leaves: 64

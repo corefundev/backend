@@ -256,14 +256,20 @@ class EnsembleForecaster:
             )
             return self
 
-        # #154: the served Croston child competes for eligible SKUs' weight.
-        # NB in THIS legacy path the croston rates saw the window too (same
-        # pseudo-holdout bias class as the LGBM children here) — the clean
-        # path below is the honest default.
+        # #154/#225: side children compete for eligible SKUs' weight. NB in
+        # THIS legacy path they saw the window too (same pseudo-holdout bias
+        # class as the LGBM children here) — the clean path below is the
+        # honest default.
+        gated: dict = {}
         croston = getattr(self, "croston_", None)
-        gated = (
-            {"croston": (croston, croston.eligible_skus())} if croston else None
-        )
+        if croston:
+            gated["croston"] = (croston, croston.eligible_skus())
+        if bool(self.config.get("model", {}).get("naive_child", True)):
+            from src.models.naive_child import SeasonalNaiveChild
+            self.naive_ = SeasonalNaiveChild(self.config).fit(df_full, target_col)
+            if self.naive_.profiles_:
+                gated["naive"] = (self.naive_, self.naive_.eligible_skus())
+        gated = gated or None
         per_sku_w, default_weights = self._estimate_weights_on_window(
             self.models_, self.objectives,
             recent, sku_col, date_col, target_col, eps,
@@ -337,13 +343,21 @@ class EnsembleForecaster:
             groups=None if groups is None else groups[proper],
             sample_weight=None if sample_weight is None else np.asarray(sample_weight)[mask_np],
         )
-        # #154: temp croston was fit on the proper subset too → its window
-        # WMAPE is as honest as the temp LGBM children's.
+        # #154/#225: temp side children were fit on the proper subset too →
+        # their window WMAPE is as honest as the temp LGBM children's. The
+        # SERVED naive profile refits on the FULL history below (recency
+        # matters for a weekday profile); weight keys came from temp scoring.
+        gated: dict = {}
         temp_croston = getattr(temp, "croston_", None)
-        gated = (
-            {"croston": (temp_croston, temp_croston.eligible_skus())}
-            if temp_croston else None
-        )
+        if temp_croston:
+            gated["croston"] = (temp_croston, temp_croston.eligible_skus())
+        if bool(self.config.get("model", {}).get("naive_child", True)):
+            from src.models.naive_child import SeasonalNaiveChild
+            temp_naive = SeasonalNaiveChild(self.config).fit(df_full[proper], target_col)
+            if temp_naive.profiles_:
+                gated["naive"] = (temp_naive, temp_naive.eligible_skus())
+            self.naive_ = SeasonalNaiveChild(self.config).fit(df_full, target_col)
+        gated = gated or None
         per_sku_w, default_weights = self._estimate_weights_on_window(
             temp.models_, self.objectives,
             recent, sku_col, date_col, target_col, eps,
@@ -379,13 +393,16 @@ class EnsembleForecaster:
             obj: np.clip(model.predict(X), 0, None)
             for obj, model in self.models_.items()
         }
-        # #154: the Croston side child's flat rate joins the blend; it only
-        # contributes where a SKU's weight dict carries a "croston" key
-        # (eligible SKUs — the loop below does w.get(obj, 0.0)). getattr:
-        # pre-#154 pickles lack the attribute → blend unchanged.
+        # #154/#225: side children join the blend inputs; each contributes
+        # only where a SKU's weight dict carries its key (the loop below does
+        # w.get(obj, 0.0)). getattr: older pickles lack the attributes →
+        # blend unchanged.
         croston = getattr(self, "croston_", None)
         if croston is not None:
             per_obj_preds["croston"] = np.clip(croston.predict(X), 0, None)
+        naive = getattr(self, "naive_", None)
+        if naive is not None:
+            per_obj_preds["naive"] = np.clip(naive.predict(X), 0, None)
         n_rows = len(X)
         skus = (
             X[sku_col].astype(str).tolist()
