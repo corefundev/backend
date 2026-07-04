@@ -45,6 +45,11 @@ _PROD_ONLY = _PROM_DIR / "alerts.production.yml"
 # These rule names MUST live in alerts.production.yml ONLY. They reference
 # scrape jobs / metrics that exist only on the prod cluster by design.
 PROD_ONLY_RULES = frozenset({
+    # Model staleness (QW2-3 #226) — prod-only: staging's ancient test
+    # training runs would make ModelStale chronic noise (PgReplicaLagHigh
+    # precedent); the probe freshness guard lives with its rule.
+    "ModelStale",
+    "ModelAgeCheckStale",
     # postgres-replica streaming metrics (`job="postgres-replica"`).
     "PgReplicaLagHigh",
     "PgReplicaWalReceiverDown",
@@ -238,9 +243,10 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 43   # +1 PR #77 ContainerMetricsAbsent (2026-06-03);
+    EXPECTED_TOTAL = 45   # +1 PR #77 ContainerMetricsAbsent (2026-06-03);
     #                       +1 R11-#80 PostgresArchiveModeOff (2026-06-06);
-    #                       +1 R11-#80 PostgresArchiveModeCheckStale (2026-06-08)
+    #                       +1 R11-#80 PostgresArchiveModeCheckStale (2026-06-08);
+    #                       +2 QW2-3 #226 ModelStale + ModelAgeCheckStale (2026-07-05)
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (
