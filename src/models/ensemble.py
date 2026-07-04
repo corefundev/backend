@@ -79,11 +79,15 @@ class EnsembleForecaster:
         y: pd.Series,
         groups: pd.Series | None = None,
         sample_weight: np.ndarray | None = None,
+        target_censor: pd.Series | None = None,
     ) -> "EnsembleForecaster":
         """Train one MIMO per objective on the same (X, y).
 
         sample_weight (#183): per-row anomaly weights, passed through unchanged
-        to every child MIMO (each applies its own per-horizon mask)."""
+        to every child MIMO (each applies its own per-horizon mask).
+        target_censor (#228): OOS-day mask, passed to every LGBM child (each
+        drops censored-TARGET rows per head). The croston/naive side children
+        are rate/profile methods — their OOS handling is a noted follow-up."""
         self.feature_cols = list(X.columns)
         self.models_ = {}
         for obj in self.objectives:
@@ -92,7 +96,8 @@ class EnsembleForecaster:
             cfg_copy["model"]["objective"] = obj
             child = MIMOForecaster(cfg_copy)
             logger.info(f"Ensemble: fitting child objective={obj}")
-            child.fit(X, y, groups=groups, sample_weight=sample_weight)
+            child.fit(X, y, groups=groups, sample_weight=sample_weight,
+                      target_censor=target_censor)
             self.models_[obj] = child
 
         # #154 (A3): Croston-SBA side child for intermittent/lumpy SKUs.
@@ -297,6 +302,7 @@ class EnsembleForecaster:
         target_col: str,
         groups:     pd.Series | None = None,
         sample_weight: np.ndarray | None = None,
+        target_censor: pd.Series | None = None,
         lookback_days: int = 28,
         eps:        float = 1e-3,
     ) -> bool:
@@ -342,6 +348,7 @@ class EnsembleForecaster:
             X[proper], y[proper],
             groups=None if groups is None else groups[proper],
             sample_weight=None if sample_weight is None else np.asarray(sample_weight)[mask_np],
+            target_censor=None if target_censor is None else target_censor[proper],
         )
         # #154/#225: temp side children were fit on the proper subset too →
         # their window WMAPE is as honest as the temp LGBM children's. The

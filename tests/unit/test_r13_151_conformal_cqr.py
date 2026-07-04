@@ -190,13 +190,17 @@ def test_empty_calibration_window_is_a_safe_noop():
 def test_train_pipeline_routes_quantiles_through_conformal_helper():
     from pathlib import Path
     src = Path("src/pipeline/train.py").read_text()
-    # 3 = the def line + the two branch call sites (ensemble + mimo)
-    assert src.count("_fit_quantiles_with_conformal(final_model, df, X, y, config, agg)") == 3, (
+    # def line + the two branch call sites (ensemble + mimo); the exact call
+    # now wraps with the #228 target_censor kwarg, so match the stable prefix.
+    # 3 = def line + the two branch call sites (substring includes the def)
+    assert src.count("_fit_quantiles_with_conformal(final_model, df, X, y, config, agg,") == 3, (
         "both final-fit branches (ensemble + mimo) must calibrate via the helper"
     )
+    assert "def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg," in src
     # direct fit_quantiles calls exist ONLY inside the helper: the
     # short-history fallback (full data) and the proper-subset fit.
     assert src.count("final_model.fit_quantiles(") == 2
-    assert "final_model.fit_quantiles(X[proper], y[proper]" in src
+    # the proper-subset call wraps since #228 — match its stable argument line
+    assert "X[proper], y[proper], groups=df[sku_col][proper]," in src
     # temporal split is enforced in the helper (proper = dates < cal_start)
     assert "proper    = dates < cal_start" in src

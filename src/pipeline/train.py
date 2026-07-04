@@ -112,7 +112,8 @@ def _hpo_tune_slice(df: pd.DataFrame, date_col: str, report_tail_days: int) -> p
     return df[df[date_col] <= cutoff]
 
 
-def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg) -> None:
+def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg,
+                                  target_censor=None) -> None:
     """#151 CQR: fit the quantile heads on a temporal PROPER subset (rows
     before the calibration window), then calibrate their coverage on the
     held-out most-recent `conformal_cal_days` — see src/models/conformal.py.
@@ -147,12 +148,17 @@ def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg) -> None:
                 "data, RAW (uncalibrated) intervals served",
                 proper_dates, 2 * horizon,
             )
-        final_model.fit_quantiles(X, y, groups=df[sku_col])
+        final_model.fit_quantiles(X, y, groups=df[sku_col],
+                                  target_censor=target_censor)
         return
 
-    final_model.fit_quantiles(X[proper], y[proper], groups=df[sku_col][proper])
+    final_model.fit_quantiles(
+        X[proper], y[proper], groups=df[sku_col][proper],
+        target_censor=None if target_censor is None else target_censor[proper],
+    )
     summary = final_model.calibrate_conformal(
         X, y, dates=dates, cal_start=cal_start, groups=df[sku_col], alpha=alpha,
+        target_censor=target_censor,
     )
     if summary:
         agg["conformal_alpha"]           = summary["alpha"]
@@ -332,6 +338,21 @@ def run_training_pipeline(
     target_col = config["data"]["target_col"]
     sku_col    = config["data"]["sku_col"]
 
+    # #228 OOS demand censoring: zero sales on a zero-stock day is a CENSORED
+    # observation, not zero demand — such target days teach the model to
+    # under-forecast exactly the SKUs that stock out. When the client ships a
+    # stock column, rows whose TARGET day is OOS are dropped per horizon head
+    # (point + quantile fits + conformal scores). No stock column → no-op.
+    target_censor: Optional[Any] = None
+    target_censor_fn: Optional[Callable[[Any], Any]] = None
+    if bool(config.get("model", {}).get("oos_censoring", True)) and "is_oos" in df.columns:
+        n_oos = int((df["is_oos"] > 0).sum())
+        if n_oos > 0:
+            target_censor = df["is_oos"]
+            target_censor_fn = lambda fold_df: fold_df["is_oos"]   # noqa: E731
+            logger.info("#228: OOS censoring active — %d censored day-rows (%.2f%%)",
+                        n_oos, 100.0 * n_oos / max(len(df), 1))
+
     # #183: with features present, detect anomalies on the feature frame and
     # build per-row sample weights for the FINAL fit. `is_anomaly` is excluded
     # from feature_cols (get_feature_columns) so it never becomes a model input.
@@ -423,6 +444,7 @@ def run_training_pipeline(
     logger.info(f"  Walk-forward validator class: {val_label}")
     wf_result = walk_forward_validate(
         df, val_factory, feature_cols, config, sample_weight_fn=sample_weight_fn,
+        target_censor_fn=target_censor_fn,
     )
     agg = wf_result.aggregated
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
@@ -484,10 +506,13 @@ def run_training_pipeline(
                 target_col=target_col,
                 groups=df[sku_col],
                 sample_weight=sample_weights_full,
+                target_censor=target_censor,
                 lookback_days=blend_lookback,
             )
-        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
-        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg)
+        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full,
+                        target_censor=target_censor)
+        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg,
+                                      target_censor=target_censor)
         if not clean_weights:
             # Legacy pseudo-holdout (window seen by the children) — only the
             # short-history / disabled fallback since #152.
@@ -502,12 +527,15 @@ def run_training_pipeline(
         logger.info("  Ensemble (Tweedie+MAE+MSE) + quantile models fitted")
     elif model_type == "mimo":
         final_model = MIMOForecaster(config)
-        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full)
-        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg)
+        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full,
+                        target_censor=target_censor)
+        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg,
+                                      target_censor=target_censor)
         logger.info("  MIMO model + quantile models fitted")
     else:
         final_model = SKUForecaster(config)
-        final_model.fit(X, y, sample_weight=sample_weights_full)
+        final_model.fit(X, y, sample_weight=sample_weights_full,
+                        target_censor=target_censor)
 
     # ── 8. Cold-start cluster fit ─────────────────────────────
     # Only the cluster forecaster is fit here; the cold-start router

@@ -34,8 +34,10 @@ from src.validation.metrics import aggregate_metrics, compute_metrics_per_sku
 logger = logging.getLogger(__name__)
 
 
-def _fit_with_optional_groups(model, X, y, groups, sample_weight=None):
-    """Pass groups / sample_weight only to a fit() that declares them.
+def _fit_with_optional_groups(model, X, y, groups, sample_weight=None,
+                              target_censor=None):
+    """Pass groups / sample_weight / target_censor only to a fit() that
+    declares them.
 
     Signature-driven so a stub model (or a fixed-arity test lambda) that doesn't
     accept these kwargs still fits cleanly (#183 / feedback_signature_change_breaks_stubs)."""
@@ -45,6 +47,8 @@ def _fit_with_optional_groups(model, X, y, groups, sample_weight=None):
         kwargs["groups"] = groups
     if sample_weight is not None and "sample_weight" in params:
         kwargs["sample_weight"] = sample_weight
+    if target_censor is not None and "target_censor" in params:
+        kwargs["target_censor"] = target_censor
     model.fit(X, y, **kwargs)
 
 
@@ -66,6 +70,7 @@ def walk_forward_validate(
     feature_cols: list[str],
     config: dict,
     sample_weight_fn=None,
+    target_censor_fn=None,
 ) -> WalkForwardResult:
     """
     Expanding-window walk-forward validation.
@@ -132,12 +137,14 @@ def walk_forward_validate(
         # only (never test-fold data), so the validation metric reflects the
         # same anomaly-weighted fit as the deployed final model with no leakage.
         fold_weights = sample_weight_fn(train_df) if sample_weight_fn is not None else None
+        fold_censor = target_censor_fn(train_df) if target_censor_fn is not None else None
         _fit_with_optional_groups(
             fold_model,
             train_df[feature_cols],
             train_df[target_col],
             train_df[sku_col],
             sample_weight=fold_weights,
+            target_censor=fold_censor,
         )
 
         # Ensemble: per-SKU blend weights from a recent training window.

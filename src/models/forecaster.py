@@ -77,7 +77,15 @@ class SKUForecaster:
         X: pd.DataFrame,
         y: pd.Series,
         sample_weight: np.ndarray | None = None,
+        target_censor: "pd.Series | None" = None,
     ) -> "SKUForecaster":
+        # #228: single-step target = the row itself → dropping censored rows
+        # IS target-day censoring here (unlike MIMO's shifted heads).
+        if target_censor is not None:
+            keep = ~(target_censor.fillna(0) > 0)
+            X, y = X[keep], y[keep]
+            if sample_weight is not None:
+                sample_weight = np.asarray(sample_weight)[keep.to_numpy()]
         params = {
             "n_estimators": self.model_cfg.get("n_estimators", 1000),
             "learning_rate": self.model_cfg.get("learning_rate", 0.05),
