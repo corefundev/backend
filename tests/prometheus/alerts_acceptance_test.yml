@@ -996,22 +996,25 @@ tests:
         exp_alerts: []
 
   # ── ModelStale / ModelAgeCheckStale (QW2-3 #226) ─────────────────────────
-  - interval: 1h
+  - interval: 1m
     name: "ModelStale fires for a 46-day-old model after the 6h for-window"
+    # 1m sampling: with sparser samples the 5m staleness lookback would empty
+    # the instant vector between points and keep resetting the for-clock — a
+    # test-harness artifact only (prod scrapes pushgateway continuously).
     input_series:
       - series: 'model_age_seconds{client_id="acme", instance="sku-forecasting", job="model_age_check"}'
-        values: '3974400x10'          # 46 days, constant
+        values: '3974400x421'         # 46 days, constant, sampled every 1m
     alert_rule_test:
       - eval_time: 7h
         alertname: ModelStale
         exp_alerts:
           - exp_labels: {client_id: "acme", instance: "sku-forecasting", job: "model_age_check", severity: warning, team: forecasting}
 
-  - interval: 1h
+  - interval: 1m
     name: "ModelStale does NOT fire under the 45-day threshold"
     input_series:
       - series: 'model_age_seconds{client_id="acme", instance="sku-forecasting", job="model_age_check"}'
-        values: '3801600x10'          # 44 days
+        values: '3801600x421'         # 44 days
     alert_rule_test:
       - eval_time: 7h
         alertname: ModelStale
@@ -1025,11 +1028,11 @@ tests:
         alertname: ModelStale
         exp_alerts: []
 
-  - interval: 30m
+  - interval: 1m
     name: "ModelAgeCheckStale fires when the probe stops pushing (>3h + 30m for)"
     input_series:
       - series: 'model_age_check_timestamp_seconds{instance="sku-forecasting", job="model_age_check"}'
-        values: '0x20'                # pushed once at t=0, frozen after
+        values: '0x241'               # value frozen at 0, sampled every 1m
     alert_rule_test:
       - eval_time: 2h                 # 7200 < 10800 → healthy
         alertname: ModelAgeCheckStale
