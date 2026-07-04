@@ -62,6 +62,9 @@ class TrainingRunRecord:
     # R11: MLflow telemetry-logging failure on an otherwise-successful
     # run (NULL = logged fine). Distinct from `error` (= run FAILED).
     mlflow_logging_error: Optional[str] = None
+    # QW2-4 #227: promotion-gate verdict. FALSE = blocked (champion kept
+    # serving, model never saved); NULL = pre-gate runs / gate disabled.
+    gate_passed: Optional[bool] = None
 
 
 class PostgresTrainingRunsRegistry:
@@ -70,7 +73,7 @@ class PostgresTrainingRunsRegistry:
         "n_skus", "n_features", "n_rows",
         "wmape", "mase", "mase_seasonal", "smape",
         "model_path", "mlflow_run_id", "error",
-        "mlflow_logging_error",
+        "mlflow_logging_error", "gate_passed",
     }
 
     def __init__(self, database_url: str):
@@ -229,6 +232,7 @@ class PostgresTrainingRunsRegistry:
             wmape=row.get("wmape"),
             mase=row.get("mase"),
             mase_seasonal=row.get("mase_seasonal"),
+            gate_passed=row.get("gate_passed"),
             smape=row.get("smape"),
             model_path=row.get("model_path"),
             mlflow_run_id=row.get("mlflow_run_id"),

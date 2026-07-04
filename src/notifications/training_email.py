@@ -87,13 +87,25 @@ def _render_finished(
     wmape:         float | None,
     mase:          float | None,
     mase_seasonal: float | None = None,
+    gate_passed:   bool | None  = None,
 ) -> tuple[str, str]:
-    """Returns (subject, body) for a successful training run."""
+    """Returns (subject, body) for a successful training run.
+
+    QW2-4 #227: gate_passed=False = честная формулировка — новая модель НЕ
+    прошла контроль качества, продолжает работать предыдущая."""
     base = _frontend_base_url()
-    subject = "✓ Обучение модели завершено"
+    if gate_passed is False:
+        subject = "⚠ Обучение завершено — новая модель не прошла контроль качества"
+    else:
+        subject = "✓ Обучение модели завершено"
     body_lines = [
         f"Здравствуйте,",
         "",
+        (f"Обучение для аккаунта «{client_id}» завершено, но новая модель не "
+         f"прошла автоматический контроль качества (точность ниже действующей "
+         f"модели или базового прогноза). Продолжает работать предыдущая "
+         f"модель — ваши прогнозы не ухудшились.")
+        if gate_passed is False else
         f"Обучение модели для аккаунта «{client_id}» успешно завершено.",
         "",
         f"  • Длительность:       {_format_duration(duration_sec)}",
@@ -143,6 +155,7 @@ def notify_training_finished(
     wmape:         float | None = None,
     mase:          float | None = None,
     mase_seasonal: float | None = None,
+    gate_passed:   bool | None  = None,
 ) -> None:
     """Best-effort email on successful training. Never raises."""
     try:
@@ -154,7 +167,8 @@ def notify_training_finished(
             logger.info("training notification skipped (no email): %s", client_id)
             return
         subject, body = _render_finished(
-            client_id, duration_sec, n_skus, wmape, mase, mase_seasonal
+            client_id, duration_sec, n_skus, wmape, mase, mase_seasonal,
+            gate_passed,
         )
         from src.auth.email_sender import get_email_sender
         get_email_sender().send(to=to, subject=subject, body=body)

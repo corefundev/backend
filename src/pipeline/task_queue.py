@@ -258,6 +258,9 @@ def _record_run_finished(
                 # it logged fine) so a degraded-but-successful run is
                 # observable, not silently swallowed.
                 mlflow_logging_error=result.get("mlflow_logging_error"),
+                # QW2-4 #227: promotion-gate verdict (None when the gate is
+                # disabled or errored; False = champion kept serving).
+                gate_passed=(result.get("gate") or {}).get("passed"),
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("training_runs FINISHED update failed: %s", e)
@@ -295,6 +298,7 @@ def _notify_finished_idempotent(
         wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
         mase=metrics.get("mase_global",  metrics.get("mase_mean")),
         mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
+        gate_passed=(result.get("gate") or {}).get("passed"),
     )
 
     should_notify = True

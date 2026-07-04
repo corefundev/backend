@@ -164,6 +164,69 @@ def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg) -> None:
         agg["pinball_p90_post"]          = summary["pinball_hi_post"]
 
 
+def _promotion_gate(df, config, agg, client_id):
+    """QW2-4 (#227): champion/challenger promotion decision, fail-closed on
+    verdicts and fail-open ONLY on gate infrastructure errors.
+
+    challenger = this run's walk-forward pooled metrics (agg);
+    champion   = the client's newest FINISHED run with a persisted wmape;
+    baseline   = seasonal-naive(7) scored on the same df's holdout tail.
+
+    Returns (verdict_or_None, block: bool). block=True ⇒ the caller must NOT
+    save the model (the champion artifact keeps serving) — only a legitimate
+    FAILED verdict with an existing champion blocks. First model (no
+    champion) always promotes: blocking it would leave the client with no
+    model at all, while the SeasonalNaive serve fallback still floors quality
+    — the verdict is persisted so the below-baseline fact is visible.
+    Infrastructure errors (registry down, baseline scoring crash) log loudly
+    and promote — the gate must never brick training because of its own bugs.
+    """
+    from types import SimpleNamespace
+    if not bool(config.get("model", {}).get("promotion_gate", True)):
+        return None, False
+    try:
+        from src.validation.backtest_gate import evaluate_gate, score_seasonal_naive
+        horizon = int(config["model"].get("horizon", 14))
+        tolerance = float(config.get("model", {}).get("gate_tolerance", 0.02))
+
+        champion = None
+        try:
+            from src.storage.training_runs import FINISHED, get_training_runs_registry
+            for r in get_training_runs_registry().list_for_client(client_id, limit=20):
+                if r.status == FINISHED and r.wmape is not None and r.gate_passed is not False:
+                    champion = SimpleNamespace(wmape_global=float(r.wmape),
+                                               mase_global=float(r.mase or "nan"))
+                    break
+        except Exception as reg_err:    # noqa: BLE001 — no registry ≠ no gate
+            logger.warning("#227 gate: champion lookup failed (%s) — treating as first model", reg_err)
+
+        baseline = score_seasonal_naive(df, config, holdout_days=horizon)
+        challenger = SimpleNamespace(
+            wmape_global=float(agg.get("wmape_global", float("nan"))),
+            mase_global=float(agg.get("mase_global", float("nan"))),
+        )
+        verdict = evaluate_gate(champion, challenger, baseline, tolerance=tolerance)
+        agg["gate_passed"] = float(verdict.passed)
+        if verdict.passed:
+            logger.info("#227 gate PASSED: %s", verdict.as_dict())
+            return verdict, False
+        if champion is None:
+            logger.warning(
+                "#227 gate FAILED but no champion exists — promoting the first "
+                "model anyway (below-baseline fact persisted): %s", verdict.reasons,
+            )
+            return verdict, False
+        logger.warning(
+            "#227 gate FAILED — challenger BLOCKED, champion keeps serving: %s",
+            verdict.reasons,
+        )
+        return verdict, True
+    except Exception as e:    # noqa: BLE001 — infra fail-open, loud
+        logger.error("#227 gate infrastructure error — promoting WITHOUT a "
+                     "verdict (fail-open on gate bugs only): %s", e, exc_info=True)
+        return None, False
+
+
 def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
@@ -365,6 +428,30 @@ def run_training_pipeline(
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
     storage.save_per_sku_metrics(wf_result.per_sku_metrics)
 
+    # ── 6.5 Promotion gate (QW2-4 #227) ───────────────────────
+    # Decided BEFORE the final fit: a blocked challenger skips the final
+    # fit + quantiles + save entirely (the champion artifact keeps serving
+    # untouched, and post-training forecasts are skipped via model_path=None).
+    gate_verdict, gate_blocked = _promotion_gate(df, config, agg, client_id)
+    if gate_blocked:
+        elapsed = time.time() - t0
+        logger.warning("=== Training pipeline GATE-BLOCKED in %.1fs ===", elapsed)
+        return {
+            "client_id":       client_id,
+            "model_path":      None,          # nothing saved — champion serves
+            "model_type":      config["model"].get("type", "lgbm"),
+            "storage_backend": storage.backend.__class__.__name__,
+            "metrics":         agg,
+            "gate":            gate_verdict.as_dict(),
+            "mlflow_run_id":   None,
+            "mlflow_logging_error": None,
+            "n_skus":          df[sku_col].nunique(),
+            "n_features":      len(feature_cols),
+            "n_rows":          len(df),
+            "elapsed_sec":     elapsed,
+            "ge_stats":        ge_result.statistics,
+        }
+
     # ── 7. Train final model ──────────────────────────────────
     _progress(7, 9, "Обучение финальной модели")
     model_type = config["model"].get("type", "lgbm")
@@ -470,6 +557,7 @@ def run_training_pipeline(
         "model_type":      model_type,
         "storage_backend": storage.backend.__class__.__name__,
         "metrics":         agg,
+        "gate":            gate_verdict.as_dict() if gate_verdict else None,
         "mlflow_run_id":   run_id,
         # R11: best-effort MLflow telemetry — NULL when it logged fine,
         # else the error string. Persisted by task_queue to

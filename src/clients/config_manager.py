@@ -91,6 +91,8 @@ _ALLOWED_RANGES: dict[str, tuple] = {
     "model.conformal_cal_days":        (7, 90),
     # #154 Croston smoothing: α→0 freezes on the first demand, α>0.5 chases noise.
     "model.croston_alpha":             (0.01, 0.5),
+    # #227 gate slack vs champion: 0 = no regression allowed, 0.5 = 50% worse ok.
+    "model.gate_tolerance":            (0.0, 0.5),
 }
 
 _ALLOWED_MODEL_TYPES = {"lgbm", "mimo"}
