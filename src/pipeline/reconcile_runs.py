@@ -107,6 +107,13 @@ def reconcile_abandoned_runs() -> int:
 
 def main() -> None:
     try:
+        # Lockbox runtime-injection: DATABASE_URL / SMTP / telegram creds are
+        # NOT in the container env at startup — every prod entrypoint script
+        # hydrates them first (vault_agent pattern). The 2026-07-05 staged
+        # drill caught reconcile skipping this: registry init failed with
+        # "DATABASE_URL not set" and the heal was a loud no-op.
+        from src.auth.vault_agent import bootstrap_secrets
+        bootstrap_secrets()
         n = reconcile_abandoned_runs()
         logger.info("reconcile_runs: %d abandoned run(s) healed", n)
     except Exception as e:    # noqa: BLE001 — must NEVER block worker start

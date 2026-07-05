@@ -107,3 +107,23 @@ def test_registry_list_running_reads_primary():
     assert "self._conn()" in src and "_conn_read" not in src, (
         "healing decisions must not act on replica lag"
     )
+
+
+def test_main_bootstraps_secrets_before_reconcile(monkeypatch):
+    # Lockbox runtime-injection: DATABASE_URL is absent from the container
+    # env at startup — reconcile must hydrate secrets first (drill finding,
+    # 2026-07-05: registry init failed with "DATABASE_URL not set").
+    order = []
+    import src.auth.vault_agent as va
+    monkeypatch.setattr(va, "bootstrap_secrets", lambda: order.append("boot"))
+    monkeypatch.setattr(rr, "reconcile_abandoned_runs",
+                        lambda: order.append("reconcile") or 0)
+    rr.main()
+    assert order == ["boot", "reconcile"]
+
+
+def test_main_survives_bootstrap_failure(monkeypatch):
+    import src.auth.vault_agent as va
+    monkeypatch.setattr(va, "bootstrap_secrets",
+                        lambda: (_ for _ in ()).throw(RuntimeError("lockbox down")))
+    rr.main()   # loud skip, no raise — worker must still start
