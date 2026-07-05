@@ -40,7 +40,7 @@ def _reg(monkeypatch, champion_wmape):
     runs = []
     if champion_wmape is not None:
         runs = [SimpleNamespace(status="finished", wmape=champion_wmape,
-                                mase=1.0, gate_passed=None)]
+                                mase=1.0, mase_seasonal=1.1, gate_passed=None)]
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -106,8 +106,8 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
     # served.
     import src.storage.training_runs as truns
     runs = [
-        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, gate_passed=False),
-        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, gate_passed=True),
+        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, mase_seasonal=1.0, gate_passed=False),
+        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, mase_seasonal=1.2, gate_passed=True),
     ]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -198,3 +198,18 @@ def test_248_probe_excludes_gate_blocked_runs():
     assert "gate_passed IS DISTINCT FROM FALSE" in sh, (
         "a BLOCKED retrain must not reset model_age while the champion stays old"
     )
+
+
+def test_247b_pre_honesty_era_champion_is_not_comparable(monkeypatch):
+    # A champion measured under the PRE-2026-06-28 methodology (flattered by
+    # HPO-on-the-reported-window etc.; era marker = mase_seasonal is NULL)
+    # must not gate an honest challenger — first-model semantics instead.
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.297, mase=0.95,
+                            mase_seasonal=None, gate_passed=None)]   # May-era run
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    _baseline(monkeypatch, wmape=0.90)
+    agg = {"wmape_global": 0.84, "mase_global": 17.0}   # honest, beats naive
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
+    assert blocked is False and verdict.passed is True   # promoted as first model

@@ -230,7 +230,16 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         try:
             from src.storage.training_runs import FINISHED, get_training_runs_registry
             for r in get_training_runs_registry().list_for_client(client_id, limit=20):
-                if r.status == FINISHED and r.wmape is not None and r.gate_passed is not False:
+                # Era marker (#247 follow-up): mase_seasonal exists only for
+                # runs measured under the post-2026-06-28 HONEST methodology
+                # (#180 HPO holdout / #181 / #182). Pre-honesty champions carry
+                # metrics flattered by the old biases (HPO tuned on the
+                # reported window) — comparing an honest challenger against
+                # them blocks legitimate retrains forever. Such runs are
+                # treated as "no champion" (first-model semantics).
+                if (r.status == FINISHED and r.wmape is not None
+                        and r.gate_passed is not False
+                        and getattr(r, "mase_seasonal", None) is not None):
                     champion = SimpleNamespace(wmape_global=float(r.wmape),
                                                mase_global=float(r.mase or "nan"))
                     break
