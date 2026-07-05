@@ -97,6 +97,32 @@ class TokenResponse(BaseModel):
 # Auth
 # ══════════════════════════════════════════════════════════════════
 
+
+
+def _notify_ops_admin_login(ip) -> None:
+    """ADM-7 H3: fire-and-forget ops-Telegram tripwire on admin token
+    issuance. Uses the ALERT bot (ops channel), not the client bot. Void
+    best-effort: never raises past this frame, 3s cap so the login path
+    can't hang on Telegram."""
+    import json as _json
+    import urllib.request as _rq
+    tok  = os.environ.get("TELEGRAM_ALERT_BOT_TOKEN") or ""
+    chat = os.environ.get("TELEGRAM_ALERT_CHAT_ID") or ""
+    if not tok or not chat:
+        return
+    try:
+        body = _json.dumps({
+            "chat_id": chat,
+            "text": f"🔑 ADMIN token issued (ip={ip}). Not you? Rotate "
+                    "ADMIN_API_KEY now (docs/OPERATIONS.md → rotation).",
+        }).encode()
+        req_ = _rq.Request(
+            f"https://api.telegram.org/bot{tok}/sendMessage",
+            data=body, headers={"Content-Type": "application/json"})
+        _rq.urlopen(req_, timeout=3).read()
+    except Exception as e:    # noqa: BLE001 — void tripwire, login must not fail
+        logger.warning("admin-login tripwire telegram failed: %s", e)
+
 @router.post("/auth/token", response_model=TokenResponse)
 def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcrypt cost-12) → threadpool, off the event loop
     """
@@ -149,6 +175,18 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
     # ── 1. ADMIN_API_KEY ────────────────────────────────────────
     if admin_api_key and _hmac.compare_digest(secret_bytes, admin_api_key.encode()):
         token = create_access_token(client_id=req.client_id, roles=["admin", "forecast"])
+        # ADM-7 H3 (#260): admin-login tripwire. Single-operator reality =
+        # every admin token issuance is either us or an incident; make each
+        # one visible (audit row + ops Telegram). Best-effort — the login
+        # itself must not fail on a notification hiccup.
+        _ip = client_ip(http_req)
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="admin_token_issued",
+            client_id=req.client_id, ip=_ip,
+            user_agent=http_req.headers.get("user-agent"),
+            target_type="admin_session", target_id=req.client_id,
+        )
+        _notify_ops_admin_login(_ip)
         return TokenResponse(access_token=token)
 
     # ── 2. Per-client key ───────────────────────────────────────

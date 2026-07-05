@@ -106,3 +106,33 @@ they never block the app on a DB/observability hiccup.
 ## See also
 - [`runbook/README.md`](runbook/README.md) — incident playbooks (symptoms → triage → action → verify → post-mortem)
 - [`runbooks/operators.md`](runbooks/operators.md) — one-shot bootstrap & maintenance scripts
+
+## ADMIN_API_KEY rotation (ADM-7 H6, #260)
+
+Rotate immediately if the admin-login tripwire (H3: ops-Telegram «ADMIN token
+issued») fires for a login that wasn't you, and routinely every 90 days.
+
+```bash
+# 1. Generate a new 64-hex key (locally, never in shell history on the VPS):
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+# 2. Add a Lockbox version with the new value. NOTE the quirks
+#    (reference_yc_lockbox_payload_quirks): `--payload @file` is broken —
+#    use INLINE JSON; a key WITHOUT "text_value" would DELETE the entry.
+yc lockbox secret add-version --id <SECRET_ID> \
+  --payload '[{"key":"ADMIN_API_KEY","text_value":"<NEW_64_HEX>"}]'
+
+# 3. Recreate api + worker so bootstrap re-reads Lockbox (CD-scope services;
+#    full compose stack + --no-deps per feedback_manual_recreate_full_stack):
+docker compose <FULL_COMPOSE_ARGS> up -d --force-recreate --no-deps api worker
+
+# 4. Verify: OLD key → 401, NEW key → 200 on POST /auth/token; the successful
+#    issuance lands in audit_log (admin_token_issued) AND ops-Telegram (H3).
+
+# 5. Already-issued admin JWTs stay valid ≤ ADMIN_JWT_EXPIRE_MINUTES (30) —
+#    for immediate kill, revoke via the jti denylist (R5-M7).
+```
+
+Single Lockbox entry → the rotation is atomic by construction (no composed
+DSN twin to forget, unlike POSTGRES_PASSWORD — see
+feedback_secret_atomicity_lockbox).

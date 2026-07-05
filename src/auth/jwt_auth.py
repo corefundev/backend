@@ -86,6 +86,10 @@ def _load_secret(key: str, dev_value: str | None = None) -> str:
 # будут прочитаны из os.environ (даже если модуль уже импортирован).
 JWT_ALGORITHM  = _env("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MIN = int(_env("JWT_EXPIRE_MINUTES") or "60")
+# ADM-7 H2 (#260): admin sessions are shorter than client ones — a stolen
+# admin JWT is a full-tenant-surface key, so its lifetime is the blast
+# window. Revocation (jti denylist) still applies for immediate kill.
+ADMIN_JWT_EXPIRE_MIN = int(_env("ADMIN_JWT_EXPIRE_MINUTES") or "30")
 
 _jwt_secret_cache:     str | None = None
 _static_api_key_cache: str | None = None
@@ -165,12 +169,15 @@ def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
 
     import uuid
     now     = datetime.now(timezone.utc)
+    _roles  = roles or ["forecast"]
+    # ADM-7 H2: admin tokens expire faster (30 min default vs client 60).
+    _ttl_min = ADMIN_JWT_EXPIRE_MIN if "admin" in _roles else JWT_EXPIRE_MIN
     payload = {
         "sub":       client_id,
         "client_id": client_id,
-        "roles":     roles or ["forecast"],
+        "roles":     _roles,
         "iat":       now,
-        "exp":       now + timedelta(minutes=JWT_EXPIRE_MIN),
+        "exp":       now + timedelta(minutes=_ttl_min),
         "jti":       uuid.uuid4().hex,
         "iss":       JWT_ISSUER,
         "aud":       JWT_AUDIENCE,
