@@ -113,3 +113,37 @@ def test_single_step_forecaster_drops_censored_rows():
     cens  = SKUForecaster(cfg).fit(df[["f0"]], df["sales"], target_censor=df["is_oos"])
     Xq = df[["f0"]].tail(1)
     assert float(cens.predict(Xq)[0]) > float(plain.predict(Xq)[0]) + 1.0
+
+
+# ── Ensemble delegation (prod crash 2026-07-05: attempt-3 retrain) ────────────
+
+@pytestmark_lgbm
+def test_ensemble_quantiles_accept_and_delegate_censor():
+    from src.models.ensemble import EnsembleForecaster
+    df = _oos_panel()
+    cfg = _cfg()
+    cfg["model"]["objective"] = "ensemble"
+    ens = EnsembleForecaster(cfg, objectives=("regression",))
+    ens.fit(df[["f0"]], df["sales"], groups=df["sku"], target_censor=df["is_oos"])
+    # the exact prod call shape: kwarg present even when the value is None
+    ens.fit_quantiles(df[["f0"]], df["sales"], quantiles=[0.1, 0.9],
+                      groups=df["sku"], target_censor=df["is_oos"])
+    ens.fit_quantiles(df[["f0"]], df["sales"], quantiles=[0.1, 0.9],
+                      groups=df["sku"], target_censor=None)
+
+
+def test_ensemble_mimo_fit_surface_parity():
+    # Signature parity: every censor-bearing fit surface MIMO exposes must be
+    # accepted by Ensemble too — the pipeline helper calls them on either
+    # class interchangeably. Prevents the attempt-3 crash class structurally.
+    import inspect
+    from src.models.ensemble import EnsembleForecaster
+    from src.models.mimo import MIMOForecaster
+    for meth in ("fit", "fit_quantiles"):
+        m = set(inspect.signature(getattr(MIMOForecaster, meth)).parameters)
+        e = set(inspect.signature(getattr(EnsembleForecaster, meth)).parameters)
+        missing = (m - e) - {"self"}
+        assert not missing, f"Ensemble.{meth} missing params MIMO has: {missing}"
+    # calibrate_conformal delegates via **kwargs — assert that stays true
+    ecal = inspect.signature(EnsembleForecaster.calibrate_conformal).parameters
+    assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ecal.values())
