@@ -388,3 +388,87 @@ def admin_plan_history(
         raise HTTPException(status_code=503,
                             detail="plan history temporarily unavailable") from e
     return {"changes": rows, "count": len(rows)}
+
+
+# ── ADM-3 (#256): client card + simplified table (правки 2026-07-06) ─────────
+
+@router.get("/admin/client-activity")
+def admin_client_activity(
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Last successful login per client — the simplified table's third
+    column. One GROUP BY over audit_log; admin-token issuances excluded
+    (they are operator sessions, not client activity)."""
+    auth.require_role("admin")
+    from src.audit.log import _connect
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT client_id, max(created_at)
+                FROM audit_log
+                WHERE event_type = 'login' AND success
+                  AND (event_subtype IS NULL OR event_subtype != 'admin_token_issued')
+                GROUP BY client_id
+                """
+            )
+            rows = {r[0]: r[1].isoformat() for r in cur.fetchall() if r[0]}
+    except Exception as e:    # noqa: BLE001
+        logger.warning("client-activity failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="activity temporarily unavailable") from e
+    return {"last_login": rows}
+
+
+@router.get("/admin/clients/{client_id}/overview")
+def admin_client_overview(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """The client card's entry point: profile + recent logins + recent
+    training runs (with gate verdicts) in one call. Uploads/notifications
+    the card fetches via the existing client-scoped endpoints (admin
+    bypass). H5 (design §4): every card view is itself AUDITED — the
+    operator's PII reads must be provable (152-ФЗ posture)."""
+    auth.require_role("admin")
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    logins: list = []
+    try:
+        from src.audit.log import _connect
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT created_at, ip, event_subtype
+                FROM audit_log
+                WHERE event_type = 'login' AND success AND client_id = %s
+                ORDER BY created_at DESC LIMIT 10
+                """,
+                (client_id,),
+            )
+            logins = [{"at": r[0].isoformat(), "ip": r[1], "via": r[2]}
+                      for r in cur.fetchall()]
+    except Exception as e:    # noqa: BLE001 — logins are enrichment, not the card
+        logger.warning("overview logins skipped: %s", e)
+
+    runs: list = []
+    try:
+        from src.storage.training_runs import get_training_runs_registry, to_dict
+        runs = [to_dict(r) for r in
+                get_training_runs_registry().list_for_client(client_id, limit=5)]
+    except Exception as e:    # noqa: BLE001 — runs are enrichment too
+        logger.warning("overview runs skipped: %s", e)
+
+    # H5: the view itself is an auditable act (who looked at whose data).
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_view",
+        client_id=client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+    )
+    return {"client": _client_to_safe_dict(record),
+            "recent_logins": logins, "training_runs": runs}
