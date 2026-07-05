@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,6 +45,7 @@ from src.storage.backend import ClientStorage
 
 
 router = APIRouter(tags=["clients"])
+logger = logging.getLogger(__name__)
 
 
 class RegisterClientRequest(BaseModel):
@@ -341,3 +344,47 @@ async def update_client(
     # oauth_subject — fields every other client endpoint already
     # filters via _client_to_safe_dict. This response must not regress.
     return _client_to_safe_dict(updated)
+
+
+# ── ADM-11 (#279): plan-change history for the «Тарифы» admin section ────────
+# Reads the EXISTING audit rows (admin_action/client_update carries
+# metadata.changes.plan = {old, new}) — no new write path. Superseded by the
+# general audit viewer (ADM-5 #258) for arbitrary queries; this stays as the
+# focused, indexed-by-purpose endpoint the Тарифы page polls.
+
+@router.get("/admin/plan-history")
+def admin_plan_history(
+    limit: int = 50,
+    auth: AuthContext = Depends(get_current_client),
+):
+    auth.require_role("admin")
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be 1..200")
+    from src.audit.log import _connect  # reuse the audit module's connection path
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT client_id, actor_email, created_at,
+                       metadata->'changes'->'plan'->>'old',
+                       metadata->'changes'->'plan'->>'new'
+                FROM audit_log
+                WHERE event_type = 'admin_action'
+                  AND event_subtype = 'client_update'
+                  AND metadata->'changes' ? 'plan'
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = [
+                {"client_id": r[0], "actor": r[1],
+                 "changed_at": r[2].isoformat() if r[2] else None,
+                 "old": r[3], "new": r[4]}
+                for r in cur.fetchall()
+            ]
+    except Exception as e:    # noqa: BLE001
+        logger.warning("plan-history failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="plan history temporarily unavailable") from e
+    return {"changes": rows, "count": len(rows)}
