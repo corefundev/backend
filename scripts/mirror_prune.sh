@@ -29,6 +29,10 @@
 #
 # Retention matches the primary's lifecycle (init_s3_lifecycle.sh):
 #   backups/ 30d | base/ 35d | wal/ 14d   (override via *_EXPIRE_DAYS)
+# Versioning is ON (kept: rollback window vs malicious delete), so the
+# object prune is followed by a VERSION purge at retention + 7d grace —
+# without it "deleted" objects live on as billed noncurrent versions
+# (10 GiB of dead WAL found 2026-07-05).
 #
 # Best-effort + observable: pushes
 # `sku_mirror_prune_last_success_timestamp_seconds`; MirrorPruneStale
@@ -56,6 +60,9 @@ fi
 BACKUPS_EXPIRE_DAYS="${BACKUP_EXPIRE_DAYS:-30}"
 WAL_EXPIRE_DAYS="${WAL_EXPIRE_DAYS:-14}"
 BASE_EXPIRE_DAYS="${BASE_EXPIRE_DAYS:-35}"
+# 2026-07-05: extra days noncurrent VERSIONS survive past retention (see
+# purge_versions below). 7d = the malicious-delete rollback window.
+VERSION_GRACE_DAYS="${MIRROR_VERSION_GRACE_DAYS:-7}"
 
 MIRROR_ENDPOINT="$S3_MIRROR_ENDPOINT_URL"
 case "$MIRROR_ENDPOINT" in
@@ -80,6 +87,31 @@ prune_prefix() {
 prune_prefix "backups/" "$BACKUPS_EXPIRE_DAYS"
 prune_prefix "base/"    "$BASE_EXPIRE_DAYS"
 prune_prefix "wal/"     "$WAL_EXPIRE_DAYS"
+
+# ── Noncurrent-version purge (2026-07-05) ────────────────────────────
+# The mirror bucket has VERSIONING ENABLED — deliberately kept: it is
+# the rollback window against a malicious/buggy delete on the mirror
+# itself. But it also means the `mc rm` prune above only stamps DELETE
+# MARKERS: every "removed" object lives on as a billed noncurrent
+# version, and Selectel cannot expire those server-side (it does not
+# persist lifecycle policies, incl. NoncurrentVersionExpiration — see
+# header). Found 2026-07-05: 10 GiB / 765 versions on a bucket whose
+# visible objects totalled 1.35 GiB — ~8.7 GiB of dead WAL versions.
+#
+# Fix: purge ALL versions (incl. markers) older than retention + grace.
+# Anything older than the prefix's retention is definitionally
+# noncurrent (current objects were pruned at retention age), so the
+# +grace window is exactly how long a deleted object stays recoverable.
+purge_versions() {
+    _prefix="$1"; _days="$2"
+    echo "[$(date -u +%FT%TZ)] mirror_prune: ${_prefix} → purging VERSIONS older than ${_days}d (retention + ${VERSION_GRACE_DAYS}d grace)"
+    mc rm --recursive --force --versions --older-than "${_days}d" \
+        "mir/${S3_MIRROR_BUCKET}/${_prefix}" 2>&1 | tail -3 || true
+}
+
+purge_versions "backups/" "$((BACKUPS_EXPIRE_DAYS + VERSION_GRACE_DAYS))"
+purge_versions "base/"    "$((BASE_EXPIRE_DAYS + VERSION_GRACE_DAYS))"
+purge_versions "wal/"     "$((WAL_EXPIRE_DAYS + VERSION_GRACE_DAYS))"
 
 # Success metric (3-attempt retry, same shape as the other push sites).
 NOW=$(date -u +%s)
