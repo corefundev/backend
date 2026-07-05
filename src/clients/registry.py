@@ -54,6 +54,9 @@ class ClientRecord:
     model_version: int = 0
     horizon: int = 14
     notes: Optional[str] = None
+    # ADM-10 (#278): operator suspension — NULL = active. Set/cleared only
+    # via the admin endpoints; enforcement in require_client_access.
+    suspended_at: Optional[str] = None
 
     # ── Subscription plan + usage counters ────────────────────────────
     # plan: "free" | "start" | "business" — resolved to PlanSpec at enforce time.
@@ -177,7 +180,7 @@ def _merge_subtree_inplace(cfg: dict, path: tuple[str, ...], patch: dict) -> Non
 CLIENT_UPDATABLE_COLUMNS: frozenset = frozenset({
     "config", "storage_path",
     "last_trained_at", "last_mlflow_run_id", "last_wmape", "last_mase",
-    "status", "model_version", "horizon", "notes",
+    "status", "model_version", "horizon", "notes", "suspended_at",
     "plan", "trained_sku_count",
     "api_key_hash", "email", "email_canonical", "email_verified_at",
     "oauth_provider", "oauth_subject",
@@ -503,6 +506,7 @@ class PostgresClientRegistry(ClientRegistry):
             created_at=str(row.get("created_at", "")),
             last_trained_at=str(row["last_trained_at"]) if row.get("last_trained_at") else None,
             last_mlflow_run_id=row.get("last_mlflow_run_id"),
+            suspended_at=str(row["suspended_at"]) if row.get("suspended_at") else None,
             last_wmape=row.get("last_wmape"),
             last_mase=row.get("last_mase"),
             status=row.get("status", "registered"),

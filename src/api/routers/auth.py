@@ -199,6 +199,11 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
 
     if is_well_formed(req.secret):
         if verify_api_key(req.secret, record_hash):
+            # ADM-10 (#278): suspended clients get no NEW tokens (existing
+            # ones are refused per-request in require_client_access).
+            if record is not None and record.suspended_at is not None:
+                raise HTTPException(status_code=403,
+                                    detail="Account suspended. Contact support.")
             token = create_access_token(client_id=req.client_id, roles=["forecast"])
             return TokenResponse(access_token=token)
         # Well-formed sku_* key that doesn't match → explicit fail.
