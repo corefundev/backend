@@ -441,6 +441,45 @@ echo "  reconciling S3 lifecycle policy (backups/wal/base — primary + mirror)"
 docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh /scripts/init_s3_lifecycle.sh 2>&1 \
     | sed 's/^/    /' || echo "    (lifecycle reconcile failed — not blocking)"
 
+# ── #265: training-aware deploy gate ──────────────────────────────
+# Recreating the worker kills an in-flight training (~10s SIGTERM grace
+# vs a 40-70 min job; live case: run 0fe548ee, docs-only merge). Wait
+# for the training queue to drain BEFORE touching workers; on timeout
+# FAIL the deploy loudly — nothing has been recreated yet, aborting is
+# safe and the operator re-triggers from main once training finishes.
+# Probe failures (fresh host, unhealthy old worker) proceed: blocking
+# every deploy on a broken probe would be worse than the race.
+TRAINING_WAIT_MAX="${TRAINING_WAIT_MAX:-5400}"
+echo "  #265 deploy gate: checking for in-flight trainings..."
+GATE_START=$(date +%s)
+while true; do
+    RUNNING=$( (timeout 30 docker exec -i docker-worker-1 python - <<'PYEOF'
+import os
+from src.auth.vault_agent import bootstrap_secrets; bootstrap_secrets()
+import psycopg2
+c = psycopg2.connect(os.environ["DATABASE_URL"]).cursor()
+c.execute("SELECT count(*) FROM sku_training_runs WHERE status='running'")
+print(c.fetchone()[0])
+PYEOF
+    ) 2>/dev/null | tail -1 | tr -d '[:space:]' || echo "unknown" )
+    if [ "$RUNNING" = "0" ]; then
+        echo "    no in-flight training — proceeding"
+        break
+    fi
+    if ! echo "$RUNNING" | grep -qE '^[0-9]+$'; then
+        echo "    gate probe failed (old worker missing/unhealthy) — proceeding (fresh-host path)"
+        break
+    fi
+    ELAPSED=$(( $(date +%s) - GATE_START ))
+    if [ "$ELAPSED" -ge "$TRAINING_WAIT_MAX" ]; then
+        echo "    ERROR #265: $RUNNING training(s) still running after ${ELAPSED}s (max ${TRAINING_WAIT_MAX}s)."
+        echo "    ABORTING deploy — nothing recreated. Re-trigger CD from main after the training finishes."
+        exit 1
+    fi
+    echo "    $RUNNING training(s) in flight — waiting 60s (elapsed ${ELAPSED}s / max ${TRAINING_WAIT_MAX}s)"
+    sleep 60
+done
+
 if [ "$ENVIRONMENT" = "production" ]; then
     echo "  rolling: workers first (no traffic), then api"
     # sandbox-broker ships in the worker image (R11-#66) and must be

@@ -198,6 +198,16 @@ class PostgresTrainingRunsRegistry:
             )
         return affected
 
+    def list_running(self) -> list[TrainingRunRecord]:
+        """All runs currently marked 'running' — reconcile (#265) input.
+        Reads the PRIMARY: healing decisions must not act on replica lag."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM sku_training_runs WHERE status = 'running'"
+                )
+                return [self._row_to_record(dict(r)) for r in cur.fetchall()]
+
     def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
         # Read path → replica when configured.
         with self._conn_read() as conn:
