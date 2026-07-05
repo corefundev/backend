@@ -29,8 +29,17 @@ Owner epic: ADM. Related: NC epic #245 (notification center).
 
 ## 2. Information architecture
 
+**Correction 2026-07-06 (ADM-0 #276, user feedback):** the console lives in a
+DEDICATED shell at `/admin/*` — its own AdminLayout (sidebar per the tree
+below, header with environment + session identity + 30-min JWT countdown +
+logout), visually distinct from the client cabinet. The original placement
+inside `/app` (inherited from the pre-design precedent) embedded admin
+functions into client chrome — functions right, shell wrong. `/app/admin/*`
+becomes redirects; the client nav carries no admin items. The subdomain +
+edge IP-allowlist step (H8) builds ON TOP of this shell.
+
 ```
-/app/admin
+/admin
 ├── Обзор            ADM-4  dashboard: KPIs + "требует внимания"
 ├── Клиенты          exists → client-360 detail (ADM-3 #256)
 ├── Обучение         ADM-2 #255  runs feed, gate verdicts, stale models
@@ -96,7 +105,8 @@ in-panel secrets management (Lockbox CLI stays the only path).
 
 ## 5. Delivery order
 
-ADM-1 → ADM-7(H1..H4,H6) → ADM-2 → ADM-4 → ADM-3(+H5) → ADM-5 → ADM-6 →
-ADM-9 (after B1) → ADM-8 (trigger: 2nd operator). Billing/PII when unblocked.
+~~ADM-1 → ADM-7~~ (shipped) → **ADM-0 (shell, #276)** → ADM-2 → ADM-4 →
+ADM-3(+H5) → ADM-5 → ADM-6 → ADM-9 (after B1) → ADM-8 (trigger: 2nd
+operator). Billing/PII when unblocked.
 Each item follows the standard closure workflow; every new admin endpoint
 must extend the H1 static test in the same PR.
