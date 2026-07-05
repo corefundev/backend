@@ -409,15 +409,32 @@ class AuthContext:
 
 
 def require_client_access(client_id: str, auth: AuthContext) -> None:
-    """Ensure the authenticated user can access the given client's data."""
-    if auth.client_id == client_id:
-        return
+    """Ensure the authenticated user can access the given client's data.
+
+    ADM-10 (#278): a SUSPENDED client is denied even with a valid token —
+    suspension must take effect immediately, not after JWT expiry. Admins
+    bypass (the operator must still inspect/unsuspend). One indexed PK
+    lookup per request; the registry call is best-effort fail-open on
+    infrastructure errors (a DB blip must not lock every client out —
+    suspension is an operator action, not a security boundary against
+    token theft)."""
     if "admin" in auth.roles:
         return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=f"Access denied: cannot access client '{client_id}'",
-    )
+    if auth.client_id != client_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: cannot access client '{client_id}'",
+        )
+    try:
+        from src.clients.registry import get_registry
+        rec = get_registry().get(client_id)
+    except Exception:    # noqa: BLE001 — see docstring: infra fail-open
+        return
+    if rec is not None and rec.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account suspended. Contact support.",
+        )
 
 
 # ── FastAPI dependency ────────────────────────────────────────

@@ -36,7 +36,7 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 48  # +2 NC-6 #251 (POST/GET admin notifications), 2026-07-05
+_EXPECTED_ROUTE_COUNT = 50  # +2 ADM-10 #278 (suspend/unsuspend), 2026-07-06
 
 
 def _collect_routes() -> list[tuple[str, str, str]]:

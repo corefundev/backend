@@ -161,6 +161,51 @@ async def register_client(
     }
 
 
+@router.post("/admin/clients/{client_id}/suspend")
+def admin_suspend_client(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """ADM-10 (#278): operator suspension — denies token issuance and all
+    client-scoped access immediately (require_client_access); data intact."""
+    auth.require_role("admin")
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    from datetime import datetime, timezone
+    registry.update(client_id, suspended_at=datetime.now(timezone.utc).isoformat())
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_suspend",
+        client_id=client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+    )
+    return {"client_id": client_id, "suspended": True}
+
+
+@router.post("/admin/clients/{client_id}/unsuspend")
+def admin_unsuspend_client(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    auth.require_role("admin")
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    registry.update(client_id, suspended_at=None)
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_unsuspend",
+        client_id=client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+    )
+    return {"client_id": client_id, "suspended": False}
+
+
 @router.post("/clients/{client_id}/api-key/rotate")
 async def rotate_api_key(
     client_id: str,
