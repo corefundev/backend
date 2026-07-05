@@ -68,6 +68,65 @@ class PostgresNotificationsRegistry:
             )
             return cur.fetchone() is not None
 
+    def create_broadcast(
+        self,
+        client_ids: Optional[list[str]],
+        type:      str,
+        title:     str,
+        body:      str = "",
+        severity:  str = "info",
+        dedup_key: Optional[str] = None,
+    ) -> int:
+        """NC-6 (#251): fan-out at write. client_ids=None → ALL clients
+        (INSERT…SELECT over sku_clients — per-client read state for free);
+        a list targets exactly those ids. Same partial-unique dedup applies
+        per client, so a repeated broadcast with the same dedup_key is a
+        no-op for clients who already have it. Returns rows inserted."""
+        if severity not in VALID_SEVERITIES:
+            severity = "info"
+        with self._conn() as conn, conn.cursor() as cur:
+            if client_ids is None:
+                cur.execute(
+                    """
+                    INSERT INTO sku_notifications
+                        (client_id, type, severity, title, body, dedup_key)
+                    SELECT client_id, %s, %s, %s, %s, %s FROM sku_clients
+                    ON CONFLICT (client_id, dedup_key) WHERE dedup_key IS NOT NULL
+                    DO NOTHING
+                    """,
+                    (type, severity, title, body, dedup_key),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO sku_notifications
+                        (client_id, type, severity, title, body, dedup_key)
+                    SELECT unnest(%s::text[]), %s, %s, %s, %s, %s
+                    ON CONFLICT (client_id, dedup_key) WHERE dedup_key IS NOT NULL
+                    DO NOTHING
+                    """,
+                    (list(client_ids), type, severity, title, body, dedup_key),
+                )
+            return cur.rowcount
+
+    def list_admin_sent(self, limit: int = 50) -> list[dict]:
+        """Cross-client history of admin-originated rows (announcement /
+        system) — the ADM-1 page's history view."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, client_id, type, severity, title, body,
+                           created_at, read_at
+                    FROM sku_notifications
+                    WHERE type IN ('announcement', 'system')
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+
     def list_for_client(
         self, client_id: str, limit: int = 50, offset: int = 0,
     ) -> list[dict]:
