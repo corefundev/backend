@@ -29,8 +29,9 @@
 # Each of these should either get narrowed to a specific exception type,
 # convert the swallow into a persisted error, or document the fail-open
 # branch as deliberate (and then move out of "broad except" to a typed one).
-src/pipeline/task_queue.py:204  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (+1 R11-M8 contextlib import)
-src/pipeline/task_queue.py:218  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (+1 R11-M8)
+src/pipeline/task_queue.py:209  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
+src/pipeline/task_queue.py:216  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
+src/pipeline/task_queue.py:230  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
 src/pipeline/train.py:260  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :254, +6 #228, 2026-07-05)
 src/pipeline/train.py:298  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :292, +6 #228, 2026-07-05)
 src/pipeline/train.py:206  QW2-4 #227 (was :200, +6 #228 conformal-helper censor params) — _promotion_gate outer except: gate INFRASTRUCTURE errors fail-open (promote without a verdict, logged loudly) — the gate must never brick training because of its own bugs; legitimate FAILED verdicts always block (separate code path)

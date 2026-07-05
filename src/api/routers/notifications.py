@@ -156,3 +156,61 @@ async def telegram_webhook(request: Request):
     except Exception as e:    # noqa: BLE001
         logger.warning("telegram webhook handling failed: %s", e)
     return {"ok": True}
+
+
+# ── In-account notification center (NC-1 #241) ───────────────────────────────
+# Persistent per-client inbox the FE bell polls. Sync psycopg2 reads run in
+# `def` handlers (threadpool — PERF-4 discipline); tenant-scoped via
+# require_client_access like every client-data endpoint.
+
+from typing import Optional as _Optional
+
+from pydantic import BaseModel, Field
+
+
+class MarkReadRequest(BaseModel):
+    # None/omitted = mark ALL unread as read; ids are tenant-scoped in SQL.
+    ids: _Optional[list[int]] = Field(default=None, max_length=500)
+
+
+@router.get("/clients/{client_id}/notifications")
+def list_notifications(
+    client_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    auth: AuthContext = Depends(get_current_client),
+):
+    require_client_access(client_id, auth)
+    if not (1 <= limit <= 200) or offset < 0:
+        raise HTTPException(422, detail="limit must be 1..200, offset >= 0")
+    from src.storage.notifications import get_notifications_registry
+    try:
+        reg = get_notifications_registry()
+        items = reg.list_for_client(client_id, limit=limit, offset=offset)
+        unread = reg.unread_count(client_id)
+    except Exception as e:    # noqa: BLE001
+        # CONTRACT-1 discipline: a backend failure must be distinguishable
+        # from an empty inbox — 503, never a silent 200-empty.
+        logger.warning("notifications listing failed: %s", e)
+        raise HTTPException(
+            503, detail="notifications temporarily unavailable"
+        ) from e
+    return {"notifications": items, "count": len(items), "unread": unread}
+
+
+@router.post("/clients/{client_id}/notifications/read")
+def mark_notifications_read(
+    client_id: str,
+    req: MarkReadRequest,
+    auth: AuthContext = Depends(get_current_client),
+):
+    require_client_access(client_id, auth)
+    from src.storage.notifications import get_notifications_registry
+    try:
+        n = get_notifications_registry().mark_read(client_id, req.ids)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("notifications mark-read failed: %s", e)
+        raise HTTPException(
+            503, detail="notifications temporarily unavailable"
+        ) from e
+    return {"marked": n}
