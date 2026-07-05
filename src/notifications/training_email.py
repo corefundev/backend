@@ -88,14 +88,19 @@ def _render_finished(
     mase:          float | None,
     mase_seasonal: float | None = None,
     gate_passed:   bool | None  = None,
+    gate_blocked:  bool | None  = None,
 ) -> tuple[str, str]:
     """Returns (subject, body) for a successful training run.
 
-    QW2-4 #227: gate_passed=False = честная формулировка — новая модель НЕ
-    прошла контроль качества, продолжает работать предыдущая."""
+    QW2-4 #227 / #268: wording keys on gate_blocked (артефакт не сохранён —
+    предыдущая модель продолжает работать), NOT on the verdict alone: a
+    promoted-first-model with a FAIL verdict SERVES (нет предыдущей) и
+    получает честное «качество ниже эталона»."""
     base = _frontend_base_url()
-    if gate_passed is False:
+    if gate_blocked:
         subject = "⚠ Обучение завершено — новая модель не прошла контроль качества"
+    elif gate_passed is False:
+        subject = "⚠ Обучение завершено — качество ниже эталона"
     else:
         subject = "✓ Обучение модели завершено"
     body_lines = [
@@ -105,6 +110,10 @@ def _render_finished(
          f"прошла автоматический контроль качества (точность ниже действующей "
          f"модели или базового прогноза). Продолжает работать предыдущая "
          f"модель — ваши прогнозы не ухудшились.")
+        if gate_blocked else
+        (f"Обучение для аккаунта «{client_id}» завершено. Модель работает, но "
+         f"её точность пока ниже простого сезонного прогноза — проверьте "
+         f"полноту истории продаж и переобучите модель позже.")
         if gate_passed is False else
         f"Обучение модели для аккаунта «{client_id}» успешно завершено.",
         "",
@@ -156,6 +165,7 @@ def notify_training_finished(
     mase:          float | None = None,
     mase_seasonal: float | None = None,
     gate_passed:   bool | None  = None,
+    gate_blocked:  bool | None  = None,
 ) -> None:
     """Best-effort email on successful training. Never raises."""
     try:
@@ -169,6 +179,7 @@ def notify_training_finished(
         subject, body = _render_finished(
             client_id, duration_sec, n_skus, wmape, mase, mase_seasonal,
             gate_passed,
+            gate_blocked,
         )
         from src.auth.email_sender import get_email_sender
         get_email_sender().send(to=to, subject=subject, body=body)

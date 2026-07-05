@@ -237,8 +237,12 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
                 # reported window) — comparing an honest challenger against
                 # them blocks legitimate retrains forever. Such runs are
                 # treated as "no champion" (first-model semantics).
+                # #268: champion = newest run whose ARTIFACT exists (it is
+                # what actually serves) — NOT gate_passed: a promoted-first-
+                # model with an honest FAIL verdict must become the champion,
+                # else every next retrain sees "no champion" forever.
                 if (r.status == FINISHED and r.wmape is not None
-                        and r.gate_passed is not False
+                        and getattr(r, "model_path", None)
                         and getattr(r, "mase_seasonal", None) is not None):
                     champion = SimpleNamespace(wmape_global=float(r.wmape),
                                                mase_global=float(r.mase or "nan"))
