@@ -57,6 +57,10 @@ class WalkForwardResult:
     per_sku_metrics: pd.DataFrame
     aggregated: dict
     fold_aggregated: list[dict] = field(default_factory=list)
+    # #247: the combined per-row frame (sku/date/fold/actual/predicted/
+    # train_values) — lets the promotion gate score a seasonal-naive baseline
+    # on the IDENTICAL windows the challenger was graded on.
+    combined: pd.DataFrame | None = None
 
 
 def _is_direct_multi_step(model) -> bool:
@@ -207,6 +211,7 @@ def walk_forward_validate(
         per_sku_metrics=per_sku,
         aggregated=aggregated,
         fold_aggregated=fold_aggs,
+        combined=combined,
     )
 
 

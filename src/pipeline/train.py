@@ -170,7 +170,37 @@ def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg,
         agg["pinball_p90_post"]          = summary["pinball_hi_post"]
 
 
-def _promotion_gate(df, config, agg, client_id):
+def _seasonal_naive_wmape_on_frame(combined, date_col) -> float:
+    """#247: seasonal-naive-7 WMAPE on the IDENTICAL (sku, fold, date) rows
+    the challenger was graded on. Each row carries its fold's per-SKU train
+    series (`train_values`); the naive prediction for step h cycles the last
+    trained week: tail7[(h-1) % 7]. Short histories (<7) fall back to the
+    last trained value. Returns NaN on an unusable frame (gate treats NaN
+    baselines fail-open at the infra level — never a fabricated number)."""
+    import numpy as np
+    if combined is None or len(combined) == 0:
+        return float("nan")
+    need = {"fold", "actual", "train_values", date_col}
+    if not need.issubset(combined.columns):
+        return float("nan")
+    fold_start = combined.groupby("fold")[date_col].transform("min")
+    h = (pd.to_datetime(combined[date_col]) - pd.to_datetime(fold_start)).dt.days + 1
+    err = 0.0
+    act = 0.0
+    for tv, hh, a in zip(combined["train_values"], h, combined["actual"]):
+        arr = np.asarray(tv, dtype=float) if tv is not None else np.empty(0)
+        if arr.size >= 7:
+            pred = float(arr[-7:][(int(hh) - 1) % 7])
+        elif arr.size:
+            pred = float(arr[-1])
+        else:
+            continue
+        err += abs(float(a) - pred)
+        act += abs(float(a))
+    return err / act if act > 1e-10 else float("nan")
+
+
+def _promotion_gate(df, config, agg, client_id, wf_combined=None):
     """QW2-4 (#227): champion/challenger promotion decision, fail-closed on
     verdicts and fail-open ONLY on gate infrastructure errors.
 
@@ -194,6 +224,7 @@ def _promotion_gate(df, config, agg, client_id):
         from src.validation.backtest_gate import evaluate_gate, score_seasonal_naive
         horizon = int(config["model"].get("horizon", 14))
         tolerance = float(config.get("model", {}).get("gate_tolerance", 0.02))
+        date_col = config["data"]["date_col"]
 
         champion = None
         try:
@@ -206,7 +237,18 @@ def _promotion_gate(df, config, agg, client_id):
         except Exception as reg_err:    # noqa: BLE001 — no registry ≠ no gate
             logger.warning("#227 gate: champion lookup failed (%s) — treating as first model", reg_err)
 
-        baseline = score_seasonal_naive(df, config, holdout_days=horizon)
+        # #247: score the naive on the SAME walk-forward windows the
+        # challenger was graded on — a single-tail baseline (the original
+        # wiring) never faces the hard folds and biases the gate
+        # anti-challenger (live case: challenger 0.837 over 3 folds vs a
+        # one-window naive 0.393). Single-tail stays as a defensive fallback
+        # when the frame is unavailable.
+        bl_wmape = _seasonal_naive_wmape_on_frame(wf_combined, date_col)
+        if bl_wmape == bl_wmape:  # not NaN
+            baseline = SimpleNamespace(wmape_global=bl_wmape,
+                                       mase_global=float("nan"))
+        else:
+            baseline = score_seasonal_naive(df, config, holdout_days=horizon)
         challenger = SimpleNamespace(
             wmape_global=float(agg.get("wmape_global", float("nan"))),
             mase_global=float(agg.get("mase_global", float("nan"))),
@@ -454,7 +496,8 @@ def run_training_pipeline(
     # Decided BEFORE the final fit: a blocked challenger skips the final
     # fit + quantiles + save entirely (the champion artifact keeps serving
     # untouched, and post-training forecasts are skipped via model_path=None).
-    gate_verdict, gate_blocked = _promotion_gate(df, config, agg, client_id)
+    gate_verdict, gate_blocked = _promotion_gate(df, config, agg, client_id,
+                                                 wf_combined=wf_result.combined)
     if gate_blocked:
         elapsed = time.time() - t0
         logger.warning("=== Training pipeline GATE-BLOCKED in %.1fs ===", elapsed)

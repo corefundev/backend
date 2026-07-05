@@ -32,9 +32,9 @@
 src/pipeline/task_queue.py:209  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
 src/pipeline/task_queue.py:216  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
 src/pipeline/task_queue.py:230  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
-src/pipeline/train.py:260  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :254, +6 #228, 2026-07-05)
-src/pipeline/train.py:298  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :292, +6 #228, 2026-07-05)
-src/pipeline/train.py:206  QW2-4 #227 (was :200, +6 #228 conformal-helper censor params) — _promotion_gate outer except: gate INFRASTRUCTURE errors fail-open (promote without a verdict, logged loudly) — the gate must never brick training because of its own bugs; legitimate FAILED verdicts always block (separate code path)
+src/pipeline/train.py:302  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :260, +42 #247)
+src/pipeline/train.py:340  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :298, +42 #247)
+src/pipeline/train.py:237  QW2-4 #227 gate infra fail-open (was :206, +31 #247 same-window baseline helper)
 src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
 src/pipeline/inference_utils.py:341  pre-R9 baseline (was :331, +10 L-A4 #186 doc-comment); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
