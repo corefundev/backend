@@ -77,3 +77,5 @@ src/pipeline/inference_utils.py:482  QW2-1 #224 — serve_forecast chained branc
 
 src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
+src/api/routers/clients.py:455  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly
+src/api/routers/clients.py:463  ADM-3 #256 — overview runs-enrichment guard: same rationale as :455
