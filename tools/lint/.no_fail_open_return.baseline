@@ -63,7 +63,7 @@ src/api/routers/auth.py:425  pre-R9 baseline; triage in R10 — signup OAuth rac
 src/api/routers/config.py:284  pre-R9 baseline; triage in R10 — config-reset write fallback (was :201, +70 lines #95; +13 R13-2 horizon-clamp wiring, 2026-06-22)
 src/api/routers/ops.py:150  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. (was :145, +5 CONTRACT-2 #208 probe-contract docstring)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
-src/api/routers/notifications.py:156  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics) (was :152, +4 #184 run_in_threadpool import+comment)
+src/api/routers/notifications.py:157  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics) (was :152, +4 #184 run_in_threadpool import+comment) (was :156, +1 R5-M6 hoist)
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
