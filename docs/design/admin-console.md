@@ -27,32 +27,37 @@ Owner epic: ADM. Related: NC epic #245 (notification center).
 5. **Don't rebuild Grafana** — system health = link-outs + a few numbers,
    never a dashboard clone.
 
-## 2. Information architecture
+## 2. Information architecture (v2 — full rethink 2026-07-06, user-approved)
 
-**Correction 2026-07-06 (ADM-0 #276, user feedback):** the console lives in a
-DEDICATED shell at `/admin/*` — its own AdminLayout (sidebar per the tree
-below, header with environment + session identity + 30-min JWT countdown +
-logout), visually distinct from the client cabinet. The original placement
-inside `/app` (inherited from the pre-design precedent) embedded admin
-functions into client chrome — functions right, shell wrong. `/app/admin/*`
-becomes redirects; the client nav carries no admin items. The subdomain +
-edge IP-allowlist step (H8) builds ON TOP of this shell.
+The v1 IA under-scoped the console (user: «полноценная админ-панель, контроль
+над системой, а не демо»). v2 structure of record — sections join the /admin
+sidebar as they ship:
 
 ```
 /admin
-├── Обзор            ADM-4  dashboard: KPIs + "требует внимания"
-├── Клиенты          exists → client-360 detail (ADM-3 #256)
-├── Обучение         ADM-2 #255  runs feed, gate verdicts, stale models
-├── Уведомления      ADM-1 #254  compose / target / broadcast confirm / history
-├── Загрузки         ADM-6  cross-client uploads, failures
-├── Аудит            ADM-5  audit_log viewer + tamper-verify status
-├── Юр. документы    exists
-└── Система          ADM-4 (part): Grafana/MLflow/alerts links, versions
-future:
-├── Биллинг          with #145
-├── PII-запросы      with #156 (152-ФЗ export/delete queue)
-└── Конфиг-оверрайды ADM-9 (B1 schema-validated editor; R13-1 risk class)
+├── Обзор          ADM-4 #257   KPI + «требует внимания» + события
+├── Клиенты        ADM-10 #278  поиск/фильтры/suspend/rotate  [Волна 1]
+│   └── карточка   ADM-3 #256   client-360 + действия + H5    [Волна 1]
+├── Тарифы         ADM-11 #279  каталог/история смен/распределение [Волна 1]
+├── Обучение       ADM-2 #255   лента+gate+stale; v2 действия [Волна 2]
+├── Данные         ADM-6 #259   загрузки/карантин/объёмы      [Волна 3]
+├── Уведомления    ✅ #251+#254  compose/broadcast/история
+├── Аудит          ADM-5 #258   журнал+tamper-verify+CSV      [Волна 3]
+├── Безопасность   ADM-12 #280  админ-входы/возраст ключа     [Волна 3]
+├── Система        ADM-13 #281  здоровье/версии/бэкапы/links  [Волна 2]
+├── Юр. документы  ✅
+├── Биллинг        ⏸ #145
+└── PII / 152-ФЗ   ⏸ #156
 ```
+
+Waves: 1 = ядро управления (Клиенты-PRO → Тарифы → client-360);
+2 = надзор (Обучение → Обзор → Система); 3 = комплаенс (Аудит →
+Безопасность → Данные). Summary table of record lives in epic #263.
+
+**Standing non-goals:** impersonation; in-UI secrets; plan-limit edits from
+UI before B1 (#150). Every new admin route extends the H1 static test in
+the same PR; every write lands in audit_log; client-360 views audit-logged
+(H5).
 
 ## 3. Function inventory
 
