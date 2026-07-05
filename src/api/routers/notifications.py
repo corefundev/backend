@@ -29,6 +29,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
+from src.audit import EVT_ADMIN_ACTION, record_event
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
 from src.clients.registry import get_registry
 from src.notifications.telegram import (
@@ -163,7 +164,7 @@ async def telegram_webhook(request: Request):
 # `def` handlers (threadpool — PERF-4 discipline); tenant-scoped via
 # require_client_access like every client-data endpoint.
 
-from typing import Optional as _Optional
+from typing import Optional as _Optional, Union as _Union
 
 from pydantic import BaseModel, Field
 
@@ -214,3 +215,91 @@ def mark_notifications_read(
             503, detail="notifications temporarily unavailable"
         ) from e
     return {"marked": n}
+
+
+# ── Admin announcements (NC-6 #251, design docs/design/admin-console.md) ─────
+# Targeted or broadcast messages from the operator to client inboxes.
+# Broadcast = fan-out at write (per-client read state for free). EVERY send
+# lands in audit_log (tamper-evident operator actions). Server-side length
+# caps are the H4 backstop (FE renders plain text only).
+
+
+class AdminAnnouncementRequest(BaseModel):
+    # "all" → every client; otherwise an explicit list of client ids.
+    # typing.Union (not `X | Y`): pydantic evals annotations at runtime and
+    # local py3.9 can't eval PEP-604 unions (same trap as MarkReadRequest).
+    target: _Union[str, list[str]]
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(default="", max_length=2000)
+    severity: str = Field(default="info", pattern="^(info|warning)$")
+    type: str = Field(default="announcement", pattern="^(announcement|system)$")
+    dedup_key: _Optional[str] = Field(default=None, max_length=120)
+
+
+@router.post("/admin/notifications")
+def admin_send_notification(
+    req: AdminAnnouncementRequest,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    auth.require_role("admin")
+    from src.storage.notifications import get_notifications_registry
+
+    target = [req.target] if isinstance(req.target, str) and req.target != "all" else req.target
+
+    try:
+        reg = get_notifications_registry()
+        if target == "all":
+            created = reg.create_broadcast(
+                None, type=req.type, title=req.title, body=req.body,
+                severity=req.severity, dedup_key=req.dedup_key,
+            )
+            target_desc = "all"
+        else:
+            ids = [str(c).strip() for c in target if str(c).strip()]
+            if not ids or len(ids) > 500:
+                raise HTTPException(422, detail="target must be 1..500 client ids or 'all'")
+            # Validate ids against the client registry — fan-out to an
+            # unknown id would create orphan rows nobody can ever read.
+            registry = get_registry()
+            unknown = [c for c in ids if registry.get(c) is None]
+            if unknown:
+                raise HTTPException(422, detail=f"unknown client ids: {unknown[:5]}")
+            created = reg.create_broadcast(
+                ids, type=req.type, title=req.title, body=req.body,
+                severity=req.severity, dedup_key=req.dedup_key,
+            )
+            target_desc = f"{len(ids)} client(s)"
+    except HTTPException:
+        raise
+    except Exception as e:    # noqa: BLE001
+        logger.warning("admin announcement failed: %s", e)
+        raise HTTPException(503, detail="notifications temporarily unavailable") from e
+
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="announcement_send",
+        actor_email=getattr(auth, "email", None),
+        ip=http_req.client.host if http_req.client else None,
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="notification", target_id=target_desc,
+        metadata={"title": req.title[:80], "type": req.type,
+                  "severity": req.severity, "created": created},
+    )
+    return {"created": created, "target": target_desc}
+
+
+@router.get("/admin/notifications")
+def admin_list_sent(
+    limit: int = 50,
+    auth: AuthContext = Depends(get_current_client),
+):
+    auth.require_role("admin")
+    if not (1 <= limit <= 200):
+        raise HTTPException(422, detail="limit must be 1..200")
+    from src.storage.notifications import get_notifications_registry
+    try:
+        items = get_notifications_registry().list_admin_sent(limit)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("admin sent-history failed: %s", e)
+        raise HTTPException(503, detail="notifications temporarily unavailable") from e
+    return {"notifications": items, "count": len(items)}
