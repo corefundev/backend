@@ -365,14 +365,14 @@ def admin_plan_history(
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT client_id, actor_email, created_at,
+                SELECT client_id, actor_email, ts,
                        metadata->'changes'->'plan'->>'old',
                        metadata->'changes'->'plan'->>'new'
                 FROM audit_log
                 WHERE event_type = 'admin_action'
                   AND event_subtype = 'client_update'
                   AND metadata->'changes' ? 'plan'
-                ORDER BY created_at DESC
+                ORDER BY ts DESC
                 LIMIT %s
                 """,
                 (limit,),
@@ -405,7 +405,7 @@ def admin_client_activity(
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT client_id, max(created_at)
+                SELECT client_id, max(ts)
                 FROM audit_log
                 WHERE event_type = 'login' AND success
                   AND (event_subtype IS NULL OR event_subtype != 'admin_token_issued')
@@ -443,10 +443,10 @@ def admin_client_overview(
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT created_at, ip, event_subtype
+                SELECT ts, ip, event_subtype
                 FROM audit_log
                 WHERE event_type = 'login' AND success AND client_id = %s
-                ORDER BY created_at DESC LIMIT 10
+                ORDER BY ts DESC LIMIT 10
                 """,
                 (client_id,),
             )

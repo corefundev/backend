@@ -66,3 +66,15 @@ def test_activity_excludes_admin_sessions():
 def test_both_endpoints_guarded():
     for fn in (cr.admin_client_overview, cr.admin_client_activity):
         assert 'auth.require_role("admin")' in inspect.getsource(fn)
+
+
+def test_audit_queries_use_the_real_time_column():
+    # Live 503 on prod 2026-07-06: audit_log's time column is `ts`
+    # (migrations/008), NOT created_at — assumed names must be pinned
+    # against the DDL, not guessed (verify-facts class).
+    import re
+    src = inspect.getsource(cr)
+    for m in re.finditer(r"SELECT[^;]*?FROM audit_log[^;]*?(?=\"\"\")", src, re.S):
+        q = m.group(0)
+        assert "created_at" not in q, f"audit query references a non-existent column:\n{q[:200]}"
+        assert "ts" in q
