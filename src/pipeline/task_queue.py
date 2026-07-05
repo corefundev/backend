@@ -196,6 +196,18 @@ def _run_pipeline_or_fail(
         )
     except Exception as e:
         _mark_run_failed(runs, run_id, str(e))
+        # NC-1 #241: inbox row for the failure (best-effort; generic wording —
+        # raw errors never reach the tenant, R11-H5).
+        try:
+            from src.storage.notifications import emit_notification
+            emit_notification(
+                client_id, type="training_failed", severity="error",
+                title="Обучение модели не удалось",
+                body="Попробуйте ещё раз; если повторится — напишите в поддержку.",
+                dedup_key=f"training_failed:{run_id}" if run_id else None,
+            )
+        except Exception as inbox_err:    # noqa: BLE001
+            logger.info("inbox notification skipped: %s", inbox_err)
         # R5-3 — sku_clients.status="failed" so UI/API can stop showing the
         # client as "training" after the RQ-mode failure.
         try:
@@ -276,6 +288,32 @@ def _record_run_finished(
         )
 
 
+def _emit_training_inbox_row(client_id, run_id, notif_args) -> None:
+    """NC-1 #241: persistent in-account inbox row for a finished run — rides
+    the caller's idempotency window, with a run_id dedup_key as belt-and-
+    suspenders. Best-effort like the email/telegram senders (void, never
+    raises past this frame)."""
+    try:
+        from src.storage.notifications import emit_notification
+        if notif_args.get("gate_passed") is False:
+            emit_notification(
+                client_id, type="gate_blocked", severity="warning",
+                title="Обучение завершено — новая модель не прошла контроль качества",
+                body="Продолжает работать предыдущая модель; прогнозы не ухудшились.",
+                dedup_key=f"training:{run_id}" if run_id else None,
+            )
+        else:
+            wm = notif_args.get("wmape")
+            emit_notification(
+                client_id, type="training_finished", severity="success",
+                title="Обучение модели завершено",
+                body=(f"WMAPE {wm:.3f}" if isinstance(wm, float) else ""),
+                dedup_key=f"training:{run_id}" if run_id else None,
+            )
+    except Exception as inbox_err:    # noqa: BLE001 — best-effort emitter
+        logger.info("inbox notification skipped: %s", inbox_err)
+
+
 def _notify_finished_idempotent(
     client_id: str,
     run_id: Optional[str],
@@ -322,6 +360,8 @@ def _notify_finished_idempotent(
 
     if not should_notify:
         return
+
+    _emit_training_inbox_row(client_id, run_id, notif_args)
 
     for kind, dotted in (
         ("email", "src.notifications.training_email"),
