@@ -114,3 +114,10 @@ def test_migration_and_updatable_column():
     assert "suspended_at TIMESTAMPTZ" in Path("migrations/019_client_suspension.sql").read_text()
     from src.clients.registry import CLIENT_UPDATABLE_COLUMNS
     assert "suspended_at" in CLIENT_UPDATABLE_COLUMNS
+
+
+def test_suspended_at_is_api_visible():
+    # _client_to_safe_dict whitelists fields (R4-2) — without this entry the
+    # admin FE can never render the suspended badge (caught post-merge).
+    from src.api.routers.clients import _CLIENT_SAFE_FIELDS
+    assert "suspended_at" in _CLIENT_SAFE_FIELDS

@@ -79,7 +79,7 @@ _CLIENT_SAFE_FIELDS = frozenset({
     "created_at", "last_trained_at", "last_mlflow_run_id",
     "last_wmape", "last_mase",
     "status", "model_version", "horizon", "notes",
-    "plan", "trained_sku_count",
+    "plan", "trained_sku_count", "suspended_at",
     "email", "email_verified_at", "oauth_provider",
 })
 
