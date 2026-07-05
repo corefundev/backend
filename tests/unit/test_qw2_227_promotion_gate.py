@@ -19,6 +19,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from src.pipeline.train import _promotion_gate
 
@@ -39,7 +40,7 @@ def _reg(monkeypatch, champion_wmape):
     runs = []
     if champion_wmape is not None:
         runs = [SimpleNamespace(status="finished", wmape=champion_wmape,
-                                mase=1.0, gate_passed=None)]
+                                mase=1.0, mase_seasonal=1.1, gate_passed=None)]
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -105,8 +106,8 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
     # served.
     import src.storage.training_runs as truns
     runs = [
-        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, gate_passed=False),
-        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, gate_passed=True),
+        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, mase_seasonal=1.0, gate_passed=False),
+        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, mase_seasonal=1.2, gate_passed=True),
     ]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -121,7 +122,7 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
 def test_pipeline_wires_gate_before_final_fit():
     from pathlib import Path
     src = Path("src/pipeline/train.py").read_text()
-    i_gate = src.index("_promotion_gate(df, config, agg, client_id)")
+    i_gate = src.index("_promotion_gate(df, config, agg, client_id,")
     i_fit  = src.index("# ── 7. Train final model")
     assert i_gate < i_fit, "gate must run BEFORE the final fit (blocked = no compute wasted)"
     assert '"model_path":      None,          # nothing saved — champion serves' in src
@@ -133,3 +134,82 @@ def test_task_queue_persists_and_notifies_gate():
     assert src.count('(result.get("gate") or {}).get("passed")') == 2, (
         "gate_passed must flow to BOTH the registry row and the notifiers"
     )
+
+
+# ── #247: same-window baseline (battle-test finding, 2026-07-05) ─────────────
+
+def _frame(rows):
+    return pd.DataFrame(rows)
+
+
+def test_247_same_window_baseline_math():
+    from src.pipeline.train import _seasonal_naive_wmape_on_frame
+    import numpy as np
+    tv = np.array([1., 2., 3., 4., 5., 6., 7., 10., 20., 30., 40., 50., 60., 70.])
+    # tail7 = [10..70]; fold starts 2024-01-01 → h=1 → pred tail7[0]=10; h=2 → 20
+    frame = _frame([
+        {"fold": 0, "date": pd.Timestamp("2024-01-01"), "actual": 12.0, "train_values": tv},
+        {"fold": 0, "date": pd.Timestamp("2024-01-02"), "actual": 18.0, "train_values": tv},
+    ])
+    got = _seasonal_naive_wmape_on_frame(frame, "date")
+    assert got == pytest.approx((abs(12 - 10) + abs(18 - 20)) / (12 + 18))
+
+
+def test_247_gate_uses_same_window_baseline_over_single_tail(monkeypatch):
+    # Single-tail naive says 0.30 (easy window) → would BLOCK a 0.40
+    # challenger; the same-window naive says 0.50 (it faced the hard folds
+    # too) → the challenger passes. The frame must win.
+    import numpy as np
+    _reg(monkeypatch, champion_wmape=None)
+    monkeypatch.setattr(
+        "src.validation.backtest_gate.score_seasonal_naive",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+            "single-tail baseline must NOT be called when the frame is usable")),
+    )
+    tv = np.full(14, 10.0)          # naive predicts 10 everywhere
+    frame = _frame([
+        {"fold": 0, "date": pd.Timestamp("2024-01-01"), "actual": 20.0, "train_values": tv},
+        {"fold": 1, "date": pd.Timestamp("2024-02-01"), "actual": 5.0,  "train_values": tv},
+    ])
+    # same-window baseline = (10+5)/25 = 0.6; challenger 0.40 beats it
+    agg = {"wmape_global": 0.40, "mase_global": 1.0}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme", wf_combined=frame)
+    assert blocked is False and verdict.passed is True
+    assert verdict.baseline_wmape == pytest.approx(0.6)
+
+
+def test_247_unusable_frame_falls_back_to_single_tail(monkeypatch):
+    _reg(monkeypatch, champion_wmape=None)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.40, "mase_global": 1.0}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme", wf_combined=None)
+    assert blocked is False and verdict.baseline_wmape == pytest.approx(0.50)
+
+
+def test_247_pipeline_passes_wf_frame():
+    from pathlib import Path
+    src = Path("src/pipeline/train.py").read_text()
+    assert "wf_combined=wf_result.combined" in src
+
+
+def test_248_probe_excludes_gate_blocked_runs():
+    from pathlib import Path
+    sh = Path("scripts/model_age_check.sh").read_text()
+    assert "gate_passed IS DISTINCT FROM FALSE" in sh, (
+        "a BLOCKED retrain must not reset model_age while the champion stays old"
+    )
+
+
+def test_247b_pre_honesty_era_champion_is_not_comparable(monkeypatch):
+    # A champion measured under the PRE-2026-06-28 methodology (flattered by
+    # HPO-on-the-reported-window etc.; era marker = mase_seasonal is NULL)
+    # must not gate an honest challenger — first-model semantics instead.
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.297, mase=0.95,
+                            mase_seasonal=None, gate_passed=None)]   # May-era run
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    _baseline(monkeypatch, wmape=0.90)
+    agg = {"wmape_global": 0.84, "mase_global": 17.0}   # honest, beats naive
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
+    assert blocked is False and verdict.passed is True   # promoted as first model
