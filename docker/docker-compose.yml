@@ -202,7 +202,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    command: rq worker sku-training --url redis://redis:6379
+    # #265: heal runs orphaned by the previous worker's death (deploy/crash)
+    # BEFORE taking the queue; `|| true` — a reconcile failure must never
+    # block the worker (next restart retries), then exec replaces the shell.
+    command: >
+      sh -c "python -m src.pipeline.reconcile_runs || true;
+      exec rq worker sku-training --url redis://redis:6379"
     environment:
       <<: *common-env
       DB_HOST_OVERRIDE: "pgbouncer:6432"   # #186 step 5 — see api block
