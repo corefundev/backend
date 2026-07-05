@@ -130,11 +130,17 @@ class EnsembleForecaster:
         y:         pd.Series,
         quantiles: list[float] | None = None,
         groups:    pd.Series | None = None,
+        target_censor: pd.Series | None = None,
     ) -> "EnsembleForecaster":
-        """Quantile sub-models live only on the primary child."""
+        """Quantile sub-models live only on the primary child.
+
+        target_censor (#228): passed through to the child — the prod crash of
+        2026-07-05 (attempt-3 retrain) was exactly this signature missing here
+        while the pipeline helper passes the kwarg unconditionally."""
         if not self.models_:
             raise RuntimeError("Call fit() before fit_quantiles()")
-        self.models_[self.primary_objective].fit_quantiles(X, y, quantiles, groups=groups)
+        self.models_[self.primary_objective].fit_quantiles(
+            X, y, quantiles, groups=groups, target_censor=target_censor)
         return self
 
     def calibrate_conformal(self, *args, **kwargs) -> dict:
