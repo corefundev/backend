@@ -29,7 +29,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from src.audit.log import EVT_ADMIN_ACTION, record_event
+from src.audit import EVT_ADMIN_ACTION, record_event
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
 from src.clients.registry import get_registry
 from src.notifications.telegram import (
