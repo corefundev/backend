@@ -295,11 +295,22 @@ def _emit_training_inbox_row(client_id, run_id, notif_args) -> None:
     raises past this frame)."""
     try:
         from src.storage.notifications import emit_notification
-        if notif_args.get("gate_passed") is False:
+        if notif_args.get("gate_blocked"):
             emit_notification(
                 client_id, type="gate_blocked", severity="warning",
                 title="Обучение завершено — новая модель не прошла контроль качества",
                 body="Продолжает работать предыдущая модель; прогнозы не ухудшились.",
+                dedup_key=f"training:{run_id}" if run_id else None,
+            )
+        elif notif_args.get("gate_passed") is False:
+            # #268: promoted DESPITE a FAIL verdict (first model — nothing to
+            # keep serving instead). Honest wording: it works, quality below
+            # the naive benchmark.
+            emit_notification(
+                client_id, type="training_finished", severity="warning",
+                title="Обучение завершено — качество ниже эталона",
+                body="Модель обучена и работает. Точность пока ниже простого сезонного "
+                     "прогноза — проверьте полноту истории продаж и переобучите позже.",
                 dedup_key=f"training:{run_id}" if run_id else None,
             )
         else:
@@ -337,6 +348,10 @@ def _notify_finished_idempotent(
         mase=metrics.get("mase_global",  metrics.get("mase_mean")),
         mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
         gate_passed=(result.get("gate") or {}).get("passed"),
+        gate_blocked=(
+            (result.get("gate") or {}).get("passed") is False
+            and not result.get("model_path")
+        ),
     )
 
     should_notify = True

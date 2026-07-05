@@ -40,7 +40,8 @@ def _reg(monkeypatch, champion_wmape):
     runs = []
     if champion_wmape is not None:
         runs = [SimpleNamespace(status="finished", wmape=champion_wmape,
-                                mase=1.0, mase_seasonal=1.1, gate_passed=None)]
+                                mase=1.0, mase_seasonal=1.1, gate_passed=None,
+                                model_path="s3://m/model.pkl")]
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -106,8 +107,10 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
     # served.
     import src.storage.training_runs as truns
     runs = [
-        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, mase_seasonal=1.0, gate_passed=False),
-        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, mase_seasonal=1.2, gate_passed=True),
+        SimpleNamespace(status="finished", wmape=0.20, mase=0.8, mase_seasonal=1.0,
+                        gate_passed=False, model_path=None),          # blocked: no artifact
+        SimpleNamespace(status="finished", wmape=0.45, mase=1.0, mase_seasonal=1.2,
+                        gate_passed=True, model_path="s3://m/model.pkl"),
     ]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
@@ -131,8 +134,9 @@ def test_pipeline_wires_gate_before_final_fit():
 def test_task_queue_persists_and_notifies_gate():
     from pathlib import Path
     src = Path("src/pipeline/task_queue.py").read_text()
-    assert src.count('(result.get("gate") or {}).get("passed")') == 2, (
-        "gate_passed must flow to BOTH the registry row and the notifiers"
+    # 3 = registry row + notifier gate_passed + gate_blocked derivation (#268)
+    assert src.count('(result.get("gate") or {}).get("passed")') == 3, (
+        "gate_passed must flow to the registry row, the notifiers, and the blocked flag"
     )
 
 
@@ -193,9 +197,12 @@ def test_247_pipeline_passes_wf_frame():
 
 
 def test_248_probe_excludes_gate_blocked_runs():
+    # #268 refined the marker: blocked runs have model_path NULL by
+    # construction, so the artifact filter keeps the #248 invariant AND
+    # lets a promoted-first-model (FAIL verdict, artifact saved) reset age.
     from pathlib import Path
     sh = Path("scripts/model_age_check.sh").read_text()
-    assert "gate_passed IS DISTINCT FROM FALSE" in sh, (
+    assert "model_path IS NOT NULL" in sh, (
         "a BLOCKED retrain must not reset model_age while the champion stays old"
     )
 
@@ -213,3 +220,61 @@ def test_247b_pre_honesty_era_champion_is_not_comparable(monkeypatch):
     agg = {"wmape_global": 0.84, "mase_global": 17.0}   # honest, beats naive
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
     assert blocked is False and verdict.passed is True   # promoted as first model
+
+
+# ── #268: serving marker = artifact, not verdict (battle lesson 4) ────────────
+
+def test_268_promoted_first_model_with_fail_verdict_becomes_champion(monkeypatch):
+    # attempt-4 reality: promoted (model_path set) with gate_passed=False —
+    # MUST be the next run's champion, else "no champion" loops forever.
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.837, mase=17.0,
+                            mase_seasonal=0.9, gate_passed=False,
+                            model_path="s3://m/model.pkl")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    _baseline(monkeypatch, wmape=0.90)
+    agg = {"wmape_global": 0.99, "mase_global": 20.0}   # worse than champion AND naive
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
+    assert blocked is True, "champion exists (it serves!) → a worse challenger must block"
+    assert verdict.champion_wmape == pytest.approx(0.837)
+
+
+def test_268_blocked_run_still_not_champion(monkeypatch):
+    # blocked = no artifact — stays excluded (model_path None)
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.20, mase=0.8,
+                            mase_seasonal=1.0, gate_passed=False, model_path=None)]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    _baseline(monkeypatch, wmape=0.90)
+    agg = {"wmape_global": 0.50, "mase_global": 1.0}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
+    assert blocked is False and verdict.passed is True   # no champion → first-model
+
+
+def test_268_probe_keys_on_artifact_not_verdict():
+    from pathlib import Path
+    sh = Path("scripts/model_age_check.sh").read_text()
+    assert "model_path IS NOT NULL" in sh
+    assert "gate_passed IS DISTINCT FROM FALSE" not in sh, (
+        "verdict-keyed probe hides the SERVING promoted-first-model (#268)"
+    )
+
+
+def test_268_notifiers_branch_on_blocked_and_accept_kwarg():
+    # the #266 lesson, applied preemptively: notif_args now carries
+    # gate_blocked — BOTH senders must accept it, and wording must branch
+    # on blocked (previous serves) vs fail-but-promoted (nothing previous).
+    import inspect
+    from src.notifications.training_email import notify_training_finished as e
+    from src.notifications.telegram import notify_training_finished as t
+    for fn in (e, t):
+        assert "gate_blocked" in inspect.signature(fn).parameters
+    from pathlib import Path
+    tq = Path("src/pipeline/task_queue.py").read_text()
+    assert 'notif_args.get("gate_blocked")' in tq
+    assert "качество ниже эталона" in tq                  # promoted-with-FAIL inbox row
+    for p in ("src/notifications/training_email.py", "src/notifications/telegram.py"):
+        src = Path(p).read_text()
+        assert "качество ниже эталона" in src, p

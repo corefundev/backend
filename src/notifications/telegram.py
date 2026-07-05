@@ -172,22 +172,27 @@ def notify_training_finished(
     mase:          Optional[float] = None,
     mase_seasonal: Optional[float] = None,
     gate_passed:   Optional[bool]  = None,
+    gate_blocked:  Optional[bool]  = None,
 ) -> None:
     """Best-effort Telegram nudge on successful training. Never raises.
 
-    QW2-4 #227: gate_passed=False → честный заголовок — новая модель не
-    прошла контроль качества, продолжает работать предыдущая."""
+    QW2-4 #227 / #268: gate_blocked → «продолжает работать предыдущая»;
+    FAIL-вердикт БЕЗ блокировки (промоутнутая первая модель) → честное
+    «качество ниже эталона» — предыдущей модели не существует."""
     try:
         chat_id, opted_in = _client_telegram(client_id)
         if chat_id is None or not opted_in:
             return
         base = _frontend_base_url()
-        header = (
-            "<b>⚠ Обучение завершено — модель не прошла контроль качества</b>\n"
-            "Продолжает работать предыдущая модель.\n\n"
-            if gate_passed is False else
-            "<b>✓ Обучение завершено</b>\n\n"
-        )
+        if gate_blocked:
+            header = ("<b>⚠ Обучение завершено — модель не прошла контроль "
+                      "качества</b>\nПродолжает работать предыдущая модель.\n\n")
+        elif gate_passed is False:
+            header = ("<b>⚠ Обучение завершено — качество ниже эталона</b>\n"
+                      "Модель работает; рекомендуем проверить полноту данных "
+                      "и переобучить позже.\n\n")
+        else:
+            header = "<b>✓ Обучение завершено</b>\n\n"
         text = (
             header
             + f"Аккаунт: <code>{client_id}</code>\n"

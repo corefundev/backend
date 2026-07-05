@@ -7,9 +7,10 @@
 # #151/#219 measurements show real drift 1-3 months after training (interval
 # coverage 0.805 → ~0.75, WMAPE degrades). This pushes one gauge per client
 # with the age of its newest PROMOTED training run so ModelStale can fire.
-# #248: gate-BLOCKED runs (gate_passed = FALSE, model never saved) are
-# excluded — a blocked retrain must not reset the age while the served
-# champion stays old (NULL = pre-gate runs remain eligible).
+# #248/#268: age keys on the newest run whose ARTIFACT exists (model_path) —
+# the serving marker. Blocked runs have model_path NULL by construction and
+# don't reset age; a promoted-first-model with an honest FAIL verdict DOES
+# (it serves). gate_passed alone conflates verdict with promotion (#268).
 # (prod-only rule — staging's ancient test runs would be chronic noise).
 #
 # Runs hourly in the backup container (psql + DATABASE_URL + pushgateway are
@@ -41,7 +42,7 @@ AGES=$(psql "$DATABASE_URL" -tAF' ' -c "
            FLOOR(EXTRACT(EPOCH FROM (now() - MAX(ended_at))))::bigint
     FROM sku_training_runs
     WHERE status = 'finished' AND ended_at IS NOT NULL
-      AND gate_passed IS DISTINCT FROM FALSE
+      AND model_path IS NOT NULL
       AND client_id ~ '^[A-Za-z0-9_-]+$'
     GROUP BY client_id
 " 2>/dev/null)
