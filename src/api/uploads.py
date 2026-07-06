@@ -21,6 +21,7 @@ flow is: POST upload → poll until status=processed → POST
 from __future__ import annotations
 
 import logging
+from typing import Optional
 import os
 from dataclasses import asdict
 
@@ -46,7 +47,7 @@ class UploadAcceptedResponse(BaseModel):
     size_bytes: int
     sha256: str
     status: str
-    scan_job_id: str | None = None
+    scan_job_id: Optional[str] = None
 
 
 class UploadStatusResponse(BaseModel):
@@ -56,11 +57,11 @@ class UploadStatusResponse(BaseModel):
     size_bytes: int
     sha256: str
     status: str
-    scan_result: str | None
-    error_message: str | None
-    processed_key: str | None
-    row_count: int | None
-    sku_count: int | None
+    scan_result: Optional[str]
+    error_message: Optional[str]
+    processed_key: Optional[str]
+    row_count: Optional[int]
+    sku_count: Optional[int]
     created_at: str
     updated_at: str
 
@@ -206,3 +207,30 @@ async def cancel_upload(
     from src.storage.upload_pipeline import cancel_upload as _cancel
     _cancel(upload_id)
     return
+
+
+# ── ADM-6 (#259): «Данные» — cross-client uploads oversight ──────────────────
+
+@router.get("/admin/uploads")
+def admin_uploads(
+    limit: int = 50,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Uploads feed across all clients: status (incl. quarantine —
+    scan_result carries the ClamAV verdict), row/SKU counts, validation
+    errors. Read-only; the operator sees a stuck/broken upload before the
+    support ticket arrives."""
+    auth.require_role("admin")
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be 1..200")
+    from dataclasses import asdict
+    from src.storage.upload_registry import get_upload_registry
+    try:
+        rows = [asdict(r) for r in get_upload_registry().list_recent(limit)]
+        for r in rows:
+            r.pop("sha256", None)          # оператору не нужен, укорачиваем ответ
+    except Exception as e:    # noqa: BLE001
+        logger.warning("uploads oversight failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="uploads temporarily unavailable") from e
+    return {"uploads": rows, "count": len(rows)}

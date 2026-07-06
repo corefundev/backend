@@ -135,6 +135,7 @@ class UploadRegistry:
     def list_for_client(
         self, client_id: str, limit: int = 50
     ) -> list[UploadRecord]: ...
+    def list_recent(self, limit: int = 50) -> list[UploadRecord]: ...
     def delete(self, upload_id: str) -> bool: ...   # True if a row was removed
 
 
@@ -225,6 +226,19 @@ class PostgresUploadRegistry(UploadRegistry):
         logger.info(f"upload {upload_id}: {row['status']} → {new_status}")
         return self._row_to_record(dict(updated))
 
+    def list_recent(self, limit: int = 50) -> list[UploadRecord]:
+        """ADM-6 (#259): cross-client feed for the admin console — the
+        operator sees a client stuck on a broken file before the ticket."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM sku_uploads "
+                    "ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        return [self._row_to_record(dict(r)) for r in rows]
+
     def list_for_client(self, client_id: str, limit: int = 50) -> list[UploadRecord]:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
@@ -314,6 +328,13 @@ class LocalFileUploadRegistry(UploadRegistry):
         self._save(data)
         logger.info(f"upload {upload_id}: → {new_status}")
         return UploadRecord(**row)
+
+    def list_recent(self, limit: int = 50) -> list[UploadRecord]:
+        """ADM-6 (#259): cross-client feed (JSON-file variant for dev)."""
+        data = self._load()
+        rows = sorted(data.values(), key=lambda r: r.get("created_at", ""),
+                      reverse=True)[:limit]
+        return [UploadRecord(**r) for r in rows]
 
     def list_for_client(self, client_id: str, limit: int = 50) -> list[UploadRecord]:
         data = self._load()

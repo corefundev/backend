@@ -36,7 +36,7 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 58  # +1 ADM-12 #280 (GET admin security), 2026-07-07
+_EXPECTED_ROUTE_COUNT = 58  # ADM-6 #259 admin-uploads живёт в src/api/uploads.py — вне R5-M1-инвентаря (main+routers/)
 
 
 def _collect_routes() -> list[tuple[str, str, str]]:

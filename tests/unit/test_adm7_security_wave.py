@@ -25,9 +25,10 @@ def _admin_routes():
     os.environ.setdefault("API_KEY", "y" * 40)
     from src.api.routers import (auth, clients, config, inference, legal,
                                  notifications, ops, plans, training)
+    from src.api import uploads   # роутер вне routers/ — H1 обязан видеть и его
     routes = []
     for mod in (auth, clients, config, inference, legal, notifications, ops,
-                plans, training):
+                plans, training, uploads):
         for r in mod.router.routes:
             if "/admin" in getattr(r, "path", ""):
                 routes.append((r.path, r.endpoint))
