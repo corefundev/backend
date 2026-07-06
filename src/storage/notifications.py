@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 VALID_SEVERITIES = {"info", "success", "warning", "error"}
 
+# NC-5 (#250): the type taxonomy of record — single source; emitters and the
+# FE (severity styling, future per-type routing NC-7) key off these. An
+# UNKNOWN type is logged loudly but not rejected (forward-compat: an old api
+# node must not drop an emit from a newer worker during a rolling deploy).
+NOTIFICATION_TYPES = frozenset({
+    "training_finished", "training_failed", "gate_blocked",
+    "model_stale", "upload_processed", "upload_failed",
+    "quota_warning", "announcement", "system", "security_alert",
+})
+
 
 class PostgresNotificationsRegistry:
     def __init__(self, database_url: str):
@@ -54,6 +64,9 @@ class PostgresNotificationsRegistry:
         """Insert one notification. Returns False when dedup suppressed it."""
         if severity not in VALID_SEVERITIES:
             severity = "info"
+        if type not in NOTIFICATION_TYPES:
+            logger.warning("notification with unknown type %r (client=%s) — "
+                           "emitting anyway (forward-compat)", type, client_id)
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """

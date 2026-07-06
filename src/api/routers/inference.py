@@ -397,6 +397,16 @@ def predict(
         plan_spec = get_plan_spec(record.plan)
         check_predict_attempt(client_id, plan_spec.predict_requests_per_hour)
     except RateLimited as e:
+        # NC-5 (#250): one inbox row per day (dedup) — friction visible,
+        # not a flood; best-effort before the raise.
+        from datetime import datetime, timezone
+        from src.storage.notifications import emit_notification
+        emit_notification(
+            client_id, type="quota_warning", severity="warning",
+            title="Ограничение тарифа: лимит запросов прогноза",
+            body=str(e)[:300],
+            dedup_key=f"quota_predict_{datetime.now(timezone.utc).date()}",
+        )
         raise HTTPException(
             status_code=429, detail=str(e),
             headers={"Retry-After": str(e.retry_after_sec or 60)},
