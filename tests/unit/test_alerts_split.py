@@ -48,7 +48,7 @@ PROD_ONLY_RULES = frozenset({
     # Model staleness (QW2-3 #226) — prod-only: staging's ancient test
     # training runs would make ModelStale chronic noise (PgReplicaLagHigh
     # precedent); the probe freshness guard lives with its rule.
-    "ModelStale",
+    "StalenessNudgeStale",
     "ModelAgeCheckStale",
     # postgres-replica streaming metrics (`job="postgres-replica"`).
     "PgReplicaLagHigh",
@@ -247,6 +247,7 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #                       +1 R11-#80 PostgresArchiveModeOff (2026-06-06);
     #                       +1 R11-#80 PostgresArchiveModeCheckStale (2026-06-08);
     #                       +2 QW2-3 #226 ModelStale + ModelAgeCheckStale (2026-07-05)
+    #                       NC-4 #244: ModelStale → StalenessNudgeStale (−1+1, итог тот же; 2026-07-07)
 
     total = len(shared) + len(prod_only)
     assert total == EXPECTED_TOTAL, (
