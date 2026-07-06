@@ -995,40 +995,35 @@ tests:
         alertname: SyntheticAlertTest
         exp_alerts: []
 
-  # ── ModelStale / ModelAgeCheckStale (QW2-3 #226) ─────────────────────────
+  # ── StalenessNudgeStale / ModelAgeCheckStale (QW2-3 #226 → NC-4 #244) ────
+  # NC-4: per-client ModelStale retired (the USER owns staleness via NC-3
+  # nudges); ops watches the MACHINERY: nudge-cron freshness + probe health.
   - interval: 1m
-    name: "ModelStale fires for a 46-day-old model after the 6h for-window"
+    name: "StalenessNudgeStale fires when the nudge cron stops (>50h + 30m for)"
     # 1m sampling: with sparser samples the 5m staleness lookback would empty
     # the instant vector between points and keep resetting the for-clock — a
     # test-harness artifact only (prod scrapes pushgateway continuously).
     input_series:
-      - series: 'model_age_seconds{client_id="acme", instance="sku-forecasting", job="model_age_check"}'
-        values: '3974400x421'         # 46 days, constant, sampled every 1m
+      - series: 'sku_staleness_nudge_last_success_timestamp_seconds{instance="sku-forecasting", job="staleness_nudge"}'
+        values: '0x3121'              # frozen at 0, sampled every 1m for 52h
     alert_rule_test:
-      - eval_time: 7h
-        alertname: ModelStale
-        exp_alerts:
-          - exp_labels: {client_id: "acme", instance: "sku-forecasting", job: "model_age_check", severity: warning, team: forecasting}
-            exp_annotations:
-              summary: "Client acme model is stale (>45d)"
-              description: "The newest FINISHED training run for client acme is older than 45 days. Measured drift (#151/#219): interval coverage degrades from 0.805 toward ~0.75 over 1-3 months. Nudge the client to retrain, or investigate why their retraining stopped."
-
-  - interval: 1m
-    name: "ModelStale does NOT fire under the 45-day threshold"
-    input_series:
-      - series: 'model_age_seconds{client_id="acme", instance="sku-forecasting", job="model_age_check"}'
-        values: '3801600x421'         # 44 days
-    alert_rule_test:
-      - eval_time: 7h
-        alertname: ModelStale
+      - eval_time: 40h                # 144000 < 180000 → healthy
+        alertname: StalenessNudgeStale
         exp_alerts: []
+      - eval_time: 51h                # 183600 > 180000, past for:30m → fires
+        alertname: StalenessNudgeStale
+        exp_alerts:
+          - exp_labels: {instance: "sku-forecasting", job: "staleness_nudge", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "staleness nudge cron is stale (>50h)"
+              description: "scripts/staleness_nudge.sh (daily 07:15, backup container) hasn't pushed a success in 50+h — stale-model clients are no longer being nudged (NC-3 #243). Check /var/log/staleness_nudge.log in docker-backup-1, the api /internal/staleness-nudge endpoint, and pushgateway reachability."
 
   - interval: 1h
-    name: "ModelStale does NOT fire when the metric is absent (fresh deploy)"
+    name: "StalenessNudgeStale does NOT fire when metric absent (fresh deploy; dead crond covered by *CronSilent)"
     input_series: []
     alert_rule_test:
-      - eval_time: 7h
-        alertname: ModelStale
+      - eval_time: 5h
+        alertname: StalenessNudgeStale
         exp_alerts: []
 
   - interval: 1m
@@ -1046,7 +1041,7 @@ tests:
           - exp_labels: {instance: "sku-forecasting", job: "model_age_check", severity: warning, team: forecasting}
             exp_annotations:
               summary: "model_age_check probe is stale (>3h)"
-              description: "scripts/model_age_check.sh (hourly, backup container) has not pushed model_age_check_timestamp_seconds in 3h — ModelStale is now blind (frozen ages could mask real staleness). Check /var/log/model_age_check.log in docker-backup-1 and pushgateway reachability."
+              description: "scripts/model_age_check.sh (hourly, backup container) has not pushed model_age_check_timestamp_seconds in 3h — the staleness NUDGE and the admin console are now blind on model ages (frozen ages could mask real staleness). Check /var/log/model_age_check.log in docker-backup-1 and pushgateway reachability."
 
   - interval: 1h
     name: "ModelAgeCheckStale does NOT fire when metric absent (no absent() arm by design — fresh deploy storm-safety; dead crond is covered by *CronSilent)"
