@@ -169,6 +169,17 @@ def _build_calendar_features(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     df["dayofweek_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7)
     df["month_sin"]     = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"]     = np.cos(2 * np.pi * df["month"] / 12)
+    # #230 QW2-B3: RU salary cycle. Аванс/зарплата кластеризуются вокруг
+    # 1-го, 15-го и 25-го — спрос в ритейле дышит этим циклом. Расстояние
+    # до ближайшего payday (в обе стороны, дни) + окно ±2 дня. Фиксированный
+    # календарный цикл — считается из даты, лика нет, серв идентичен трейну.
+    dom = df["dayofmonth"]
+    dist = np.minimum.reduce([
+        np.abs(dom - 1), np.abs(dom - 15), np.abs(dom - 25),
+        np.abs(dom - 31) + 1,     # «до 1-го следующего» с конца месяца
+    ])
+    df["days_to_payday"]   = dist.astype(float)
+    df["is_payday_window"] = (dist <= 2).astype(int)
     return df
 
 
