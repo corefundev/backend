@@ -126,10 +126,17 @@ yc lockbox secret add-version --id <SECRET_ID> \
 #    full compose stack + --no-deps per feedback_manual_recreate_full_stack):
 docker compose <FULL_COMPOSE_ARGS> up -d --force-recreate --no-deps api worker
 
-# 4. Verify: OLD key → 401, NEW key → 200 on POST /auth/token; the successful
+# 4. Stamp the rotation marker so the console's Безопасность page shows key
+#    age (ADM-12; a KV marker, NOT an audit row — manual audit INSERTs would
+#    break the HMAC chain):
+docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c \
+  "INSERT INTO ops_settings(key, value) VALUES ('admin_api_key_rotated_at', now()::text)
+   ON CONFLICT (key) DO UPDATE SET value = now()::text, updated_at = now()"
+
+# 5. Verify: OLD key → 401, NEW key → 200 on POST /auth/token; the successful
 #    issuance lands in audit_log (admin_token_issued) AND ops-Telegram (H3).
 
-# 5. Already-issued admin JWTs stay valid ≤ ADMIN_JWT_EXPIRE_MINUTES (30) —
+# 6. Already-issued admin JWTs stay valid ≤ ADMIN_JWT_EXPIRE_MINUTES (30) —
 #    for immediate kill, revoke via the jti denylist (R5-M7).
 ```
 
