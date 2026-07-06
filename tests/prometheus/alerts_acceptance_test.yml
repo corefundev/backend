@@ -1025,6 +1025,8 @@ tests:
       - eval_time: 5h
         alertname: StalenessNudgeStale
         exp_alerts: []
+
+  - interval: 1m
     name: "ModelAgeCheckStale fires when the probe stops pushing (>3h + 30m for)"
     input_series:
       - series: 'model_age_check_timestamp_seconds{instance="sku-forecasting", job="model_age_check"}'
