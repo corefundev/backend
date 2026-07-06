@@ -79,3 +79,5 @@ src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: 
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
 src/api/routers/clients.py:455  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly
 src/api/routers/clients.py:463  ADM-3 #256 — overview runs-enrichment guard: same rationale as :455
+src/notifications/staleness_nudge.py:108  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly
+src/notifications/staleness_nudge.py:116  NC-3 #243 — telegram-push guard: same rationale as :108

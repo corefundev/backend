@@ -215,3 +215,20 @@ async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_c
     invalidate_service_cache(client_id)
     get_or_load(client_id, load_factory=load_service_for_client)
     return {"client_id": client_id, "status": "reloaded"}
+
+
+@router.post("/internal/staleness-nudge")
+def internal_staleness_nudge(auth: AuthContext = Depends(get_current_client)):
+    """NC-3 (#243): daily cron entry (backup container → this endpoint —
+    the R7-2 pattern: senders live in the app image). Emits model-staleness
+    inbox rows (45d/90d, dedup-idempotent) + email/tg pushes gated by
+    30-day activity. Sync def → FastAPI threadpool (SMTP/psycopg are
+    blocking)."""
+    auth.require_role("admin")
+    from src.notifications.staleness_nudge import run_staleness_nudge
+    try:
+        return run_staleness_nudge()
+    except Exception as e:    # noqa: BLE001
+        logger.warning("staleness nudge failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="staleness nudge failed") from e
