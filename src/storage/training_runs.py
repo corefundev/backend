@@ -208,6 +208,19 @@ class PostgresTrainingRunsRegistry:
                 )
                 return [self._row_to_record(dict(r)) for r in cur.fetchall()]
 
+    def list_recent(self, limit: int = 50) -> list[TrainingRunRecord]:
+        """ADM-2 (#255): cross-client feed for the admin console. Replica
+        read — the oversight page tolerates seconds of replication lag."""
+        with self._conn_read() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM sku_training_runs "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC NULLS LAST "
+                    "LIMIT %s",
+                    (limit,),
+                )
+                return [self._row_to_record(dict(r)) for r in cur.fetchall()]
+
     def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
         # Read path → replica when configured.
         with self._conn_read() as conn:
