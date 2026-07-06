@@ -21,6 +21,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -307,3 +308,66 @@ def admin_system(auth: AuthContext = Depends(get_current_client)):
     return {"components": components, "jobs": jobs,
             "models_cached": len(cached_client_ids()),
             "storage_backend": os.getenv("STORAGE_BACKEND", "local")}
+
+
+# ── ADM-5 (#258): audit-log viewer for the console ───────────────────────────
+
+# Filterable event types — mirrors the EVT_* catalog in src/audit/log.py.
+# A whitelist, not passthrough: the viewer can never smuggle SQL through
+# the type filter.
+_AUDIT_EVENT_TYPES = frozenset({
+    "login", "logout", "otp_send", "otp_verify", "oauth_callback", "signup",
+    "password_change", "plan_change", "email_change", "model_train",
+    "model_delete", "upload_delete", "secret_rotation", "admin_action",
+})
+
+
+@router.get("/admin/audit")
+def admin_audit_log(
+    client_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    days: int = 7,
+    limit: int = 100,
+    offset: int = 0,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Journal viewer (152-ФЗ posture: who did what, provable). Metadata
+    payloads are NOT returned — they may carry PII fragments; the row
+    identity (who/what/when/ip/success) is the viewer's contract, deep
+    payloads stay psql-only. Integrity check = the existing
+    /internal/audit/verify chain walk (on-demand from the page)."""
+    auth.require_role("admin")
+    if event_type is not None and event_type not in _AUDIT_EVENT_TYPES:
+        raise HTTPException(status_code=422, detail="unknown event_type")
+    if not (1 <= limit <= 500) or offset < 0 or not (1 <= days <= 365):
+        raise HTTPException(status_code=422, detail="bad pagination/window")
+    from src.audit.log import _connect
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, ts, event_type, event_subtype, client_id,
+                       actor_email, ip, success, target_type, target_id
+                FROM audit_log
+                WHERE ts >= now() - make_interval(days => %s)
+                  AND (%s::text IS NULL OR client_id = %s)
+                  AND (%s::text IS NULL OR event_type = %s)
+                ORDER BY id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (days, client_id, client_id, event_type, event_type,
+                 limit, offset),
+            )
+            rows = [
+                {"id": r[0], "ts": r[1].isoformat(), "event_type": r[2],
+                 "event_subtype": r[3], "client_id": r[4],
+                 "actor_email": r[5], "ip": r[6], "success": r[7],
+                 "target_type": r[8], "target_id": r[9]}
+                for r in cur.fetchall()
+            ]
+    except Exception as e:    # noqa: BLE001
+        logger.warning("audit viewer failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="audit temporarily unavailable") from e
+    return {"events": rows, "count": len(rows),
+            "event_types": sorted(_AUDIT_EVENT_TYPES)}

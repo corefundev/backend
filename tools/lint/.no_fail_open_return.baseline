@@ -61,7 +61,7 @@ src/audit/log.py:486  pre-R9 baseline; triage in R10 — recent_failed_logins re
 src/audit/log.py:566  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines R10 phantom-metric; +10 R13-3 no-gap, 2026-06-23)
 src/api/routers/auth.py:468  pre-R9 baseline; triage in R10 — signup OAuth race retry (was :362, +63 after ARCH-2 #206 shared-guard helpers added above) (was :425, +38 ADM-7 H3 tripwire helper) (+5 ADM-10 token gate)
 src/api/routers/config.py:284  pre-R9 baseline; triage in R10 — config-reset write fallback (was :201, +70 lines #95; +13 R13-2 horizon-clamp wiring, 2026-06-22)
-src/api/routers/ops.py:150  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. (was :145, +5 CONTRACT-2 #208 probe-contract docstring)
+src/api/routers/ops.py:151  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. (was :145, +5 CONTRACT-2 #208 probe-contract docstring) (+1 Optional import)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
 src/api/routers/notifications.py:157  pre-R9 baseline; triage in R10 — telegram_webhook intentional 200 (webhook ack semantics) (was :152, +4 #184 run_in_threadpool import+comment) (was :156, +1 R5-M6 hoist)
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
@@ -81,6 +81,6 @@ src/api/routers/clients.py:455  ADM-3 #256 — overview logins-enrichment guard:
 src/api/routers/clients.py:463  ADM-3 #256 — overview runs-enrichment guard: same rationale as :455
 src/notifications/staleness_nudge.py:108  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly
 src/notifications/staleness_nudge.py:116  NC-3 #243 — telegram-push guard: same rationale as :108
-src/api/routers/ops.py:278  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500
-src/api/routers/ops.py:303  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it)
-src/api/routers/ops.py:272  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278)
+src/api/routers/ops.py:279  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500
+src/api/routers/ops.py:304  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it)
+src/api/routers/ops.py:273  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278)
