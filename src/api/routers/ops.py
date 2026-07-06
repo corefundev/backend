@@ -232,3 +232,78 @@ def internal_staleness_nudge(auth: AuthContext = Depends(get_current_client)):
         logger.warning("staleness nudge failed: %s", e)
         raise HTTPException(status_code=503,
                             detail="staleness nudge failed") from e
+
+
+# ── ADM-13 (#281): «Система» — health + cron-job ages for the console ────────
+
+# Expected cadence per pushgateway job (seconds) — «постарше каденса ×1.5+
+# слак» рисуется как проблема на странице. Jobs push `push_time_seconds`
+# automatically (pushgateway meta-metric), so new crons appear here без
+# кода — просто без declared cadence.
+_JOB_CADENCE_SEC = {
+    "backup":            26 * 3600,       # daily 02:10 (+slack)
+    "base_backup":       8 * 86400,       # weekly Sun
+    "mirror_prune":      26 * 3600,
+    "model_age_check":   2 * 3600,        # hourly
+    "staleness_nudge":   26 * 3600,
+    "audit_verify":      26 * 3600,
+    "wal_mirror":        30 * 60,         # */5
+    "archive_mode_check": 30 * 60,
+}
+
+
+@router.get("/admin/system")
+def admin_system(auth: AuthContext = Depends(get_current_client)):
+    """Component pings + cron-job freshness (parsed from pushgateway's
+    push_time_seconds meta-metric — the same source Prometheus scrapes,
+    so the page can never disagree with alerting). Grafana/MLflow are
+    NOT publicly proxied — access stays SSH-tunnel per runbook; the page
+    states that instead of dead links."""
+    auth.require_role("admin")
+    import time
+    import urllib.request
+
+    components: dict = {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=3)
+        conn.close()
+        components["postgres"] = "ok"
+    except Exception as e:    # noqa: BLE001
+        components["postgres"] = f"error: {type(e).__name__}"
+    try:
+        from src.redis_pool import get_redis_or_none
+        r = get_redis_or_none()
+        components["redis"] = "ok" if (r is not None and r.ping()) else "unavailable"
+    except Exception as e:    # noqa: BLE001
+        components["redis"] = f"error: {type(e).__name__}"
+
+    jobs: list = []
+    pushgateway = os.environ.get("PUSHGATEWAY_URL", "http://pushgateway:9091")
+    try:
+        with urllib.request.urlopen(f"{pushgateway}/metrics", timeout=5) as resp:
+            now = time.time()
+            for line in resp.read().decode().splitlines():
+                if not line.startswith("push_time_seconds{"):
+                    continue
+                try:
+                    labels, val = line.rsplit(" ", 1)
+                    job = labels.split('job="', 1)[1].split('"', 1)[0]
+                    age = now - float(val)
+                except (IndexError, ValueError):
+                    continue
+                cadence = _JOB_CADENCE_SEC.get(job)
+                jobs.append({
+                    "job": job,
+                    "age_sec": int(age),
+                    "cadence_sec": cadence,
+                    "stale": bool(cadence and age > cadence * 1.5),
+                })
+        components["pushgateway"] = "ok"
+    except Exception as e:    # noqa: BLE001
+        components["pushgateway"] = f"error: {type(e).__name__}"
+
+    jobs.sort(key=lambda j: (not j["stale"], j["job"]))
+    return {"components": components, "jobs": jobs,
+            "models_cached": len(cached_client_ids()),
+            "storage_backend": os.getenv("STORAGE_BACKEND", "local")}
