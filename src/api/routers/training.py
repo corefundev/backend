@@ -408,3 +408,41 @@ async def list_training_runs(
             503, detail="training history temporarily unavailable"
         ) from e
     return {"runs": [to_dict(r) for r in runs], "count": len(runs)}
+
+
+# ── ADM-2 (#255): training oversight for the admin console ───────────────────
+
+@router.get("/admin/training-runs")
+def admin_training_runs(
+    limit: int = 50,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Cross-client runs feed + model-age summary in one call (the page's
+    single query). Read-only v1 (zero writes by acceptance); ages use the
+    PROMOTED-run semantics (#248/#268) so a gate-blocked retrain doesn't
+    look fresh. Replica reads — oversight tolerates replication lag."""
+    auth.require_role("admin")
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be 1..200")
+    from src.storage.training_runs import get_training_runs_registry, to_dict
+    try:
+        reg = get_training_runs_registry()
+        runs = [to_dict(r) for r in reg.list_recent(limit)]
+        ages: dict = {}
+        with reg._conn_read() as conn, conn.cursor() as cur:  # noqa: SLF001 — same-module accessor
+            cur.execute(
+                """
+                SELECT client_id,
+                       EXTRACT(EPOCH FROM (now() - max(ended_at))) / 86400
+                FROM sku_training_runs
+                WHERE status = 'finished' AND ended_at IS NOT NULL
+                  AND model_path IS NOT NULL
+                GROUP BY client_id
+                """
+            )
+            ages = {r[0]: round(float(r[1]), 1) for r in cur.fetchall()}
+    except Exception as e:    # noqa: BLE001
+        logger.warning("training oversight failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="oversight temporarily unavailable") from e
+    return {"runs": runs, "model_age_days": ages, "count": len(runs)}
