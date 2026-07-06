@@ -371,3 +371,65 @@ def admin_audit_log(
                             detail="audit temporarily unavailable") from e
     return {"events": rows, "count": len(rows),
             "event_types": sorted(_AUDIT_EVENT_TYPES)}
+
+
+# ── ADM-12 (#280): «Безопасность» — admin sessions + key hygiene ─────────────
+
+@router.get("/admin/security")
+def admin_security(
+    days: int = 30,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Admin-login history (the H3 tripwire's audit rows made visible) +
+    ADMIN_API_KEY age (ops_settings marker stamped by the rotation recipe;
+    NULL until the first recorded rotation — shown honestly as unknown) +
+    ladder statuses (named admins ADM-8, IP-allowlist H8)."""
+    auth.require_role("admin")
+    if not (1 <= days <= 365):
+        raise HTTPException(status_code=422, detail="days must be 1..365")
+    from src.audit.log import _connect
+    logins: list = []
+    rotated_at = None
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, ip, user_agent, client_id
+                FROM audit_log
+                WHERE event_type = 'login'
+                  AND event_subtype = 'admin_token_issued'
+                  AND ts >= now() - make_interval(days => %s)
+                ORDER BY ts DESC LIMIT 100
+                """,
+                (days,),
+            )
+            logins = [{"at": r[0].isoformat(), "ip": r[1],
+                       "user_agent": (r[2] or "")[:80], "session": r[3]}
+                      for r in cur.fetchall()]
+            cur.execute("SELECT value FROM ops_settings "
+                        "WHERE key = 'admin_api_key_rotated_at'")
+            row = cur.fetchone()
+            rotated_at = row[0] if row else None
+    except Exception as e:    # noqa: BLE001
+        logger.warning("security page failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="security data temporarily unavailable") from e
+
+    key_age_days = None
+    if rotated_at:
+        from datetime import datetime, timezone
+        try:
+            dt = datetime.fromisoformat(rotated_at.replace("Z", "+00:00"))
+            key_age_days = round((datetime.now(timezone.utc) - dt)
+                                 .total_seconds() / 86400, 1)
+        except ValueError:
+            logger.warning("security: unparsable rotation marker %r", rotated_at)
+
+    return {
+        "admin_logins": logins,
+        "key_rotated_at": rotated_at,
+        "key_age_days": key_age_days,
+        "key_rotation_due": bool(key_age_days is not None and key_age_days > 90),
+        "named_admins": False,       # ADM-8 (#261): trigger = второй оператор
+        "ip_allowlist": False,       # H8: опция, строится поверх ADM-0 shell
+    }
