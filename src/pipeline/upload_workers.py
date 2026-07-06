@@ -44,6 +44,45 @@ logger = logging.getLogger(__name__)
 
 # ── Job functions (run inside rq workers) ─────────────────────────────────────
 
+
+def _emit_upload_inbox(record) -> None:
+    """NC-5 (#250): inbox row on TERMINAL upload states — the user learns
+    the fate of their file from the bell, not just the uploads page.
+    Best-effort (never fails the job); dedup by upload_id survives RQ
+    retries. Wording is user-facing: validation errors ARE for the user,
+    trimmed; scan verdicts stay generic (no malware-name education)."""
+    try:
+        from src.storage import upload_registry as ur
+        from src.storage.notifications import emit_notification
+        if record.status == ur.PROCESSED:
+            emit_notification(
+                record.client_id, type="upload_processed", severity="success",
+                title="Файл обработан",
+                body=(f"«{record.filename}»: {record.row_count or 0} строк, "
+                      f"{record.sku_count or 0} SKU. Можно запускать обучение."),
+                dedup_key=f"upload:{record.upload_id}",
+            )
+        elif record.status == ur.INFECTED:
+            emit_notification(
+                record.client_id, type="upload_failed", severity="error",
+                title="Файл отклонён проверкой безопасности",
+                body=f"«{record.filename}» не прошёл антивирусную проверку и был удалён.",
+                dedup_key=f"upload:{record.upload_id}",
+            )
+        elif record.status == ur.PROCESSING_FAIL:
+            reason = (record.error_message or "").strip()[:200]
+            emit_notification(
+                record.client_id, type="upload_failed", severity="error",
+                title="Файл не удалось обработать",
+                body=(f"«{record.filename}»: {reason}" if reason
+                      else f"«{record.filename}»: ошибка обработки — проверьте формат."),
+                dedup_key=f"upload:{record.upload_id}",
+            )
+    except Exception as e:    # noqa: BLE001 — void best-effort emitter
+        logger.warning("upload inbox emit skipped (%s): %s",
+                       getattr(record, "upload_id", "?"), e)
+
+
 def _scan_job(upload_id: str) -> dict:
     """
     Runs in the scan worker. Imports are local so the module can be loaded
@@ -53,6 +92,7 @@ def _scan_job(upload_id: str) -> dict:
     from src.storage import upload_registry as ur
 
     record = run_scan(upload_id)
+    _emit_upload_inbox(record)          # terminal here only if INFECTED
     if record.status == ur.SCANNED_CLEAN:
         # Audit R3-1: propagate client_id so the chained process job
         # carries the same ownership stamp as the original scan job.
@@ -71,6 +111,7 @@ def _process_job(upload_id: str) -> dict:
     from src.storage.upload_pipeline import run_process
 
     record = run_process(upload_id)
+    _emit_upload_inbox(record)          # PROCESSED / PROCESSING_FAIL
     return {
         "upload_id": upload_id,
         "status": record.status,

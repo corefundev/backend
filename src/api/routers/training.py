@@ -154,6 +154,17 @@ async def trigger_training(
     try:
         check_training_quota(record)
     except QuotaExceeded as e:
+        # NC-5 (#250): quota friction lands in the inbox too — ONE row per
+        # kind per day (dedup), so a hammering client gets a notification,
+        # not a flood. Emit is best-effort and precedes the raise.
+        from datetime import datetime, timezone
+        from src.storage.notifications import emit_notification
+        emit_notification(
+            client_id, type="quota_warning", severity="warning",
+            title="Ограничение тарифа: обучение недоступно",
+            body=str(e)[:300],
+            dedup_key=f"quota_training_{datetime.now(timezone.utc).date()}",
+        )
         headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
         raise HTTPException(status_code=429, detail=str(e), headers=headers)
 
@@ -213,6 +224,14 @@ async def trigger_training(
             try:
                 assert_sku_count_within_limit(record, sku_count)
             except PlanLimitExceeded as e:
+                from datetime import datetime, timezone
+                from src.storage.notifications import emit_notification
+                emit_notification(
+                    client_id, type="quota_warning", severity="warning",
+                    title="Ограничение тарифа: превышен лимит SKU",
+                    body=str(e)[:300],
+                    dedup_key=f"quota_sku_{datetime.now(timezone.utc).date()}",
+                )
                 raise HTTPException(status_code=403, detail=str(e))
 
     # ── Resolve effective data_path ─────────────────────────────────
