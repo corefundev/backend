@@ -10,15 +10,17 @@
 #
 # What it does:
 #   • Mounts the service-account authorised-key JSON read-only into
-#     api/worker/scan-worker/process-worker as /run/secrets/yc-sa-key.json.
+#     api/worker/scan-worker/process-worker as /run/secrets/yc/ (DIR mount,
+#     #190: атомарная замена файла на хосте видна работающим контейнерам —
+#     file-mount пинил старый inode и держал отозванный ключ).
 #   • Sets YC_SA_KEY_FILE + YC_LOCKBOX_SECRET_ID in those containers.
 #   • Clears all secret-bearing env vars to empty string so lockbox_agent
 #     can inject them at startup (the agent skips already-set keys to
 #     respect explicit overrides — empty string is treated as "not set").
 #
 # Prerequisite on host:
-#   • Place the downloaded `authorized_key.json` at ./secrets/yc-sa-key.json
-#   • chmod 644 ./secrets/yc-sa-key.json
+#   • Place the downloaded `authorized_key.json` at ./secrets/yc/yc-sa-key.json
+#   • chmod 644 ./secrets/yc/yc-sa-key.json
 #   • Parent dir ./secrets/ MUST be `chmod 700 deploy:deploy` — that's
 #     the actual protective layer (other UIDs can't `ls` to find the
 #     filename even if they could `cat` it).
@@ -45,7 +47,7 @@
 # from x-common-env entirely in R10 Phase 0-B PR-C; the DSN is now
 # composed at runtime from POSTGRES_PASSWORD + components.)
 x-lockbox-blanks: &lockbox-blanks
-  YC_SA_KEY_FILE:                  /run/secrets/yc-sa-key.json
+  YC_SA_KEY_FILE:                  /run/secrets/yc/yc-sa-key.json
   YC_LOCKBOX_SECRET_ID:            "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
   # NB: DATABASE_URL is intentionally NOT blanked here. After R10 Phase
   # 0-B PR-C (2026-05-31), the composed DATABASE_URL entry no longer
@@ -113,31 +115,31 @@ services:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   api:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   worker:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   scan-worker:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   process-worker:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # Backup container's lockbox_bootstrap.sh (cron wrapper) needs the
   # SA key mounted + YC_SA_KEY_FILE / YC_LOCKBOX_SECRET_ID set. Without
@@ -147,7 +149,7 @@ services:
     environment:
       <<: *lockbox-blanks
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # Alertmanager (custom image) bootstraps TELEGRAM_ALERT_BOT_TOKEN +
   # TELEGRAM_ALERT_CHAT_ID from Lockbox at startup via the same
@@ -163,13 +165,13 @@ services:
   # separate hardening step).
   alertmanager:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "TELEGRAM_ALERT_BOT_TOKEN TELEGRAM_ALERT_CHAT_ID"
       TELEGRAM_ALERT_BOT_TOKEN: ""
       TELEGRAM_ALERT_CHAT_ID:   ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # grafana (custom image, 2026-05-31) bootstraps GRAFANA_PASSWORD
   # from Lockbox at startup via scripts/grafana_entrypoint.sh →
@@ -179,12 +181,12 @@ services:
   # bundle. See [[feedback_no_secrets_in_env]].
   grafana:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "GRAFANA_PASSWORD"
       GRAFANA_PASSWORD: ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # postgres-exporter (custom image) bootstraps its postgres connection
   # from Lockbox components (POSTGRES_PASSWORD + DB_HOST/PORT/NAME/USER)
@@ -199,7 +201,7 @@ services:
   # See scripts/postgres_exporter_entrypoint.sh.
   postgres-exporter:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "POSTGRES_PASSWORD DB_HOST DB_PORT DB_NAME DB_USER"
       POSTGRES_PASSWORD:  ""
@@ -208,7 +210,7 @@ services:
       DB_NAME:            ""
       DB_USER:            ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # postgres (custom image — Dockerfile.postgres) bootstraps S3_BACKUP_*
   # from Lockbox so the WAL archive_command (#183) can push to S3 with
@@ -217,7 +219,7 @@ services:
   # other 80+ secrets in the Lockbox payload.
   postgres:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "S3_BACKUP_BUCKET S3_BACKUP_ENDPOINT_URL S3_BACKUP_ACCESS_KEY_ID S3_BACKUP_SECRET_ACCESS_KEY S3_BACKUP_REGION"
       S3_BACKUP_BUCKET: ""
@@ -226,7 +228,7 @@ services:
       S3_BACKUP_SECRET_ACCESS_KEY: ""
       S3_BACKUP_REGION: ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # pgbouncer (custom image — Dockerfile.pgbouncer) needs POSTGRES_PASSWORD
   # to (a) authenticate against postgres for the SCRAM-secret bootstrap
@@ -235,12 +237,12 @@ services:
   # both containers stay in lockstep when it rotates.
   pgbouncer:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "POSTGRES_PASSWORD"
       POSTGRES_PASSWORD: ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # prometheus (custom image — Dockerfile.prometheus) bootstraps
   # METRICS_TOKEN from Lockbox so the `sku-forecasting-api` scrape job
@@ -250,12 +252,12 @@ services:
   # prometheus only ever sees METRICS_TOKEN, not the other 80+ secrets.
   prometheus:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "METRICS_TOKEN"
       METRICS_TOKEN: ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # mlflow (custom image — Dockerfile.mlflow) bootstraps the 5
   # S3_MLFLOW_* keys from Lockbox at startup. The mlflow_entrypoint.sh
@@ -273,7 +275,7 @@ services:
   # never-deployed MinIO endpoint.
   mlflow:
     environment:
-      YC_SA_KEY_FILE:       /run/secrets/yc-sa-key.json
+      YC_SA_KEY_FILE:       /run/secrets/yc/yc-sa-key.json
       YC_LOCKBOX_SECRET_ID: "${YC_LOCKBOX_SECRET_ID:?ERROR: set YC_LOCKBOX_SECRET_ID in .env}"
       LOCKBOX_ALLOWED_KEYS: "S3_MLFLOW_BUCKET S3_MLFLOW_ENDPOINT_URL S3_MLFLOW_ACCESS_KEY_ID S3_MLFLOW_SECRET_ACCESS_KEY S3_MLFLOW_REGION POSTGRES_PASSWORD"
       S3_MLFLOW_BUCKET: ""
@@ -288,4 +290,4 @@ services:
       # overrides" guard (lines 121-126) would SKIP injection.
       POSTGRES_PASSWORD: ""
     volumes:
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro

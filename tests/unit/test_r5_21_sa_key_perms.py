@@ -74,7 +74,7 @@ def test_compose_lockbox_comment_recommends_chmod_644():
     """docker/docker-compose.lockbox.yml's prereq comment must point
     operators at `chmod 644` for the SA key file."""
     text = (_BACKEND / "docker" / "docker-compose.lockbox.yml").read_text()
-    assert "chmod 644 ./secrets/yc-sa-key.json" in text, (
+    assert "chmod 644 ./secrets/yc/yc-sa-key.json" in text, (
         "compose.lockbox.yml prereq must recommend chmod 644 — "
         "non-root container UIDs need read access (R5-21 post-mortem)"
     )

@@ -78,7 +78,7 @@ services:
       # (staging Lockbox has no METRICS_TOKEN → bootstrap injects nothing
       # → entrypoint writes an empty token file; staging /metrics gate
       # stays inert, which is fine for a test env.)
-      - ../secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro
+      - ../secrets/yc:/run/secrets/yc:ro
 
   # Heavy services we don't need on staging — disable via a non-default
   # profile so `up -d` (no --profile) skips them.

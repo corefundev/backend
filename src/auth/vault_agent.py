@@ -9,7 +9,7 @@ Lockbox**, а имя файла сохранили чтобы не ломать 
 `bootstrap_secrets()`:
 
   1. Читает SA-key из `YC_SA_KEY_FILE` (по умолчанию
-     `/run/secrets/yc-sa-key.json`).
+     `/run/secrets/yc/yc-sa-key.json`; #190 dir-mount).
   2. Подписывает JWT-PS256 → обменивает на IAM token через
      `iam.api.cloud.yandex.net`.
   3. Тянет payload из Lockbox secret (`YC_LOCKBOX_SECRET_ID`).
