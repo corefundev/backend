@@ -47,6 +47,7 @@ class MIMOForecaster:
         self.feature_cols: list[str] = []
         # #229: market-хвост — None у старых моделей/до attach
         self.market_tail = None
+        self.static_map = None
 
     def _base_params(self, extra: dict | None = None) -> dict:
         m = self.config["model"]
@@ -440,6 +441,8 @@ class MIMOForecaster:
                 "horizon":      self.horizon,
                 # #229: market-хвост — serve мержит колонки из него
                 "market_tail":  getattr(self, "market_tail", None),
+                # #307: static-карта (velocity_band, price_tier) — serve мержит по SKU
+                "static_map":   getattr(self, "static_map", None),
             }, f)
         logger.info(f"MIMO model saved → {path}")
 
@@ -460,4 +463,7 @@ class MIMOForecaster:
         _tail = state.get("market_tail")
         if _tail is not None:
             obj.market_tail = _tail
+        _smap = state.get("static_map")
+        if _smap is not None:
+            obj.static_map = _smap
         return obj

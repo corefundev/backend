@@ -393,6 +393,14 @@ def run_training_pipeline(
                                         config["data"]["target_col"])
     df = merge_market_features(df, market_series, config["data"]["date_col"])
 
+    # #307: cross-series static positioning (velocity_band, price_tier) —
+    # тот же MODEL-CARRIED контракт, что у market. Карта строится на полном
+    # train-фрейме, вшивается в артефакт (attach ниже), на serve мержится.
+    from src.features.static_features import compute_static_map, merge_static_features
+    static_map = compute_static_map(df, config["data"]["sku_col"],
+                                    config["data"]["target_col"])
+    df = merge_static_features(df, static_map, config["data"]["sku_col"])
+
     feature_cols = get_feature_columns(df, config)
     storage.save_features(df)
     logger.info(f"  {len(feature_cols)} features, {len(df)} rows")
@@ -629,6 +637,9 @@ def run_training_pipeline(
     # хелпер выше сохраняет во временный pkl тот же объект.
     from src.features.market import attach_market_to_model
     attach_market_to_model(final_model, market_series)
+    # #307: static-карта вшивается тем же образом, ДО save/MLflow-лога.
+    from src.features.static_features import attach_static_to_model
+    attach_static_to_model(final_model, static_map)
     model_path = storage.save_model(final_model)
     logger.info(f"  Saved → {model_path}")
 

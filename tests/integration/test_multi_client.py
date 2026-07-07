@@ -270,6 +270,8 @@ class TestMultiClientConcurrent:
             # #229 serve-рецепт: market-колонки — из хвоста модели
             from src.features.market import apply_model_market
             df_f = apply_model_market(model, df_f, "date")
+            from src.features.static_features import apply_model_static  # #307
+            df_f = apply_model_static(model, df_f, cfg["data"]["sku_col"])
             fc   = get_feature_columns(df_f, cfg)
             preds = model.predict(df_f[fc])
 
