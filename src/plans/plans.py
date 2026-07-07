@@ -167,7 +167,13 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         model_display_name="Chronos",
         display_name="Business",
         max_skus=UNLIMITED,
-        max_horizon_days=90,            # was 365; tightened — model accuracy past 90d is meh
+        # was 365; tightened — accuracy past 90d is meh. #215: the long
+        # horizon is a PLANNING shape/level signal (trend+seasonality+
+        # calendar), not weather-accurate daily numbers — weather skill is
+        # ~7-10d and Stage-0 measured ≈0 lift on a mixed catalog anyway;
+        # direct heads cover 28d, beyond is the honest recursive tail (#224)
+        # with widening Mondrian intervals (#219).
+        max_horizon_days=90,
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
         default_objective="ensemble",  # 3-model blend; HPO tunes each child
