@@ -217,13 +217,26 @@ def notify_training_failed(client_id: str, error: str) -> None:
         if chat_id is None or not opted_in:
             return
         base = _frontend_base_url()
-        snippet = error[:300]
-        text = (
-            "<b>⚠ Ошибка обучения</b>\n\n"
-            f"Аккаунт: <code>{client_id}</code>\n"
-            f"<code>{snippet}</code>\n\n"
-            f"Подробности и повтор: {base}/app/training"
-        )
+        # NC-9 #272 — reason-keyed wording: an infra interruption (#265
+        # abandoned-run heal) is not a data problem; skip the raw error
+        # snippet and tell the client the one honest action — re-trigger.
+        from src.notifications.failure_reason import is_infra_interrupted
+        if is_infra_interrupted(error):
+            text = (
+                "<b>⚠ Обучение было прервано обновлением сервиса</b>\n\n"
+                f"Аккаунт: <code>{client_id}</code>\n"
+                "Ваши данные в порядке — запустите обучение ещё раз, "
+                "ограничение на повторный запуск снято автоматически.\n\n"
+                f"Повторный запуск: {base}/app/training"
+            )
+        else:
+            snippet = error[:300]
+            text = (
+                "<b>⚠ Ошибка обучения</b>\n\n"
+                f"Аккаунт: <code>{client_id}</code>\n"
+                f"<code>{snippet}</code>\n\n"
+                f"Подробности и повтор: {base}/app/training"
+            )
         send_message(chat_id, text)
     except Exception as e:    # noqa: BLE001
         logger.warning("telegram training-failed failed (client=%s): %s", client_id, e)
