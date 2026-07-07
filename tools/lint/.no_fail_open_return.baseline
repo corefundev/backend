@@ -44,9 +44,9 @@ src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstra
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
-src/features/engineering.py:125  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +18 #229 market block)
-src/features/engineering.py:133  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +18 #229 market block)
-src/features/engineering.py:141  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +18 #229 market block)
+src/features/engineering.py:107  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +18 #229 market block) (revert #229 block → module)
+src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +18 #229 market block) (revert #229 block → module)
+src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +18 #229 market block) (revert #229 block → module)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:207  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:294  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment]

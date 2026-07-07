@@ -1,25 +1,19 @@
-"""#229 (QW2-B2) — cross-series (market) features.
+"""#229 (QW2-B2) — cross-series market features as MODEL-CARRIED state.
 
-ADOPTED at −7.32% WMAPE (0.6087→0.5642, honest 14d holdout, real 1c,
-seeded arms differing ONLY in the three columns) — the largest single
-lever of the quality campaign. Mechanism: catalog-wide traffic carries
-signal absent from a single SKU's history. LAGS ONLY — market totals for
-day t include the SKU's own sales, so features are shift(1)/shift(7);
-serve derives them from the same history as ordinary lags (no future
-info by construction).
+ADOPTED at −7.32% WMAPE (0.6087→0.5642, honest 14d holdout, seeded arms).
+Redesigned after the serve-parity guard (TEST-5 #186) caught the original
+in-build_features shape: «рынок» из одиночного среза невычислим. Теперь:
+train-мерж полного ряда + хвост в артефакте + serve-мерж из хвоста —
+значения воспроизводимы на любом фрейме ПО ПОСТРОЕНИЮ.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from src.features.engineering import build_features, get_feature_columns
-
-
-def _cfg():
-    return {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"},
-            "features": {"lags": [1, 14], "rolling_windows": [7],
-                         "holidays": {"enabled": False}}}
+from src.features.market import (MARKET_COLS, apply_model_market,
+                                 compute_market_tail, merge_market_features,
+                                 tail_for_artifact)
 
 
 def _panel():
@@ -28,40 +22,85 @@ def _panel():
         "sku": ["A"] * 30 + ["B"] * 30,
         "date": list(d) * 2,
         "sales": [10.0] * 30 + [30.0] * 30,
+        "lag_1": [10.0] * 30 + [30.0] * 30,   # per-SKU lag присутствует в serve-фрейме
     })
 
 
-def test_market_lags_are_lagged_sums():
-    f = build_features(_panel(), _cfg())
-    day5_a = f[(f["sku"] == "A") & (f["date"] == "2024-01-05")].iloc[0]
-    # рынок дня 4 = 10 + 30
-    assert day5_a["market_total_lag_1"] == 40.0
-    day10 = f[(f["sku"] == "B") & (f["date"] == "2024-01-10")].iloc[0]
+def test_lagged_sums_no_future_info():
+    df = _panel()
+    m = compute_market_tail(df, "date", "sales")
+    out = merge_market_features(df, m, "date")
+    day5 = out[(out["sku"] == "A") & (out["date"] == "2024-01-05")].iloc[0]
+    assert day5["market_total_lag_1"] == 40.0
+    day10 = out[(out["sku"] == "B") & (out["date"] == "2024-01-10")].iloc[0]
     assert day10["market_total_lag_7"] == 40.0
+    d1 = out[out["date"] == "2024-01-01"]
+    assert d1["market_total_lag_1"].isna().all()      # прошлого нет — NaN, не ноль
 
 
-def test_share_uses_lag1_naming_pin():
-    # column is `lag_1` (no target prefix) — assumed-name lesson, pinned
-    f = build_features(_panel(), _cfg())
-    b = f[(f["sku"] == "B") & (f["date"] == "2024-01-05")].iloc[0]
-    assert abs(b["sku_share_lag_1"] - 30.0 / 40.0) < 1e-9
+def test_parity_by_construction_full_vs_slice():
+    # ГАРАНТИЯ РЕДИЗАЙНА: значения на срезе одного SKU == значениям на
+    # полном фрейме — потому что источник один (хвост), а не фрейм.
+    df = _panel()
+    m = compute_market_tail(df, "date", "sales")
+    full = merge_market_features(df.copy(), m, "date")
+    sl = merge_market_features(df[df["sku"] == "B"].copy(), m, "date")
+    j = full[full["sku"] == "B"].merge(sl, on="date", suffixes=("_f", "_s"))
+    for c in MARKET_COLS:
+        assert np.allclose(j[f"{c}_f"], j[f"{c}_s"], equal_nan=True), c
 
 
-def test_no_future_info_first_day():
-    f = build_features(_panel(), _cfg())
-    d1 = f[f["date"] == "2024-01-01"]
-    assert d1["market_total_lag_1"].isna().all()      # день 0 не существует
+def test_future_dates_carry_forward():
+    df = _panel()
+    m = compute_market_tail(df, "date", "sales")
+    fut = pd.DataFrame({"sku": ["A"], "date": [pd.Timestamp("2024-02-15")],
+                        "sales": [np.nan], "lag_1": [10.0]})
+    out = merge_market_features(fut, m, "date")
+    assert out["market_total_lag_1"].iloc[0] == 40.0   # последний известный тотал
 
 
-def test_zero_market_division_safe():
-    d = pd.date_range("2024-01-01", periods=20)
-    df = pd.DataFrame({"sku": ["A"] * 20, "date": d, "sales": [0.0] * 20})
-    f = build_features(df, _cfg())
-    assert np.isfinite(f["sku_share_lag_1"].fillna(0)).all()
+def test_share_math_and_zero_safety():
+    df = _panel()
+    m = compute_market_tail(df, "date", "sales")
+    out = merge_market_features(df, m, "date")
+    b5 = out[(out["sku"] == "B") & (out["date"] == "2024-01-05")].iloc[0]
+    assert abs(b5["sku_share_lag_1"] - 30.0 / 40.0) < 1e-9
+    z = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=5),
+                      "sales": [0.0] * 5, "sku": ["A"] * 5, "lag_1": [0.0] * 5})
+    zm = compute_market_tail(z, "date", "sales")
+    zo = merge_market_features(z, zm, "date")
+    assert np.isfinite(zo["sku_share_lag_1"].fillna(0)).all()
 
 
-def test_features_reach_the_model():
-    f = build_features(_panel(), _cfg())
-    cols = get_feature_columns(f, _cfg())
-    for c in ("market_total_lag_1", "market_total_lag_7", "sku_share_lag_1"):
-        assert c in cols
+def test_apply_model_market_old_pickle_noop():
+    class Old:
+        pass
+    df = _panel()
+    out = apply_model_market(Old(), df.copy(), "date")
+    assert list(out.columns) == list(df.columns)       # ни одной новой колонки
+
+
+def test_mimo_roundtrip_carries_tail(tmp_path):
+    from src.models.mimo import MIMOForecaster
+    cfg = {"data": {}, "model": {"horizon": 2}}
+    m = MIMOForecaster(cfg)
+    m.models_, m.q_models_, m.feature_cols = {}, {}, ["lag_1"]
+    tail = tail_for_artifact(compute_market_tail(_panel(), "date", "sales"))
+    m.market_tail = tail
+    p = tmp_path / "m.pkl"
+    m.save(p)
+    loaded = MIMOForecaster.load(p, cfg)
+    assert loaded.market_tail is not None
+    assert len(loaded.market_tail) == len(tail)
+
+
+def test_wiring_pins():
+    from pathlib import Path
+    eng = Path("src/features/engineering.py").read_text()
+    assert "market_total" not in eng, "build_features must stay SKU-pure (serve-parity)"
+    tr = Path("src/pipeline/train.py").read_text()
+    assert "merge_market_features(df, market_series" in tr
+    assert "attach_market_to_model(final_model, market_series)" in tr
+    for f in ("src/pipeline/post_training.py", "src/api/routers/inference.py",
+              "src/pipeline/batch_inference.py"):
+        assert "apply_model_market" in Path(f).read_text(), f

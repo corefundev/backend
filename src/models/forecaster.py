@@ -148,7 +148,8 @@ class SKUForecaster:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump({"model": self.model, "feature_cols": self.feature_cols}, f)
+            pickle.dump({"model": self.model, "feature_cols": self.feature_cols,
+                         "market_tail": getattr(self, "market_tail", None)}, f)
         logger.info(f"Model saved to {path}")
 
     @classmethod
@@ -160,6 +161,9 @@ class SKUForecaster:
         forecaster = cls(config)
         forecaster.model = state["model"]
         forecaster.feature_cols = state["feature_cols"]
+        _tail = state.get("market_tail")
+        if _tail is not None:
+            forecaster.market_tail = _tail
         return forecaster
 
 

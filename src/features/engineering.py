@@ -99,24 +99,6 @@ def build_features(
 
     # ── Global features (not per-SKU) ─────────────────────────
 
-    # #229 QW2-B2: cross-series (market) features — ADOPTED at −7.32% WMAPE
-    # (0.6087→0.5642, honest 14d holdout, seeded arms). Суммарный спрос
-    # каталога несёт сигнал, которого нет в истории одного SKU (общий
-    # трафик точки, волны спроса). ЛАГИ ТОЛЬКО: market_total дня t включает
-    # продажи самого SKU, поэтому в фичи идут shift(1)/shift(7) — к моменту
-    # прогноза это прошлое, лика нет; серв==трейн (агрегат из той же
-    # истории, что и лаги). Доля — через lag_1 (гарантирован fallback-floor;
-    # имя без префикса — см. _build_lag_features).
-    market = (df.groupby(date_col)[target_col].sum()
-                .rename("_market_total").reset_index())
-    market["market_total_lag_1"] = market["_market_total"].shift(1)
-    market["market_total_lag_7"] = market["_market_total"].shift(7)
-    df = df.merge(market.drop(columns=["_market_total"]), on=date_col, how="left")
-    if "lag_1" in df.columns:
-        df["sku_share_lag_1"] = (
-            df["lag_1"] / df["market_total_lag_1"].replace(0, np.nan)
-        ).fillna(0.0)
-
     # Weather (Open-Meteo)
     if cfg_f.get("weather", {}).get("enabled", False):
         try:

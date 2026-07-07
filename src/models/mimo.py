@@ -435,6 +435,8 @@ class MIMOForecaster:
                 "q_models":     self.q_models_,
                 "feature_cols": self.feature_cols,
                 "horizon":      self.horizon,
+                # #229: market-хвост — serve мержит колонки из него
+                "market_tail":  getattr(self, "market_tail", None),
             }, f)
         logger.info(f"MIMO model saved → {path}")
 
@@ -450,4 +452,9 @@ class MIMOForecaster:
         obj.q_models_     = state.get("q_models", {})
         obj.feature_cols  = state["feature_cols"]
         obj.horizon       = state["horizon"]
+        # #229: .get — старые pickle без хвоста легальны (их feature_cols
+        # market-колонок не требуют)
+        _tail = state.get("market_tail")
+        if _tail is not None:
+            obj.market_tail = _tail
         return obj

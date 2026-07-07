@@ -386,6 +386,14 @@ def run_training_pipeline(
     # ── 4. Feature engineering ────────────────────────────────
     _progress(4, 9, "Построение признаков (календарь, лаги, погода, праздники)")
     df = build_features(df, config)
+    # #229: market features — MODEL-CARRIED state (см. src/features/market.py:
+    # serve-parity запрещает считать их в build_features). Train-мерж по
+    # полному ряду; хвост вшивается в модель перед save (attach ниже).
+    from src.features.market import compute_market_tail, merge_market_features
+    market_series = compute_market_tail(df, config["data"]["date_col"],
+                                        config["data"]["target_col"])
+    df = merge_market_features(df, market_series, config["data"]["date_col"])
+
     feature_cols = get_feature_columns(df, config)
     storage.save_features(df)
     logger.info(f"  {len(feature_cols)} features, {len(df)} rows")
@@ -620,6 +628,11 @@ def run_training_pipeline(
     storage.save_fallback_model(fallback)
 
     # ── Save primary model ────────────────────────────────────
+    # #229: market-хвост вшивается в артефакт ДО сохранения (serve мержит
+    # колонки из него — см. src/features/market.py). Также до MLflow-лога:
+    # хелпер выше сохраняет во временный pkl тот же объект.
+    from src.features.market import attach_market_to_model
+    attach_market_to_model(final_model, market_series)
     model_path = storage.save_model(final_model)
     logger.info(f"  Saved → {model_path}")
 

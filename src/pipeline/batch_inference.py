@@ -48,6 +48,9 @@ def run_batch_inference(
     df           = build_features(
         df, config, pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
     )
+    # #229: market-колонки из хвоста модели (no-op для старых pickle)
+    from src.features.market import apply_model_market
+    df = apply_model_market(model, df, config["data"]["date_col"])
     feature_cols = get_feature_columns(df, config)
     result = forecast_all_skus(model, df, feature_cols, config)
 

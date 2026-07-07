@@ -103,6 +103,11 @@ def generate_and_store_forecasts(
     df = build_features(
         df, config, pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
     )
+    # #229: market-колонки — из хвоста в артефакте модели (no-op для
+    # старых pickle); ДО get_feature_columns, чтобы новые модели увидели
+    # свои колонки в фрейме.
+    from src.features.market import apply_model_market
+    df = apply_model_market(model, df, config["data"]["date_col"])
     feature_cols = get_feature_columns(df, config)
     forecasts = forecast_all_skus(
         model, df, feature_cols, config,
