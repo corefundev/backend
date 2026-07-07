@@ -235,6 +235,22 @@ def internal_staleness_nudge(auth: AuthContext = Depends(get_current_client)):
                             detail="staleness nudge failed") from e
 
 
+@router.post("/internal/pii-purge")
+def internal_pii_purge(auth: AuthContext = Depends(get_current_client)):
+    """B4 #156 (152-ФЗ): daily cron entry (backup container → this endpoint,
+    R7-2 pattern). Anonymises PII of accounts soft-deleted longer than
+    PII_RETENTION_DAYS ago; each erasure audited through the app audit path
+    (a manual audit_log INSERT would break the HMAC chain). Sync def →
+    threadpool."""
+    auth.require_role("admin")
+    from src.pipeline.pii_purge import run_pii_purge
+    try:
+        return run_pii_purge()
+    except Exception as e:    # noqa: BLE001
+        logger.warning("pii purge failed: %s", e)
+        raise HTTPException(status_code=503, detail="pii purge failed") from e
+
+
 # ── ADM-13 (#281): «Система» — health + cron-job ages for the console ────────
 
 # Expected cadence per pushgateway job (seconds) — «постарше каденса ×1.5+
@@ -247,6 +263,7 @@ _JOB_CADENCE_SEC = {
     "mirror_prune":      26 * 3600,
     "model_age_check":   2 * 3600,        # hourly
     "staleness_nudge":   26 * 3600,
+    "pii_purge":         26 * 3600,       # daily
     "audit_verify":      26 * 3600,
     "wal_mirror":        30 * 60,         # */5
     "archive_mode_check": 30 * 60,
@@ -319,6 +336,7 @@ _AUDIT_EVENT_TYPES = frozenset({
     "login", "logout", "otp_send", "otp_verify", "oauth_callback", "signup",
     "password_change", "plan_change", "email_change", "model_train",
     "model_delete", "upload_delete", "secret_rotation", "admin_action",
+    "client_export", "client_delete", "client_purge",
 })
 
 
