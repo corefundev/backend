@@ -19,7 +19,6 @@ these tests pin the STRUCTURAL coherence between the four files.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml

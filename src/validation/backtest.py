@@ -21,7 +21,7 @@ unit-tested with injected `train_fn` / `serve_fn` stubs (no libomp).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -170,10 +170,14 @@ def _per_horizon(scored: pd.DataFrame, cutoff: pd.Timestamp, date_col: str) -> d
     step = (pd.to_datetime(scored[date_col]).dt.normalize() - cutoff).dt.days + 1
     out: dict = {}
     for h, g in scored.assign(_h=step).groupby("_h"):
+        # pandas-stubs types groupby keys as a broad Scalar union (str |
+        # date | complex | …); `_h` is an int column (days past cutoff),
+        # so the cast is exact (QW2-B6 #233).
+        h_step = cast(int, h)
         denom = np.abs(g["actual"].to_numpy(dtype=float)).sum()
         wmape = (
             float(np.abs(g["actual"].to_numpy(dtype=float) - g["predicted"].to_numpy(dtype=float)).sum() / denom)
             if denom > 1e-10 else float("nan")
         )
-        out[int(h)] = {"wmape": wmape, "n": int(len(g))}
+        out[int(h_step)] = {"wmape": wmape, "n": int(len(g))}
     return out

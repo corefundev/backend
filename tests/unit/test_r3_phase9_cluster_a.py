@@ -12,7 +12,6 @@ shape. The signup_rate_limit module is exercised directly.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -185,7 +184,9 @@ def test_compose_redis_propagates_redis_password_env():
     txt = _compose_text()
     # Both vars wired through compose-side default-empty.
     assert "REDIS_PASSWORD: ${REDIS_PASSWORD:-}" in txt
-    assert "REDISCLI_AUTH:  ${REDIS_PASSWORD:-}" in txt or \
-           "REDISCLI_AUTH: ${REDIS_PASSWORD:-}" in txt, (
+    assert (
+        "REDISCLI_AUTH:  ${REDIS_PASSWORD:-}" in txt
+        or "REDISCLI_AUTH: ${REDIS_PASSWORD:-}" in txt
+    ), (
         "REDISCLI_AUTH must mirror REDIS_PASSWORD so healthcheck can auth"
     )

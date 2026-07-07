@@ -90,6 +90,7 @@ class TestAsyncRegistry:
             AsyncClientRegistry, get_async_registry
         )
         assert AsyncClientRegistry is not None
+        assert get_async_registry is not None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -157,4 +158,3 @@ class TestChaosEngineering:
 # ══════════════════════════════════════════════════════════════
 # 6. Kafka Streaming (mock)
 # ══════════════════════════════════════════════════════════════
-

@@ -15,7 +15,6 @@ R5-M10: every service has `logging: *log-rotation` so the docker
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml

@@ -132,8 +132,6 @@ def test_pinned_opener_actually_uses_pinned_ip_not_hostname(monkeypatch):
     PINNED = "203.0.113.42"  # TEST-NET-3 — guaranteed unroutable
     captured: dict = {}
 
-    real_create = _socket.create_connection
-
     def spy_create_connection(address, *args, **kwargs):
         captured["address"] = address
         # Don't actually connect — raise so the test doesn't hang.

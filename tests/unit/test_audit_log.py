@@ -12,7 +12,6 @@ Postgres. These tests pin the *contract* that's most easily forgotten:
 from __future__ import annotations
 
 import logging
-import os
 
 from src.audit import (
     record_event,

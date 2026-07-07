@@ -23,20 +23,15 @@ Threading limitations (intentional):
 """
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import threading
-import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from src.auth.api_keys import generate_api_key, hash_api_key, verify_api_key
 from src.auth.email_normalize import canonical_email
-from src.auth.otp import generate_otp, hash_otp, verify_otp
+from src.auth.otp import hash_otp
 from src.auth.otp_store import LocalFileOtpStore, PURPOSE_SIGNUP
 from src.clients.registry import (
     ClientAlreadyExists, ClientRecord, LocalFileRegistry,
