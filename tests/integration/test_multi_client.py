@@ -268,6 +268,9 @@ class TestMultiClientConcurrent:
 
             df   = pd.read_csv(spec["data_path"], parse_dates=["date"])
             df_f = build_features(df, cfg)
+            # #229 serve-рецепт: market-колонки — из хвоста модели
+            from src.features.market import apply_model_market
+            df_f = apply_model_market(model, df_f, "date")
             fc   = get_feature_columns(df_f, cfg)
             preds = model.predict(df_f[fc])
 

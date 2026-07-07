@@ -58,6 +58,8 @@ def merge_market_features(df: pd.DataFrame, market: pd.DataFrame,
     см. _build_lag_features), если он есть в фрейме."""
     if market is None or market.empty:
         return df
+    if all(c in df.columns for c in MARKET_COLS):
+        return df          # идемпотентность: повторный merge — no-op
     m = market.sort_values(date_col).reset_index(drop=True)
     lag1 = m.copy()
     lag1[date_col] = lag1[date_col] + pd.Timedelta(days=1)

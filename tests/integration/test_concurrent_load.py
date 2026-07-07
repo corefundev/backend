@@ -289,6 +289,8 @@ class TestConcurrentInference:
 
                 t0       = time.perf_counter()
                 df_feat  = build_features(df, cfg)
+                from src.features.market import apply_model_market  # #229 serve-рецепт
+                df_feat  = apply_model_market(model, df_feat, "date")
                 fc       = get_feature_columns(df_feat, cfg)
                 preds    = model.predict(df_feat[fc])
                 elapsed  = time.perf_counter() - t0
@@ -349,6 +351,8 @@ class TestConcurrentInference:
         model   = storage.load_model()
         df      = pd.read_csv(spec["data_path"], parse_dates=["date"])
         df_feat = build_features(df, cfg)
+        from src.features.market import apply_model_market  # #229 serve-рецепт
+        df_feat = apply_model_market(model, df_feat, "date")
         fc      = get_feature_columns(df_feat, cfg)
 
         all_preds = []
@@ -499,6 +503,8 @@ class TestFinalReport:
                 model   = storage.load_model()
                 df      = pd.read_csv(spec["data_path"], parse_dates=["date"])
                 df_feat = build_features(df, cfg)
+                from src.features.market import apply_model_market  # #229
+                df_feat = apply_model_market(model, df_feat, "date")
                 fc      = get_feature_columns(df_feat, cfg)
                 lats = []
                 for _ in range(5):
