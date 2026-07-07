@@ -347,8 +347,8 @@ class MIMOForecaster:
         # mean calibration target). A pooled 90% can hide under-coverage on
         # slow movers — exactly where stockouts hurt (#151).
         if col_sku:
-            sk = np.concatenate(col_sku)
-            sku_mean = pd.Series(yv).groupby(pd.Series(sk)).transform("mean").to_numpy()
+            sk_arr = np.concatenate(col_sku)
+            sku_mean = pd.Series(yv).groupby(pd.Series(sk_arr)).transform("mean").to_numpy()
             qs = np.quantile(np.unique(sku_mean), [1 / 3, 2 / 3]) if len(np.unique(sku_mean)) >= 3 else None
             if qs is not None:
                 band = np.digitize(sku_mean, qs)          # 0=slow 1=mid 2=fast
