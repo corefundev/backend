@@ -440,6 +440,12 @@ def predict(
             df, config,
             pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
         )
+        # #229: market-колонки из хвоста модели (no-op для старых pickle) —
+        # именно этот single-SKU путь и требует model-carried state:
+        # из среза одного SKU «рынок» невычислим.
+        from src.features.market import apply_model_market
+        df_feat = apply_model_market(service.primary, df_feat,
+                                     config["data"]["date_col"])
         feature_cols = get_feature_columns(df_feat, config)
 
         # Shared serve dispatcher (R11-#59 / H2): for MIMO/Ensemble it reads

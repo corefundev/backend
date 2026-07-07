@@ -44,9 +44,9 @@ src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstra
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
-src/features/engineering.py:107  pre-R9 baseline; triage in R10 — feature engineering optional step
-src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engineering optional step
-src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step
+src/features/engineering.py:107  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +18 #229 market block) (revert #229 block → module)
+src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +18 #229 market block) (revert #229 block → module)
+src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +18 #229 market block) (revert #229 block → module)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:207  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:294  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment]
@@ -72,8 +72,8 @@ src/api/routers/training.py:342  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:355  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 src/pipeline/inference_utils.py:414  R11-#59 (was :404, +10 L-A4 #186 doc-comment) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:470  R11-#59 (was :460, +10 L-A4 #186 doc-comment) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path
-src/pipeline/inference_utils.py:482  QW2-1 #224 — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback)
+src/pipeline/inference_utils.py:475  R11-#59 (was :460, +10 L-A4 #186 doc-comment) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge)
+src/pipeline/inference_utils.py:487  QW2-1 #224 — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback) (was :482, +5 #229 choke merge)
 
 src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)

@@ -457,6 +457,11 @@ def serve_forecast(
     primary model itself; if it raises we drop to recursive, which carries the
     SeasonalNaive fallback via predict_fn.
     """
+    # #229: market-колонки из хвоста модели — САМЫЙ нижний общий choke для
+    # одиночного serve (см. src/features/market.py; no-op для старых pickle
+    # и для уже смерженных фреймов — merge идемпотентен).
+    from src.features.market import apply_model_market
+    history = apply_model_market(model, history, date_col)
     is_direct = getattr(model, "is_mimo", False) or getattr(model, "is_ensemble", False)
     model_h = int(getattr(model, "horizon", 0) or 0)
 
@@ -534,6 +539,9 @@ def forecast_all_skus(
     batch was unbounded. SKUs are iterated in their groupby order
     (stable across reruns); the cap truncates the tail.
     """
+    # #229: см. serve_forecast — тот же нижний choke для batch-пути.
+    from src.features.market import apply_model_market
+    df = apply_model_market(model, df, config["data"]["date_col"])
     sku_col    = config["data"]["sku_col"]
     date_col   = config["data"]["date_col"]
     target_col = config["data"]["target_col"]
