@@ -446,6 +446,11 @@ def predict(
         from src.features.market import apply_model_market
         df_feat = apply_model_market(service.primary, df_feat,
                                      config["data"]["date_col"])
+        # #307: static-колонки (velocity_band, price_tier) — ДО get_feature_columns,
+        # иначе feature_cols не включит их, а модель обучена с ними.
+        from src.features.static_features import apply_model_static
+        df_feat = apply_model_static(service.primary, df_feat,
+                                     config["data"]["sku_col"])
         feature_cols = get_feature_columns(df_feat, config)
 
         # Shared serve dispatcher (R11-#59 / H2): for MIMO/Ensemble it reads

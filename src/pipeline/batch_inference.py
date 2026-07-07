@@ -51,6 +51,8 @@ def run_batch_inference(
     # #229: market-колонки из хвоста модели (no-op для старых pickle)
     from src.features.market import apply_model_market
     df = apply_model_market(model, df, config["data"]["date_col"])
+    from src.features.static_features import apply_model_static
+    df = apply_model_static(model, df, config["data"]["sku_col"])
     feature_cols = get_feature_columns(df, config)
     result = forecast_all_skus(model, df, feature_cols, config)
 

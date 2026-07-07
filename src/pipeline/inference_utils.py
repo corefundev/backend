@@ -462,6 +462,8 @@ def serve_forecast(
     # и для уже смерженных фреймов — merge идемпотентен).
     from src.features.market import apply_model_market
     history = apply_model_market(model, history, date_col)
+    from src.features.static_features import apply_model_static
+    history = apply_model_static(model, history, sku_col)
     is_direct = getattr(model, "is_mimo", False) or getattr(model, "is_ensemble", False)
     model_h = int(getattr(model, "horizon", 0) or 0)
 
@@ -542,6 +544,8 @@ def forecast_all_skus(
     # #229: см. serve_forecast — тот же нижний choke для batch-пути.
     from src.features.market import apply_model_market
     df = apply_model_market(model, df, config["data"]["date_col"])
+    from src.features.static_features import apply_model_static
+    df = apply_model_static(model, df, config["data"]["sku_col"])
     sku_col    = config["data"]["sku_col"]
     date_col   = config["data"]["date_col"]
     target_col = config["data"]["target_col"]
