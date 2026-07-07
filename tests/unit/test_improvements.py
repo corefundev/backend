@@ -42,7 +42,6 @@ def _make_config(horizon: int = 7, model_type: str = "mimo") -> dict:
             "min_child_samples": 5, "feature_fraction": 0.8,
             "bagging_fraction": 0.8, "bagging_freq": 5,
         },
-        "cold_start": {"min_history_days": 28, "n_neighbors": 2},
         "anomaly_detection": {"enabled": True, "contamination": 0.05,
                               "iqr_factor": 3.0, "anomaly_weight": 0.1},
         "hpo": {"enabled": False},

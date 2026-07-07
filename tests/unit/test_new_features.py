@@ -35,7 +35,6 @@ def _config(horizon: int = 7) -> dict:
         "features": {"lags":[1,7],"rolling_windows":[7],"calendar":True,
                      "price":True,"promo":True,"stock":True,
                      "weather":{"enabled":False},"holidays":{"enabled":False}},
-        "cold_start":{"min_history_days":28,"n_neighbors":2},
         "anomaly_detection":{"enabled":False},
         "hpo":{"enabled":False},
         "validation":{"type":"walk_forward","n_splits":2},

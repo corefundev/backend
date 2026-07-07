@@ -36,7 +36,6 @@ def system_config(tmp_path) -> Path:
             "weather": {"enabled": False, "latitude": 55.75, "longitude": 37.62},
             "holidays": {"enabled": True, "country": "RU"},
         },
-        "cold_start": {"min_history_days": 28, "n_neighbors": 5},
         "validation": {"type": "walk_forward", "n_splits": 3},
     }
     p = tmp_path / "config.yaml"
