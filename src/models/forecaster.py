@@ -71,6 +71,9 @@ class SKUForecaster:
         self.model_cfg = config["model"]
         self.model: lgb.LGBMRegressor | None = None
         self.feature_cols: list[str] = []
+        # #229: market-хвост (serve мержит колонки из него); None у старых
+        # моделей и до attach_market_to_model
+        self.market_tail = None
 
     def fit(
         self,

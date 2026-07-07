@@ -45,6 +45,8 @@ class MIMOForecaster:
         self.models_   : list[lgb.LGBMRegressor] = []
         self.q_models_ : dict[str, list[lgb.LGBMRegressor]] = {}
         self.feature_cols: list[str] = []
+        # #229: market-хвост — None у старых моделей/до attach
+        self.market_tail = None
 
     def _base_params(self, extra: dict | None = None) -> dict:
         m = self.config["model"]
