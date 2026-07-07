@@ -136,6 +136,29 @@ def _render_finished(
 
 def _render_failed(client_id: str, error: str) -> tuple[str, str]:
     base = _frontend_base_url()
+    # NC-9 #272 — reason-keyed remediation: an infra interruption (#265
+    # abandoned-run heal) is not the client's fault, so the CSV/период
+    # advice below would be noise; the honest instruction is re-trigger.
+    from src.notifications.failure_reason import is_infra_interrupted
+    if is_infra_interrupted(error):
+        subject = "⚠ Обучение модели было прервано"
+        body_lines = [
+            f"Здравствуйте,",
+            "",
+            f"Обучение модели для аккаунта «{client_id}» было прервано "
+            f"обновлением сервиса и не завершилось.",
+            "",
+            "Ваши данные в порядке — ошибка не связана с загруженным файлом.",
+            "",
+            "Что сделать:",
+            f"  • Запустите обучение ещё раз: {base}/app/training",
+            "    Ограничение на повторный запуск снято автоматически.",
+            "",
+            "Если запуск снова прерывается — напишите в поддержку.",
+            "",
+            "— SKU Forecasting",
+        ]
+        return subject, "\n".join(body_lines)
     subject = "⚠ Обучение модели не удалось"
     body_lines = [
         f"Здравствуйте,",
