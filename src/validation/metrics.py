@@ -97,8 +97,10 @@ def compute_metrics_per_sku(
     """
     records = []
     for sku, group in results_df.groupby(sku_col):
-        y_true = group[actual_col].values
-        y_pred = group[pred_col].values
+        # .to_numpy() (not .values) — .values is typed ExtensionArray | ndarray,
+        # which fails the ndarray-typed metric signatures below (QW2-B6 #233).
+        y_true = group[actual_col].to_numpy()
+        y_pred = group[pred_col].to_numpy()
         # R14-3 (#182): every matched test row for a SKU carries the SAME
         # per-SKU train series (broadcast by the walk_forward merge). The old
         # `np.concatenate(group[train_col].values)` stitched K duplicate copies

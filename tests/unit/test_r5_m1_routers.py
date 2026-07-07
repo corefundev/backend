@@ -398,8 +398,10 @@ def test_plans_domain_lives_in_router():
 
     main_text = _MAIN.read_text()
     for path in ("/plans", "/clients/{client_id}/usage", "/clients/{client_id}/upgrade"):
-        assert f'@app.get("{path}"' not in main_text and \
-               f'@app.post("{path}"' not in main_text, (
+        assert (
+            f'@app.get("{path}"' not in main_text
+            and f'@app.post("{path}"' not in main_text
+        ), (
             f"main.py still has a @app handler for {path} — must be in plans.py"
         )
     assert "plans_router" in main_text

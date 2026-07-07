@@ -136,7 +136,6 @@ def test_webhook_validator_rejects_resolved_to_private(monkeypatch):
     # Hostname that resolves to a private IP must be blocked even if the
     # name itself looks public.
     from src.api import webhooks
-    import socket as _socket
 
     def fake_getaddrinfo(host, _port):
         return [(None, None, None, None, ("10.0.0.5", 0))]

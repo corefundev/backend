@@ -24,8 +24,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 _BACKEND = Path(__file__).resolve().parents[2]
 
@@ -102,8 +100,10 @@ def test_telegram_webhook_refuses_empty_secret_in_prod():
     TELEGRAM_WEBHOOK_SECRET is empty AND APP_ENV=production
     (previously fell through and accepted any POST)."""
     block = _telegram_webhook_source()
-    assert 'app_env == "production"' in block or \
-           "APP_ENV" in block or "app_env" in block, (
+    assert (
+        'app_env == "production"' in block
+        or "APP_ENV" in block or "app_env" in block
+    ), (
         "telegram_webhook must check APP_ENV for prod-empty refusal (R5-8)"
     )
     assert "503" in block, (

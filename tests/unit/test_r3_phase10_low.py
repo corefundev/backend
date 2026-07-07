@@ -60,7 +60,7 @@ def test_chaos_inject_fault_case_insensitive_prod(monkeypatch):
 
 def test_walk_forward_split_points_empty_dates_no_raise():
     np = pytest.importorskip("numpy")
-    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pandas")  # walk_forward imports pandas — keep the skip guard
     from src.validation.walk_forward import _get_split_points
     # Empty input must NOT raise IndexError — returns empty list.
     result = _get_split_points(np.array([], dtype="datetime64[ns]"),
@@ -69,7 +69,7 @@ def test_walk_forward_split_points_empty_dates_no_raise():
 
 
 def test_walk_forward_split_points_normal_input():
-    np = pytest.importorskip("numpy")
+    pytest.importorskip("numpy")  # walk_forward imports numpy — keep the skip guard
     pd = pytest.importorskip("pandas")
     from src.validation.walk_forward import _get_split_points
     dates = pd.date_range("2024-01-01", periods=120, freq="D").to_numpy()

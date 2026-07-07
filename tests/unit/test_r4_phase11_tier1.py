@@ -40,11 +40,9 @@ def test_client_to_safe_dict_excludes_sensitive_fields():
         # legacy location so this test still works mid-rollout if a
         # parent branch hasn't merged the split yet.
         try:
-            from src.api.routers.clients import (
-                _client_to_safe_dict, _CLIENT_SAFE_FIELDS,
-            )
+            from src.api.routers.clients import _client_to_safe_dict
         except ImportError:
-            from src.api.main import _client_to_safe_dict, _CLIENT_SAFE_FIELDS
+            from src.api.main import _client_to_safe_dict
     except (TypeError, ImportError) as e:
         if "operand type(s) for |" in str(e) or "X | None" in str(e):
             pytest.skip(f"main.py import requires py3.10+ runtime: {e}")

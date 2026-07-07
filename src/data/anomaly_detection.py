@@ -54,7 +54,7 @@ class SalesAnomalyDetector:
         # Per-SKU IQR detection
         for sku, group in df.groupby(sku_col):
             idx  = group.index
-            vals = group[target_col].values
+            vals = group[target_col].to_numpy()
             q1, q3 = np.percentile(vals, 25), np.percentile(vals, 75)
             iqr    = q3 - q1
             lower  = q1 - self.iqr_factor * iqr

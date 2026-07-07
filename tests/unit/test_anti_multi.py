@@ -10,7 +10,7 @@ import pytest
 
 from src.auth.email_normalize import canonical_email
 from src.auth.disposable_domains import (
-    is_disposable, get_block_list, reset_cache_for_tests,
+    is_disposable, reset_cache_for_tests,
 )
 from src.auth.signup_rate_limit import subnet
 

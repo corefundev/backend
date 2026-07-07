@@ -9,7 +9,6 @@ The actual HTTP layer is patched out — no real cbr.ru traffic.
 from __future__ import annotations
 
 import os
-import tempfile
 from datetime import date
 from unittest import mock
 

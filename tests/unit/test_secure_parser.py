@@ -6,14 +6,10 @@ itself is integration-tested elsewhere.
 """
 from __future__ import annotations
 
-import io
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from src.validation import secure_parser as sp
 

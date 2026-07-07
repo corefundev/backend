@@ -52,8 +52,10 @@ def test_cd_deploy_does_not_call_removed_helpers():
     ]
     code_only = "\n".join(code_lines)
 
-    assert "inject_lockbox_key " not in code_only and \
-           "inject_lockbox_key(" not in code_only, (
+    assert (
+        "inject_lockbox_key " not in code_only
+        and "inject_lockbox_key(" not in code_only
+    ), (
         "inject_lockbox_key was removed 2026-05-27 as a functional no-op. "
         "Re-introducing the call would re-create the R3-13 SA-path bug "
         "(see cd_deploy.sh comment block for the full rationale)."

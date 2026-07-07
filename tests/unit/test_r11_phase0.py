@@ -17,8 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
-
 
 # ── H7: /readyz valid JSON + no exception-class leak ────────────────
 

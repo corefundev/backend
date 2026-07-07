@@ -253,7 +253,6 @@ class TestConcurrentInference:
         10 prediction requests per client, all fired simultaneously.
         Verify: no errors, correct SKU, latency < 500ms each.
         """
-        import os, yaml as _yaml
         from src.features.engineering import build_features, get_feature_columns
         from src.storage.backend import ClientStorage
         from src.pipeline.train import run_training_pipeline
@@ -266,7 +265,8 @@ class TestConcurrentInference:
 
         # Ensure models exist for every client in this workspace
         for cid, spec in workspace.items():
-            if cid.startswith("_"): continue
+            if cid.startswith("_"):
+                continue
             storage = ClientStorage(cid)
             if not storage.model_exists():
                 run_training_pipeline(spec["data_path"], spec["config_path"], cid)
@@ -363,8 +363,10 @@ class TestConcurrentInference:
                 all_preds.append(p.copy())
 
         threads = [threading.Thread(target=get_pred) for _ in range(5)]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         # All 5 results must be identical (deterministic model)
         for i in range(1, len(all_preds)):
@@ -382,9 +384,7 @@ class TestConfigIsolation:
 
     def test_each_client_uses_its_own_horizon(self, workspace):
         """Verify different horizons produce different forecast lengths."""
-        from src.pipeline.train import run_training_pipeline
         from src.pipeline.batch_inference import run_batch_inference
-        from src.storage.backend import ClientStorage
 
         horizon_map = {cid: h for cid, h, *_ in CLIENT_SPECS}
 
@@ -392,7 +392,6 @@ class TestConfigIsolation:
         for cid, spec in workspace.items():
             if cid.startswith("_"):
                 continue
-            storage    = ClientStorage(cid)
             model_path = str(Path(os.environ["ARTIFACTS_DIR"]) / cid / "models" / "model.pkl")
             if not Path(model_path).exists():
                 continue
@@ -477,7 +476,8 @@ class TestFinalReport:
         if not all_results:
             # Re-train if needed
             for cid, spec in workspace.items():
-                if cid.startswith("_"): continue
+                if cid.startswith("_"):
+                    continue
                 t0 = time.perf_counter()
                 r  = run_training_pipeline(
                     spec["data_path"], spec["config_path"], cid
@@ -495,7 +495,8 @@ class TestFinalReport:
         latencies: dict[str, list[float]] = workspace.get("_latencies", {})
         if not latencies:
             for cid, spec in workspace.items():
-                if cid.startswith("_"): continue
+                if cid.startswith("_"):
+                    continue
                 with open(spec["config_path"]) as f:
                     cfg = yaml.safe_load(f)
                 storage = ClientStorage(cid)

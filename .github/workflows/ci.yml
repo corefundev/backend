@@ -46,7 +46,10 @@ jobs:
           # uniform formatting in error templates.
           # F401 (unused imports) and F841 (unused vars) STAY enforced
           # — they catch real dead code.
-          flake8 src/ \
+          # tests/ is linted with the SAME ignore set as src/ (QW2-B6
+          # #233) — the src-only scope let dead imports accumulate in
+          # tests (found twice during the quality campaign).
+          flake8 src/ tests/ \
             --max-line-length=100 \
             --extend-ignore=E203,W503,E501,E221,E251,E272,E402,E301,E302,E303,E305,E306,E731,E401,E131,E127,E128,E261,E222,E225,E231,E741,F541 \
             --exclude=__pycache__,.venv
@@ -234,7 +237,14 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install mypy types-PyYAML types-redis
+      # pandas-stubs (QW2-B6 #233): without it --ignore-missing-imports
+      # silently degrades every pandas type to Any, hiding real arg-type
+      # errors (10 latent ExtensionArray-vs-ndarray errors were invisible
+      # in CI while local runs with stubs installed flagged them).
+      # Pinned to the stubs release matching the runtime pin in
+      # requirements.txt (pandas==2.2.2) so a stubs upgrade can't flip
+      # this job red independently of a pandas bump — move both together.
+      - run: pip install mypy types-PyYAML types-redis pandas-stubs==2.2.2.240807
       - run: mypy src/ --ignore-missing-imports --no-strict-optional --follow-imports=silent
 
   # ── 3. Unit tests ──────────────────────────────────────────

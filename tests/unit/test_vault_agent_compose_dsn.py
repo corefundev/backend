@@ -6,7 +6,6 @@ triggered the R8-12 v1 SASL trap (2026-05-25).
 """
 from __future__ import annotations
 
-import importlib
 import os
 
 import pytest
