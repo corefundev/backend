@@ -67,9 +67,9 @@ src/api/routers/notifications.py:157  pre-R9 baseline; triage in R10 — telegra
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
-src/api/routers/training.py:313  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits)
-src/api/routers/training.py:342  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits)
-src/api/routers/training.py:355  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits)
+src/api/routers/training.py:323  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits) (was :313, +10 #155 envelope)
+src/api/routers/training.py:352  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope)
+src/api/routers/training.py:365  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 src/pipeline/inference_utils.py:414  R11-#59 (was :404, +10 L-A4 #186 doc-comment) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
 src/pipeline/inference_utils.py:475  R11-#59 (was :460, +10 L-A4 #186 doc-comment) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge)

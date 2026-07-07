@@ -48,9 +48,12 @@ from src.pipeline.task_queue import enqueue_training, get_job_status
 from src.plans.enforcement import PlanLimitExceeded, assert_sku_count_within_limit
 from src.plans.plans import get_plan_spec
 from src.plans.quota import (
+    REASON_IN_FLIGHT,
     QuotaExceeded,
     TrainingInProgress,
     check_training_quota,
+    denial_envelope,
+    denial_envelope_from_exc,
     record_training_started,
 )
 
@@ -147,7 +150,10 @@ async def trigger_training(
     if record.status == "training":
         raise HTTPException(
             status_code=409,
-            detail="A training run is already in progress for this client.",
+            detail=denial_envelope(
+                REASON_IN_FLIGHT,
+                "A training run is already in progress for this client.",
+            ),
         )
 
     # ── Plan quota ──────────────────────────────────────────────────
@@ -166,7 +172,9 @@ async def trigger_training(
             dedup_key=f"quota_training_{datetime.now(timezone.utc).date()}",
         )
         headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
-        raise HTTPException(status_code=429, detail=str(e), headers=headers)
+        raise HTTPException(
+            status_code=429, detail=denial_envelope_from_exc(e), headers=headers,
+        )
 
     # ── SKU cap — FAIL-CLOSED (R11-H3) ──────────────────────────────
     # The SKU cap is the ONLY enforcement of plan.max_skus. The previous
@@ -285,10 +293,12 @@ async def trigger_training(
     except TrainingInProgress as e:
         # R11-H4: lost the race to a concurrent start (the atomic gate's
         # single-in-flight clause matched zero rows). 409, not 429.
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=denial_envelope_from_exc(e))
     except QuotaExceeded as e:
         headers = {"Retry-After": str(e.retry_after_sec)} if e.retry_after_sec else None
-        raise HTTPException(status_code=429, detail=str(e), headers=headers)
+        raise HTTPException(
+            status_code=429, detail=denial_envelope_from_exc(e), headers=headers,
+        )
     # NOTE: status='training' is set ATOMICALLY by the gate above
     # (record_training_started → try_record_training_run). The previous
     # separate, non-atomic `registry.update(status="training")` here was

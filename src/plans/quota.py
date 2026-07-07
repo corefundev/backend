@@ -59,21 +59,77 @@ class QuotaStatus:
     cooldown_until:           Optional[datetime]      # None if not cooling down
 
 
+# ── Machine-readable denial reason-codes (B3 #155) ────────────────────────────
+# Stable string codes the FE keys its wording/ETA off — decoupled from the
+# HTTP status and from the human message (which is localisable and may change).
+# A frozenset so a typo'd code fails fast in tests, and new codes are additive.
+REASON_COOLDOWN  = "cooldown"    # per-plan cooldown still active (Free 12h)
+REASON_LOST_RACE = "lost_race"   # atomic gate lost to a concurrent start
+REASON_IN_FLIGHT = "in_flight"   # client already has a run in progress
+QUOTA_REASON_CODES = frozenset({REASON_COOLDOWN, REASON_LOST_RACE, REASON_IN_FLIGHT})
+
+
 class QuotaExceeded(Exception):
-    """Raised when a client tries to train outside of their plan limits."""
-    def __init__(self, reason: str, retry_after_sec: int | None = None):
+    """Raised when a client tries to train outside of their plan limits.
+
+    `reason_code` is a stable machine-readable code from QUOTA_REASON_CODES
+    (B3 #155); `cooldown_until` carries the ETA for the FE countdown when the
+    denial is a cooldown (None otherwise)."""
+    def __init__(
+        self,
+        reason: str,
+        retry_after_sec: int | None = None,
+        reason_code: str = REASON_COOLDOWN,
+        cooldown_until: Optional[datetime] = None,
+    ):
         super().__init__(reason)
         self.reason = reason
         self.retry_after_sec = retry_after_sec
+        self.reason_code = reason_code
+        self.cooldown_until = cooldown_until
 
 
 class TrainingInProgress(Exception):
     """R11-H4 — raised when a client already has a training run in flight
     (single-in-flight gate). Distinct from QuotaExceeded so the route can
     map it to 409 Conflict (not 429 quota)."""
+    reason_code = REASON_IN_FLIGHT
+
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def denial_envelope(
+    reason_code: str,
+    message: str,
+    retry_after_sec: int | None = None,
+    cooldown_until: Optional[datetime] = None,
+) -> dict:
+    """B3 #155 — the structured `detail` body every training-denial route
+    returns, so the FE keys off `reason_code` (stable) instead of parsing the
+    human `message` (localisable). `cooldown_until` (ISO-8601) drives the
+    "следующее обучение через X" countdown; None when not a cooldown.
+
+    Single source of the envelope shape — the router builds it from a caught
+    exception via `denial_envelope_from_exc`."""
+    assert reason_code in QUOTA_REASON_CODES, f"unknown reason_code {reason_code!r}"
+    return {
+        "reason_code":     reason_code,
+        "message":         message,
+        "retry_after_sec": retry_after_sec,
+        "cooldown_until":  cooldown_until.isoformat() if cooldown_until else None,
+    }
+
+
+def denial_envelope_from_exc(exc: "QuotaExceeded | TrainingInProgress") -> dict:
+    """Build the #155 envelope from a caught quota exception."""
+    return denial_envelope(
+        reason_code=getattr(exc, "reason_code", REASON_COOLDOWN),
+        message=str(exc),
+        retry_after_sec=getattr(exc, "retry_after_sec", None),
+        cooldown_until=getattr(exc, "cooldown_until", None),
+    )
 
 
 # ── Read-only status ──────────────────────────────────────────────────────────
@@ -113,6 +169,8 @@ def check_training_quota(record: ClientRecord) -> QuotaStatus:
             f"Next training allowed in ~{hours}h "
             f"(at {status.cooldown_until.isoformat()}).",
             retry_after_sec=max(1, retry),
+            reason_code=REASON_COOLDOWN,
+            cooldown_until=status.cooldown_until,
         )
 
     # Monthly training limits were removed 2026-06-02 (early idea that
@@ -177,6 +235,7 @@ def record_training_started(
             "under concurrent load (race lost between fast-check and "
             "atomic commit). Retry in a moment.",
             retry_after_sec=1,
+            reason_code=REASON_LOST_RACE,
         )
 
     return ClientRecord(
