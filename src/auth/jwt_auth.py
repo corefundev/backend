@@ -435,6 +435,13 @@ def require_client_access(client_id: str, auth: AuthContext) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account suspended. Contact support.",
         )
+    # B4 (#156): a soft-deleted (closed) account is denied immediately, like
+    # suspension — access must stop at closure, not at JWT expiry.
+    if rec is not None and getattr(rec, "deleted_at", None) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account closed.",
+        )
 
 
 # ── FastAPI dependency ────────────────────────────────────────

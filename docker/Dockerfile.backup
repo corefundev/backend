@@ -84,7 +84,7 @@ RUN chmod +x /usr/local/bin/lockbox_bootstrap.sh \
 # model_age_seconds{client_id} gauge per client so ModelStale can fire when
 # a served model exceeds the drift-informed age threshold (#151/#219
 # measured coverage drifting 0.805→~0.75 over 1-3 months).
-RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "10 2 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh backup /scripts/backup.sh >> /var/log/backup.log 2>&1" \
         "30 3 * * 0 /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh base_backup /scripts/base_backup.sh >> /var/log/base_backup.log 2>&1" \
         "0  4 * * * /usr/local/bin/lockbox_bootstrap.sh /usr/local/bin/cron_wrapper.sh audit_log_retention /scripts/audit_log_retention.sh >> /var/log/audit_log_retention.log 2>&1" \
@@ -93,9 +93,10 @@ RUN printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "*/5 * * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/archive_mode_check.sh >> /var/log/archive_mode_check.log 2>&1" \
         "7 * * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/model_age_check.sh >> /var/log/model_age_check.log 2>&1" \
         "15 7 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/staleness_nudge.sh >> /var/log/staleness_nudge.log 2>&1" \
+        "40 4 * * * /usr/local/bin/lockbox_bootstrap.sh /scripts/pii_purge.sh >> /var/log/pii_purge.log 2>&1" \
         "20 5 * * * /scripts/rotate_backup_logs.sh >> /var/log/rotate.log 2>&1" \
         | crontab - \
- && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log /var/log/mirror_prune.log /var/log/archive_mode_check.log /var/log/model_age_check.log /var/log/staleness_nudge.log /var/log/rotate.log
+ && touch /var/log/backup.log /var/log/base_backup.log /var/log/audit_log_retention.log /var/log/wal_mirror.log /var/log/mirror_prune.log /var/log/archive_mode_check.log /var/log/model_age_check.log /var/log/staleness_nudge.log /var/log/pii_purge.log /var/log/rotate.log
 
 # Foreground crond — image PID 1.
 # Echo the "backup cron installed" sentinel so scripts/restart-backup

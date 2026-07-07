@@ -57,6 +57,11 @@ class ClientRecord:
     # ADM-10 (#278): operator suspension — NULL = active. Set/cleared only
     # via the admin endpoints; enforcement in require_client_access.
     suspended_at: Optional[str] = None
+    # B4 (#156): 152-ФЗ self-service account closure. NULL = active; set by
+    # the client's own DELETE /clients/{id}. Revokes access immediately
+    # (require_client_access), then scripts/pii_purge.sh anonymises PII after
+    # PII_RETENTION_DAYS. Distinct from suspended_at (operator, reversible).
+    deleted_at: Optional[str] = None
 
     # ── Subscription plan + usage counters ────────────────────────────
     # plan: "free" | "start" | "business" — resolved to PlanSpec at enforce time.
@@ -181,6 +186,7 @@ CLIENT_UPDATABLE_COLUMNS: frozenset = frozenset({
     "config", "storage_path",
     "last_trained_at", "last_mlflow_run_id", "last_wmape", "last_mase",
     "status", "model_version", "horizon", "notes", "suspended_at",
+    "deleted_at",
     "plan", "trained_sku_count",
     "api_key_hash", "email", "email_canonical", "email_verified_at",
     "oauth_provider", "oauth_subject",
@@ -507,6 +513,7 @@ class PostgresClientRegistry(ClientRegistry):
             last_trained_at=str(row["last_trained_at"]) if row.get("last_trained_at") else None,
             last_mlflow_run_id=row.get("last_mlflow_run_id"),
             suspended_at=str(row["suspended_at"]) if row.get("suspended_at") else None,
+            deleted_at=str(row["deleted_at"]) if row.get("deleted_at") else None,
             last_wmape=row.get("last_wmape"),
             last_mase=row.get("last_mase"),
             status=row.get("status", "registered"),

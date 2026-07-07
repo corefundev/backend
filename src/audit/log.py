@@ -185,6 +185,11 @@ EVT_MODEL_TRAIN    = "model_train"      # subtypes: enqueued, finished, failed
 EVT_MODEL_DELETE   = "model_delete"
 EVT_UPLOAD_DELETE  = "upload_delete"
 
+# B4 #156 — 152-ФЗ PII lifecycle
+EVT_CLIENT_EXPORT  = "client_export"    # self-service data export (right to access)
+EVT_CLIENT_DELETE  = "client_delete"    # self-service account closure (soft-delete)
+EVT_CLIENT_PURGE   = "client_purge"     # cron PII anonymisation after retention
+
 # System
 EVT_SECRET_ROTATION = "secret_rotation"
 EVT_ADMIN_ACTION    = "admin_action"

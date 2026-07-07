@@ -22,7 +22,10 @@ from src.api._helpers import assert_json_depth as _assert_json_depth
 from src.api.service_cache import invalidate as invalidate_service_cache
 from src.audit import (
     EVT_ADMIN_ACTION,
+    EVT_CLIENT_DELETE,
+    EVT_CLIENT_EXPORT,
     EVT_PASSWORD_CHANGE,
+    list_for_client as _audit_for_client,
     record_event,
 )
 from src.auth.api_keys import generate_api_key, hash_api_key
@@ -262,6 +265,129 @@ async def rotate_api_key(
         "client_id": client_id,
         "api_key":   new_key,
         "warning":   "Сохраните новый api_key. Старый теперь недействителен.",
+    }
+
+
+@router.get("/clients/{client_id}/export")
+async def export_client_data(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """B4 #156 (152-ФЗ, right to access/portability) — self-service export of
+    ALL PII the system holds about the client.
+
+    Auth: the client themselves (require_client_access) or an admin.
+    Excludes secrets by construction — api_key_hash / oauth_subject are NEVER
+    in the bundle (same R4-2 allowlist discipline as _client_to_safe_dict)."""
+    require_client_access(client_id, auth)
+
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    # Curated profile — explicit allowlist, NOT asdict (never leak api_key_hash).
+    profile = {
+        "client_id":         record.client_id,
+        "email":             record.email,
+        "plan":              record.plan,
+        "created_at":        record.created_at,
+        "horizon":           record.horizon,
+        "status":            record.status,
+        "suspended_at":      record.suspended_at,
+        "deleted_at":        record.deleted_at,
+        "config":            record.config,
+        "email_verified_at": record.email_verified_at,
+    }
+
+    def _safe_rows(records) -> list[dict]:
+        # Records are the client's own operational data (metrics, filenames);
+        # nothing sensitive lives there, but drop private dunder keys.
+        from dataclasses import asdict, is_dataclass
+        out = []
+        for r in records:
+            if is_dataclass(r) and not isinstance(r, type):
+                d = asdict(r)
+            else:
+                d = dict(r)
+            out.append({k: v for k, v in d.items() if not k.startswith("_")})
+        return out
+
+    bundle: dict = {"profile": profile}
+    # Each source is best-effort — a missing/unavailable registry must not
+    # deny the client their export of what IS available.
+    try:
+        from src.storage.training_runs import get_training_runs_registry
+        bundle["training_runs"] = _safe_rows(
+            get_training_runs_registry().list_for_client(client_id, limit=500)
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("export: training_runs unavailable (client=%s): %s", client_id, e)
+        bundle["training_runs"] = []
+    try:
+        from src.storage.upload_registry import get_upload_registry
+        bundle["uploads"] = _safe_rows(
+            get_upload_registry().list_for_client(client_id, limit=500)
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("export: uploads unavailable (client=%s): %s", client_id, e)
+        bundle["uploads"] = []
+    try:
+        bundle["access_log"] = _safe_rows(_audit_for_client(client_id, limit=500))
+    except Exception as e:    # noqa: BLE001
+        logger.warning("export: audit unavailable (client=%s): %s", client_id, e)
+        bundle["access_log"] = []
+
+    record_event(
+        event_type=EVT_CLIENT_EXPORT, client_id=client_id,
+        actor_email=record.email_canonical or record.email,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+        metadata={"actor_role": ",".join(auth.roles or [])},
+    )
+    return bundle
+
+
+@router.delete("/clients/{client_id}")
+async def close_client_account(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """B4 #156 (152-ФЗ, right to erasure) — self-service account closure.
+
+    Soft-delete: sets deleted_at → access is revoked IMMEDIATELY
+    (require_client_access), the row is retained through PII_RETENTION_DAYS
+    for support-side restore, then scripts/pii_purge.sh anonymises the PII.
+    Idempotent — closing an already-closed account is a no-op 200."""
+    require_client_access(client_id, auth)
+
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    if record.deleted_at is not None:
+        return {"client_id": client_id, "deleted_at": record.deleted_at, "already_closed": True}
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    registry.update(client_id, deleted_at=now)
+    invalidate_service_cache(client_id)
+
+    record_event(
+        event_type=EVT_CLIENT_DELETE, client_id=client_id,
+        actor_email=record.email_canonical or record.email,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+        metadata={"actor_role": ",".join(auth.roles or [])},
+    )
+    return {
+        "client_id": client_id,
+        "deleted_at": now,
+        "message": "Аккаунт закрыт. Доступ прекращён; персональные данные будут "
+                   "удалены по истечении срока хранения.",
     }
 
 
