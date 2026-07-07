@@ -6,7 +6,7 @@ LightGBM, so they run on macOS dev boxes too (no libomp dependency).
 
   M8  — _training_job cleans up the merged temp parquet even when training
         raises (cleanup moved into a `finally`).
-  M9  — ClusterBasedForecaster returns REAL mean sales, not a z-score
+  M9  — (класс удалён в #231 KILL; регресс-тест снят вместе с ним)
         (the scaler no longer overwrites the mean_sales column in place).
   M10 — ForecastingService.predict (the serving path) FAILS CLOSED: if
         both primary and fallback fail it raises, instead of returning
@@ -90,27 +90,6 @@ def test_serving_predict_still_falls_back_when_fallback_works():
 
 # ── M9: cold-start returns real sales, not a z-score ─────────────────────
 
-def test_cold_start_returns_real_sales_not_zscore():
-    from src.models.cold_start import ClusterBasedForecaster
-    # three warm SKUs with clearly distinct, positive mean sales
-    rows = []
-    for sku, base in (("A", 100.0), ("B", 50.0), ("C", 10.0)):
-        for i in range(30):
-            rows.append({"sku": sku, "y": base + i * 0.1, "date": i})
-    df = pd.DataFrame(rows)
-
-    f = ClusterBasedForecaster(n_neighbors=2).fit(df, "sku", "y")
-    cold = pd.DataFrame({"sku": ["X"] * 10, "y": np.full(10, 98.0), "date": range(10)})
-    pred = f.predict(cold, horizon=7, sku_col="sku", target_col="y", date_col="date")
-
-    assert pred.shape == (7,)
-    # A z-score forecast (the bug) would be ≈0 / negative and tiny. Real
-    # neighbour mean sales are in the tens-to-hundreds.
-    assert np.all(pred > 0)
-    assert pred.mean() > 10.0, f"forecast looks like a z-score, not sales: {pred.mean()}"
-
-
-# ── M8: merged temp parquet cleaned even when training raises ─────────────
 
 def test_training_job_cleans_merged_temp_on_failure(tmp_path, monkeypatch):
     from src.pipeline import task_queue as tq
