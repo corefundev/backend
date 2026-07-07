@@ -67,7 +67,6 @@ def _make_config(client_id: str, horizon: int, n_estimators: int = 30) -> dict:
         "model": {"type":"lgbm","horizon":horizon,"n_estimators":n_estimators,
                    "learning_rate":0.1,"num_leaves":16,"min_child_samples":5,
                    "feature_fraction":0.8,"bagging_fraction":0.8,"bagging_freq":1},
-        "cold_start":{"min_history_days":28,"n_neighbors":2},
         "anomaly_detection":{"enabled":True,"contamination":0.05,"iqr_factor":3.0,"anomaly_weight":0.1},
         "hpo":{"enabled":False},
         "validation":{"type":"walk_forward","n_splits":2},

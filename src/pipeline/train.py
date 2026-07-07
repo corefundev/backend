@@ -24,7 +24,6 @@ from src.features.engineering import build_features, get_feature_columns
 from src.models.forecaster import SKUForecaster, log_to_mlflow
 from src.models.mimo import MIMOForecaster
 from src.models.fallback import SeasonalNaiveModel
-from src.models.cold_start import ClusterBasedForecaster
 from src.models.explainer import SKUExplainer
 from src.storage.backend import ClientStorage
 from src.validation.walk_forward import walk_forward_validate
@@ -601,14 +600,11 @@ def run_training_pipeline(
         final_model.fit(X, y, sample_weight=sample_weights_full,
                         target_censor=target_censor)
 
-    # ── 8. Cold-start cluster fit ─────────────────────────────
-    # Only the cluster forecaster is fit here; the cold-start router
-    # itself isn't wired into /predict yet (tracked separately under
-    # the cold-start integration roadmap), so we don't construct it
-    # at training time.
-    cs_cfg  = config.get("cold_start", {})
-    cluster = ClusterBasedForecaster(n_neighbors=cs_cfg.get("n_neighbors", 5))
-    cluster.fit(df, sku_col, target_col)
+    # (#231 KILL 2026-07-07: cold-start cluster fit удалён — результат
+    # никогда не сохранялся/не грузился (CPU-waste), serve-дыры нет
+    # (own-history фичи + ensemble default_weights + SeasonalNaive), окно
+    # применимости пустое: <28д-SKU отбивается 30-row-гейтом /predict.
+    # Анализ и решение: issue #231.)
 
     # SHAP explainer is constructed here only for forward-compat with
     # the /explain endpoint on the roadmap. Drop it once that endpoint

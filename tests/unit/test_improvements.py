@@ -42,7 +42,6 @@ def _make_config(horizon: int = 7, model_type: str = "mimo") -> dict:
             "min_child_samples": 5, "feature_fraction": 0.8,
             "bagging_fraction": 0.8, "bagging_freq": 5,
         },
-        "cold_start": {"min_history_days": 28, "n_neighbors": 2},
         "anomaly_detection": {"enabled": True, "contamination": 0.05,
                               "iqr_factor": 3.0, "anomaly_weight": 0.1},
         "hpo": {"enabled": False},
@@ -274,43 +273,6 @@ class TestSalesAnomalyDetector:
 # Cold Start
 # ══════════════════════════════════════════════════════════════
 
-class TestColdStartRouter:
-
-    def test_classifies_correctly(self):
-        from src.models.cold_start import ColdStartRouter
-        df = pd.concat([
-            pd.DataFrame({"date": pd.date_range("2023-01-01", periods=60), "sku": "warm", "sales": 10.0}),
-            pd.DataFrame({"date": pd.date_range("2023-01-01", periods=10), "sku": "cold", "sales": 5.0}),
-        ])
-        router = ColdStartRouter(min_history_days=28)
-        result = router.classify(df, sku_col="sku", date_col="date")
-        assert "warm" in result["warm"]
-        assert "cold" in result["cold"]
-
-    def test_cluster_predict_length(self):
-        from src.models.cold_start import ClusterBasedForecaster
-        df = _make_df(n_skus=5, n_days=60)
-        model = ClusterBasedForecaster(n_neighbors=3)
-        model.fit(df, "sku", "sales")
-        cold_history = df[df["sku"] == "SKU_000"]
-        preds = model.predict(cold_history, horizon=7, sku_col="sku",
-                              target_col="sales", date_col="date")
-        assert len(preds) == 7
-
-    def test_cluster_predict_non_negative(self):
-        from src.models.cold_start import ClusterBasedForecaster
-        df = _make_df(n_skus=5, n_days=60)
-        model = ClusterBasedForecaster(n_neighbors=2)
-        model.fit(df, "sku", "sales")
-        cold = df[df["sku"] == "SKU_001"]
-        preds = model.predict(cold, horizon=14, sku_col="sku",
-                              target_col="sales", date_col="date")
-        assert (preds >= 0).all()
-
-
-# ══════════════════════════════════════════════════════════════
-# SHAP Explainer
-# ══════════════════════════════════════════════════════════════
 
 class TestSKUExplainer:
 

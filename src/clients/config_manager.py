@@ -75,8 +75,6 @@ _ALLOWED_RANGES: dict[str, tuple] = {
     "model.feature_fraction":          (0.1, 1.0),
     "model.bagging_fraction":          (0.1, 1.0),
     "validation.n_splits":             (1, 10),
-    "cold_start.min_history_days":     (7, 365),
-    "cold_start.n_neighbors":          (1, 20),
     "anomaly_detection.contamination": (0.01, 0.3),
     "anomaly_detection.iqr_factor":    (1.0, 10.0),
     "hpo.n_trials":                    (1, 500),
