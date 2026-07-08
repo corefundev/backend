@@ -42,14 +42,14 @@ def test_intra_batch_duplicate_collapsed_last_wins():
     assert len(keys) == len(set(keys))
 
 
-def test_forecasts_5tuple_shape():
-    # (sku, fdate, value, p10, p90) — the forecasts batch shape.
+def test_forecasts_row_shape():
+    # (sku, fdate, value, p10, p90, order_qty) — the forecasts batch shape (#308).
     rows = [
-        ("A", "2026-01-01", 1.0, 0.5, 1.5),
-        ("A", "2026-01-01", 2.0, None, None),  # dup → wins
+        ("A", "2026-01-01", 1.0, 0.5, 1.5, 1.25),
+        ("A", "2026-01-01", 2.0, None, None, None),  # dup → wins
     ]
     out = dedup_last_wins(rows, key=lambda r: (r[0], r[1]))
-    assert out == [("A", "2026-01-01", 2.0, None, None)]
+    assert out == [("A", "2026-01-01", 2.0, None, None, None)]
 
 
 def test_empty():

@@ -140,7 +140,12 @@ def generate_and_store_forecasts(
             "%d..%d serve point-only (recursive tail, bands uncalibrated; "
             "#158/#224)", horizon, model_h, model_h + 1, horizon,
         )
-    rows: list[tuple[str, str, float, "float | None", "float | None"]] = []
+    # #308 newsvendor: order-quantity recommendation at the client's service
+    # level, interpolated from the calibrated [p10,p90] (None where the band is
+    # absent — old models / recursive tail — so no recommendation is shown).
+    from src.models.newsvendor import order_quantity
+    service_level = float(config.get("model", {}).get("service_level", 0.7))
+    rows: list[tuple[str, str, float, "float | None", "float | None", "float | None"]] = []
     has_p10 = "p10" in forecasts.columns
     has_p90 = "p90" in forecasts.columns
     for _, r in forecasts.iterrows():
@@ -151,7 +156,8 @@ def generate_and_store_forecasts(
             fdate = str(pd.Timestamp(d).date())
         p10 = float(r["p10"]) if has_p10 and pd.notna(r["p10"]) else None
         p90 = float(r["p90"]) if has_p90 and pd.notna(r["p90"]) else None
-        rows.append((str(r["sku"]), fdate, float(r["predicted_sales"]), p10, p90))
+        order_qty = order_quantity(p10, p90, service_level)
+        rows.append((str(r["sku"]), fdate, float(r["predicted_sales"]), p10, p90, order_qty))
 
     get_forecasts_registry().replace_for_client(
         client_id=client_id, run_id=run_id, rows=rows,

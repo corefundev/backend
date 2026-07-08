@@ -108,10 +108,12 @@ def test_forecasts_happy_path_maps_rows_and_caps_horizon(monkeypatch):
     # horizon capped to the plan ceiling (min(30, 7))
     assert cap["horizon"] == 7
     assert cap["max_skus"] == 30
-    # rows mapped; NaN p10 surfaced as None so the FE hides the ribbon
+    # rows mapped; NaN p10 surfaced as None so the FE hides the ribbon.
+    # #308: 6th element = order_qty interpolated at default τ=0.7 from [p10,p90]
+    # (row1: 8 + 0.75·(12−8) = 11.0; row2 has no p10 → None, no recommendation).
     assert cap["rows"] == [
-        ("A", "2026-01-01", 10.0, 8.0, 12.0),
-        ("A", "2026-01-02", 12.0, None, 14.0),
+        ("A", "2026-01-01", 10.0, 8.0, 12.0, 11.0),
+        ("A", "2026-01-02", 12.0, None, 14.0, None),
     ]
 
 
@@ -197,6 +199,6 @@ def test_forecasts_interval_honesty_is_per_row(monkeypatch):
                                     model_path="m.pkl", config_path="c", run_id="r1")
     assert cap["horizon"] == 30
     assert cap["rows"] == [
-        ("A", "2026-01-01", 10.0, 8.0, 12.0),        # direct segment: band kept
-        ("A", "2026-01-20", 11.0, None, None),       # recursive tail: point-only
+        ("A", "2026-01-01", 10.0, 8.0, 12.0, 11.0),  # direct: band kept, order_qty @0.7
+        ("A", "2026-01-20", 11.0, None, None, None), # recursive tail: point-only, no rec
     ]

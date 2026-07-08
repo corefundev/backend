@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 # ── Допустимые диапазоны значений для валидации ──────────────
 _ALLOWED_RANGES: dict[str, tuple] = {
     "model.horizon":                   (1, 90),
+    "model.service_level":             (0.5, 0.95),   # #308 newsvendor order-quantity τ
     "model.n_estimators":              (50, 5000),
     "model.learning_rate":             (0.001, 0.5),
     "model.num_leaves":                (4, 512),
