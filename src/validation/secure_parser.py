@@ -35,10 +35,13 @@ Defences applied:
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -111,21 +114,172 @@ def _strip_formula_prefix(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── Format sniffing (DP-2 #322) ───────────────────────────────────────────────
+# In-house detection ONLY — no chardet/third-party (supply-chain policy). The
+# sniff produces the report «Подготовка данных» shows the user (DP-4) and the
+# mapping engine consumes (DP-3). It lives in THIS file because the sandbox image
+# copies in secure_parser.py alone (Dockerfile.sandbox) — untrusted bytes must
+# never be sniffed outside the isolation boundary.
+_ENCODINGS = ("utf-8-sig", "utf-8", "cp1251", "cp1252", "latin-1")
+_DELIMITERS = (",", ";", "\t", "|")
+_SNIFF_SAMPLE_BYTES = 64 * 1024
+_SNIFF_SAMPLE_ROWS = 20
+_DATE_HEADER_RE = re.compile(
+    r"^\d{4}[-/.]\d{1,2}([-/.]\d{1,2})?$"      # 2024-01, 2024/01/31
+    r"|^\d{1,2}[.]\d{1,2}[.]\d{2,4}$"           # 31.01.2024
+)
+_NUMERICISH_RE = re.compile(r"^[\s\d.,+\-]+$")
+_EU_DATE_RE = re.compile(r"^\d{1,2}[./]\d{1,2}[./]\d{2,4}$")   # DD.MM.YYYY (day-first)
+
+
+def detect_encoding(raw: bytes) -> str:
+    """First encoding in the priority list that decodes `raw` cleanly. cp1251
+    covers Russian Excel/1С exports; latin-1 is the last resort (never fails)."""
+    for enc in _ENCODINGS:
+        try:
+            raw.decode(enc)
+            return enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return "latin-1"
+
+
+def detect_delimiter(sample_text: str) -> str:
+    """Sniff the CSV delimiter — csv.Sniffer first, header-line frequency as a
+    fallback. RU spreadsheet exports use ';' (Excel list-separator locale)."""
+    try:
+        dialect = csv.Sniffer().sniff(sample_text, delimiters="".join(_DELIMITERS))
+        if dialect.delimiter in _DELIMITERS:
+            return dialect.delimiter
+    except csv.Error:
+        pass
+    first = next((ln for ln in sample_text.splitlines() if ln.strip()), "")
+    counts = {d: first.count(d) for d in _DELIMITERS}
+    best = max(_DELIMITERS, key=lambda d: counts[d])
+    return best if counts[best] > 0 else ","
+
+
+def detect_decimal(values: "list[str]") -> str:
+    """Comma vs dot decimal separator from numeric-looking sample values.
+    '1 234,50' → ',' ; '1234.50' → '.' ; ambiguous/empty → '.'."""
+    comma = dot = 0
+    for v in values:
+        s = str(v or "").strip()
+        if not s or not _NUMERICISH_RE.match(s):
+            continue
+        # a real decimal has at most ONE separator of each kind; values like
+        # "01.02.2024" (a date) or "1.234.567" carry more → skip, don't pollute.
+        if s.count(".") > 1 or s.count(",") > 1:
+            continue
+        last_comma, last_dot = s.rfind(","), s.rfind(".")
+        if last_comma > last_dot:
+            comma += 1
+        elif last_dot > last_comma:
+            dot += 1
+    return "," if comma > dot else "."
+
+
+def detect_shape(headers: "list[str]") -> str:
+    """Coarse layout class. 'wide' = dates spread across columns (needs an
+    unpivot, DP-3 Wave 2); 'long' = canonical one-row-per-(sku, date)."""
+    date_like = sum(1 for h in headers if _DATE_HEADER_RE.match(str(h).strip()))
+    return "wide" if date_like >= 3 else "long"
+
+
+def _confidence(fmt: str, enc: "str | None", headers: "list[str]") -> str:
+    if not headers or not any(h.strip() for h in headers):
+        return "low"
+    if fmt == "csv" and enc not in ("utf-8", "utf-8-sig"):
+        return "medium"     # decoded via a fallback (cp1251/latin-1) — flag it
+    return "high"
+
+
+def sniff_file(path: Path) -> "dict[str, Any]":
+    """Produce the structured sniff report (format, encoding, delimiter, decimal,
+    layout, headers, ~20 sample rows, confidence). Sample-only — never loads the
+    whole file. Runs on the RAW upload inside the sandbox."""
+    with path.open("rb") as f:
+        raw = f.read(_SNIFF_SAMPLE_BYTES)
+    _check_magic(raw)
+    if raw.startswith(b"\xd0\xcf\x11\xe0"):
+        raise ValueError("legacy .xls format is not accepted; please save as .xlsx")
+    if raw.startswith(b"PK\x03\x04"):
+        return _sniff_xlsx(path)
+    return _sniff_csv(path, raw)
+
+
+def _sniff_csv(path: Path, raw: bytes) -> "dict[str, Any]":
+    enc = detect_encoding(raw)
+    text = raw.decode(enc, errors="replace")
+    delim = detect_delimiter(text)
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter=delim)
+            if any(str(c).strip() for c in r)]
+    headers = [str(h).strip() for h in rows[0]] if rows else []
+    sample = [[str(c) for c in r] for r in rows[1:1 + _SNIFF_SAMPLE_ROWS]]
+    flat = [c for r in sample for c in r]
+    return {
+        "format": "csv",
+        "encoding": enc,
+        "delimiter": delim,
+        "decimal": detect_decimal(flat),
+        "row_shape": detect_shape(headers),
+        "n_columns": len(headers),
+        "headers": headers,
+        "sample_rows": sample,
+        "confidence": _confidence("csv", enc, headers),
+    }
+
+
+def _sniff_xlsx(path: Path) -> "dict[str, Any]":
+    import openpyxl   # already a sandbox dependency (see requirements-sandbox.txt)
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        grid = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i > _SNIFF_SAMPLE_ROWS:
+                break
+            grid.append(["" if c is None else str(c) for c in row])
+    finally:
+        wb.close()
+    grid = [r for r in grid if any(str(c).strip() for c in r)]
+    headers = [h.strip() for h in grid[0]] if grid else []
+    sample = grid[1:1 + _SNIFF_SAMPLE_ROWS]
+    flat = [c for r in sample for c in r]
+    return {
+        "format": "xlsx",
+        "encoding": None,
+        "delimiter": None,
+        "decimal": detect_decimal(flat),
+        "row_shape": detect_shape(headers),
+        "n_columns": len(headers),
+        "headers": headers,
+        "sample_rows": sample,
+        "confidence": _confidence("xlsx", None, headers),
+    }
+
+
 def _read_csv(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
     # chunksize = None would load everything — we check size via `nrows` first.
     with path.open("rb") as f:
-        sample = f.read(4096)
-    _check_magic(sample)
+        sample = f.read(_SNIFF_SAMPLE_BYTES)
+    _check_magic(sample[:4096])
 
-    # Probe: read just one row to count columns.
-    head = pd.read_csv(path, nrows=0)
+    # DP-2 #322: robust reading — detect encoding + delimiter so RU exports
+    # (cp1251, ';'-separated) parse into columns instead of garbling/failing.
+    enc = detect_encoding(sample)
+    delim = detect_delimiter(sample.decode(enc, errors="replace"))
+
+    # Probe: read just one row to count columns (streamed from path, not bytes).
+    head = pd.read_csv(path, nrows=0, sep=delim, encoding=enc)
     if len(head.columns) > max_columns:
         raise ValueError(
             f"too many columns: {len(head.columns)} > {max_columns}"
         )
 
     # Now read up to max_rows+1 to detect overflow.
-    df = pd.read_csv(path, nrows=max_rows + 1, dtype=str, keep_default_na=False)
+    df = pd.read_csv(path, nrows=max_rows + 1, sep=delim, encoding=enc,
+                     dtype=str, keep_default_na=False)
     if len(df) > max_rows:
         raise ValueError(f"too many rows: > {max_rows}")
     return _strip_formula_prefix(df)
@@ -157,6 +311,47 @@ _REQUIRED = ["date", "sku", "sales"]
 _OPTIONAL = ["price", "promo", "stock"]
 
 
+def _to_numeric(series: pd.Series) -> pd.Series:
+    """Numeric coercion tolerant of RU exports: '1 234,50' / '1234,5' →
+    1234.50 / 1234.5. Only rewrites when the comma-form parses STRICTLY MORE
+    cells than the plain form, so genuine dot-decimal data is left untouched."""
+    plain = pd.to_numeric(series, errors="coerce")
+    if not plain.isna().any():
+        return plain
+    ru = pd.to_numeric(
+        series.astype(str)
+              .str.replace(r"[\s ]", "", regex=True)   # thousands spaces / NBSP
+              .str.replace(",", ".", regex=False),
+        errors="coerce",
+    )
+    return ru if ru.notna().sum() > plain.notna().sum() else plain
+
+
+def _to_datetime(series: pd.Series) -> pd.Series:
+    """Date coercion that handles day-first RU formats (31.01.2024). The dotted
+    European form is inherently ambiguous ("01.02" = 1 Feb, not 2 Jan), so we
+    pick dayfirst from the DATA: if most non-blank cells look European (DD.MM.YYYY
+    with dots/slashes) we parse day-first. ISO rows (2024-02-01) parse the same
+    either way, so a mixed column still resolves. A retry with the opposite
+    setting catches the stragglers. The single-format inference warning is
+    suppressed — the ambiguity is handled explicitly, not left to pandas."""
+    s = series.astype(str).str.strip()
+    nonblank = s.ne("")
+    # pandas infers ONE format for the whole column from the first cell, which
+    # cross-contaminates a mixed column — so parse the two families separately:
+    # European dotted/slashed cells day-first, everything else (ISO, …) default.
+    eu_mask = nonblank & s.str.match(_EU_DATE_RE.pattern)
+    rest_mask = nonblank & ~eu_mask
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        if eu_mask.any():
+            result[eu_mask] = pd.to_datetime(series[eu_mask], errors="coerce", dayfirst=True)
+        if rest_mask.any():
+            result[rest_mask] = pd.to_datetime(series[rest_mask], errors="coerce")
+    return result
+
+
 def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) -> pd.DataFrame:
     # Normalise column names (lowercase, strip).
     df = df.rename(columns={c: c.strip() for c in df.columns})
@@ -178,8 +373,8 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
 
     # Type coercion with strict validation.
     df = df.copy()
-    # date
-    parsed = pd.to_datetime(df[date_col], errors="coerce")
+    # date (ISO first, day-first RU retry for the stragglers)
+    parsed = _to_datetime(df[date_col])
     bad_dates = parsed.isna() & df[date_col].astype(str).str.strip().ne("")
     if bad_dates.any():
         raise ValueError(
@@ -188,8 +383,8 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
         )
     df[date_col] = parsed
 
-    # sales → float, non-negative
-    sales = pd.to_numeric(df[target_col], errors="coerce")
+    # sales → float, non-negative (RU decimal-comma tolerant)
+    sales = _to_numeric(df[target_col])
     if sales.isna().all():
         raise ValueError(f"{target_col!r} contains no numeric values")
     if (sales < 0).any():
@@ -205,7 +400,7 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
     # Optional columns: coerce if present, no hard error on NaN.
     for opt in _OPTIONAL:
         if opt in df.columns:
-            df[opt] = pd.to_numeric(df[opt], errors="coerce")
+            df[opt] = _to_numeric(df[opt])
 
     return df
 
@@ -222,12 +417,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--date-col",   default="date")
     p.add_argument("--sku-col",    default="sku")
     p.add_argument("--target-col", default="sales")
+    p.add_argument("--sniff", action="store_true",
+                   help="emit a format sniff report to --manifest and exit (no parse, no parquet)")
     args = p.parse_args(argv)
 
     input_path: Path = args.input
     if not input_path.is_file():
         print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
         return 2
+
+    # DP-2 #322: sniff-only pass — detect format/encoding/delimiter/layout and
+    # return a sample-based report. Never writes a parquet; feeds «Подготовка
+    # данных» (DP-4 preview) and the mapping engine (DP-3).
+    if args.sniff:
+        try:
+            report = sniff_file(input_path)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 3
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+        print(f"SNIFF format={report['format']} cols={report['n_columns']} "
+              f"shape={report['row_shape']} confidence={report['confidence']}")
+        return 0
 
     suffix = input_path.suffix.lower()
     try:
