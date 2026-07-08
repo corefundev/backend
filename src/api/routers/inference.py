@@ -375,6 +375,76 @@ async def list_upload_skus(
     return {"upload_id": upload_id, "count": len(skus), "skus": skus}
 
 
+# ── DP-4b (#324): «Подготовка данных» — column-mapping preview + confirm ───────
+
+class PrepConfirmRequest(BaseModel):
+    # {canonical_field: source_header}; must cover every REQUIRED canonical field.
+    mapping: dict[str, str]
+
+
+@router.get("/clients/{client_id}/uploads/{upload_id}/prep")
+async def get_upload_prep(
+    client_id: str,
+    upload_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Preview for «Подготовка данных»: the sniff report (headers, sample rows,
+    detected format) + the column-mapping proposal, so the user can confirm or
+    correct the mapping before the file is parsed."""
+    require_client_access(client_id, auth)
+    from src.storage import upload_registry as ur
+    from src.validation.column_mapping import CANONICAL_FIELDS, REQUIRED_FIELDS
+
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None or urec.client_id != client_id:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+    return {
+        "upload_id": upload_id,
+        "status": urec.status,
+        "sniff_report": urec.sniff_report,
+        "mapping_proposal": urec.mapping_proposal,
+        "confirmed_mapping": urec.confirmed_mapping,
+        "canonical_fields": list(CANONICAL_FIELDS),
+        "required_fields": list(REQUIRED_FIELDS),
+    }
+
+
+@router.post("/clients/{client_id}/uploads/{upload_id}/prep/confirm")
+async def confirm_upload_prep(
+    client_id: str,
+    upload_id: str,
+    req: PrepConfirmRequest,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Confirm the column mapping and resume processing. Only valid while the
+    upload awaits mapping (NEEDS_MAPPING). Validates that every REQUIRED field is
+    mapped and that sources exist among the sniffed headers, then re-enters the
+    parse with the confirmed mapping."""
+    require_client_access(client_id, auth)
+    from src.storage import upload_registry as ur
+    from src.validation.column_mapping import CANONICAL_FIELDS, REQUIRED_FIELDS
+    from src.pipeline.upload_workers import confirm_prep
+
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None or urec.client_id != client_id:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+    if urec.status != ur.NEEDS_MAPPING:
+        raise HTTPException(
+            409, detail=f"upload is not awaiting mapping (status={urec.status})")
+
+    mapping = {k: v for k, v in req.mapping.items() if k in CANONICAL_FIELDS and v}
+    missing = [f for f in REQUIRED_FIELDS if f not in mapping]
+    if missing:
+        raise HTTPException(422, detail=f"mapping is missing required fields: {missing}")
+    headers = set((urec.sniff_report or {}).get("headers", []))
+    unknown = [v for v in mapping.values() if headers and v not in headers]
+    if unknown:
+        raise HTTPException(422, detail=f"mapping references unknown columns: {unknown}")
+
+    job_id = confirm_prep(upload_id, mapping=mapping)
+    return {"upload_id": upload_id, "status": "processing", "job_id": job_id}
+
+
 # #184: declared `def` (NOT async) on purpose — the body is entirely synchronous
 # (psycopg2 registry read, S3 model load, bcrypt-free, CPU-heavy pandas/ML), so
 # FastAPI runs it in the threadpool and the event loop stays free for other

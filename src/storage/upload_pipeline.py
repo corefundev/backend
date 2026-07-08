@@ -212,17 +212,46 @@ def run_scan(
 
 # ── Stage 3: process ──────────────────────────────────────────────────────────
 
-def sniff_needs_mapping(record: ur.UploadRecord) -> bool:
-    """DP-1 (#321) prep hook: does this clean upload need a user column-mapping
-    step before the canonical parse?
+def sniff_needs_mapping(
+    record: ur.UploadRecord, sandbox: Optional[DockerSandbox] = None,
+) -> bool:
+    """DP-4b (#324) prep decision: sniff the clean upload IN-SANDBOX, propose a
+    column mapping, persist the report + proposal, and decide whether a user
+    mapping step is required.
 
-    DP-2/DP-3 implement the real sniff — a SANDBOXED header/format detection +
-    synonym auto-map + confidence, parking non-canonical / low-confidence
-    uploads in NEEDS_MAPPING. DP-1 is a pure stub that always auto-confirms, so
-    behaviour is IDENTICAL to the pre-prep pipeline (SCANNED_CLEAN → PROCESSING)
-    until the sniff lands. It deliberately does NOT read the file here —
-    parsing is the attack surface and must stay in the sandbox."""
-    return False
+    Returns True → park in NEEDS_MAPPING (user confirms a mapping); False →
+    auto-confirm (canonical / high-confidence files stay zero-click). On auto-
+    confirm the effective mapping is stored so run_process applies it too.
+
+    Fail-safe: ANY sniff failure returns False (auto-confirm) so a broken sniff
+    never blocks the upload — the pipeline degrades to the pre-prep canonical
+    assumption, exactly as it behaved before DP-4. The sniff runs in the sandbox
+    (parsing is the attack surface); we only ever touch header STRINGS here."""
+    from src.validation.column_mapping import propose_mapping
+    registry = ur.get_upload_registry()
+    try:
+        key = z.upload_key(record.client_id, record.upload_id, record.filename)
+        data = z.get_zone_backend(z.Zone.QUARANTINE).download_bytes(key)
+        sandbox = sandbox or DockerSandbox()
+        result = sandbox.sniff(data, record.filename)
+    except Exception as e:    # noqa: BLE001 — best-effort; never block the upload
+        logger.warning("prep sniff errored for %s (%s); auto-confirming", record.upload_id, e)
+        return False
+    if not result.ok or not result.manifest:
+        logger.warning("prep sniff unusable for %s (exit=%s); auto-confirming",
+                       record.upload_id, result.exit_code)
+        return False
+
+    report = result.manifest
+    proposal = propose_mapping(report.get("headers", []))
+    fields = {"sniff_report": report, "mapping_proposal": proposal.to_dict()}
+    if proposal.auto_confirmable:
+        # store the effective mapping now so run_process renames on the auto path
+        fields["confirmed_mapping"] = {k: v for k, v in proposal.mapping.items() if v}
+    registry.update_fields(record.upload_id, **fields)
+    logger.info("prep sniff %s: auto_confirmable=%s missing=%s",
+                record.upload_id, proposal.auto_confirmable, proposal.missing_required)
+    return not proposal.auto_confirmable
 
 
 def run_process(
@@ -258,9 +287,14 @@ def run_process(
             error_message=f"quarantine read failed: {e}",
         )
 
+    # DP-4b (#324): apply the confirmed column mapping (auto-filled on the
+    # canonical path, or set by the user via prep/confirm). None → canonical
+    # parse, unchanged from pre-prep behaviour.
+    mapping = json.dumps(record.confirmed_mapping) if record.confirmed_mapping else None
+
     sandbox = sandbox or DockerSandbox()
     try:
-        result: SandboxResult = sandbox.run(data, record.filename)
+        result: SandboxResult = sandbox.run(data, record.filename, mapping=mapping)
     except SandboxError as e:
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,

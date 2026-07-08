@@ -27,8 +27,9 @@ def test_transition_guard_allows_and_blocks():
         ur._assert_transition(ur.NEEDS_MAPPING, ur.PROCESSED)  # can't skip PROCESSING
 
 
-def test_sniff_stub_auto_confirms():
-    # DP-1 stub never parks in mapping → behaviour identical to pre-prep flow
+def test_sniff_failsafe_auto_confirms():
+    # DP-4b: with no readable quarantine file the sniff errors → fail-safe
+    # auto-confirm (False), so a broken sniff never blocks the upload.
     from src.storage.upload_pipeline import sniff_needs_mapping
     rec = ur.UploadRecord(upload_id="u1", client_id="c1", filename="f.csv",
                           size_bytes=1, sha256="x", status=ur.SCANNED_CLEAN)

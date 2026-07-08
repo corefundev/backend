@@ -202,13 +202,10 @@ def enqueue_process(
 
 
 def confirm_prep(upload_id: str, mapping: Optional[dict] = None) -> Optional[str]:
-    """DP-1 (#321): user confirmed the column mapping (DP-4 API calls this) →
-    re-enter the parse. Idempotent — acts only on NEEDS_MAPPING uploads.
-
-    DP-3 will persist `mapping` as the upload's prep profile here and DP-2's
-    sandbox parser will consume it; DP-1 accepts the argument but the parse is
-    still the canonical one (mapping not yet applied). Returns the enqueued
-    process job id, or None when there's nothing to confirm."""
+    """DP-4b (#324): the user confirmed a column mapping (prep/confirm API) →
+    persist it and re-enter the parse. Idempotent — acts only on NEEDS_MAPPING
+    uploads. `mapping` is {canonical: source}; run_process applies it in-sandbox.
+    Returns the enqueued process job id, or None when there's nothing to confirm."""
     from src.storage import upload_registry as ur
     reg = ur.get_upload_registry()
     record = reg.get(upload_id)
@@ -218,5 +215,6 @@ def confirm_prep(upload_id: str, mapping: Optional[dict] = None) -> Optional[str
         logger.info("confirm_prep skipped: upload %s at %s (expected %s)",
                     upload_id, record.status, ur.NEEDS_MAPPING)
         return None
-    # DP-3: persist `mapping` as the prep profile for this upload here.
+    if mapping is not None:
+        reg.update_fields(upload_id, confirmed_mapping=mapping)
     return enqueue_process(upload_id, client_id=record.client_id)
