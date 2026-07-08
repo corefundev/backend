@@ -49,10 +49,10 @@ src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +18 #229 market block) (revert #229 block → module)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:207  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:294  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:307  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:313  R9-T7-010 — uploads error_message never set; triage in R10 [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:374  pre-R9 baseline; triage in R10 — cancel_upload best-effort [+3 R13-LOW .xlsm comment]
+src/storage/upload_pipeline.py:310  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment]
+src/storage/upload_pipeline.py:323  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment]
+src/storage/upload_pipeline.py:329  R9-T7-010 — uploads error_message never set; triage in R10 [+3 R13-LOW .xlsm comment]
+src/storage/upload_pipeline.py:390  pre-R9 baseline; triage in R10 — cancel_upload best-effort [+3 R13-LOW .xlsm comment]
 src/storage/sandbox.py:163  pre-R9 baseline (was :240); R11-#66 moved the site into spawn_and_wait — container remove is best-effort cleanup AFTER logs are read, failure logged
 src/storage/sandbox.py:326  pre-R9 baseline (was :228); R11-#66 refactor shifted — post-run persist error folds into stderr + ok=False, surfaced not swallowed
 src/audit/log.py:262  R9-T4-004 — audit replica fallback; close as part of T6-006 audit HMAC fail-closed (+33 lines after R10 phantom-metric Counter insertion 2026-05-27) (was :257, #156 shift)

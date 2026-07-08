@@ -78,6 +78,18 @@ def _emit_upload_inbox(record) -> None:
                       else f"«{record.filename}»: ошибка обработки — проверьте формат."),
                 dedup_key=f"upload:{record.upload_id}",
             )
+        elif record.status == ur.NEEDS_MAPPING:
+            # DP-1 (#321): user action required — map their columns to the
+            # canonical fields in «Подготовка данных» before the file processes.
+            emit_notification(
+                record.client_id, type="upload_needs_mapping", severity="info",
+                title="Нужно сопоставить колонки",
+                body=(f"«{record.filename}»: проверьте сопоставление колонок "
+                      f"в разделе «Подготовка данных», чтобы продолжить."),
+                # distinct key: NEEDS_MAPPING is non-terminal, so it must NOT
+                # dedup-collide with the later terminal PROCESSED/FAIL notice.
+                dedup_key=f"upload:{record.upload_id}:mapping",
+            )
     except Exception as e:    # noqa: BLE001 — void best-effort emitter
         logger.warning("upload inbox emit skipped (%s): %s",
                        getattr(record, "upload_id", "?"), e)
@@ -94,9 +106,18 @@ def _scan_job(upload_id: str) -> dict:
     record = run_scan(upload_id)
     _emit_upload_inbox(record)          # terminal here only if INFECTED
     if record.status == ur.SCANNED_CLEAN:
-        # Audit R3-1: propagate client_id so the chained process job
-        # carries the same ownership stamp as the original scan job.
-        enqueue_process(upload_id, client_id=record.client_id)
+        # DP-1 (#321): prep decision. Non-canonical / low-confidence uploads
+        # park in NEEDS_MAPPING for the user to confirm a column mapping; the
+        # sniff is a stub that auto-confirms today (behaviour unchanged) and
+        # gains real logic in DP-2/DP-3.
+        from src.storage.upload_pipeline import sniff_needs_mapping
+        if sniff_needs_mapping(record):
+            parked = ur.get_upload_registry().update_status(upload_id, ur.NEEDS_MAPPING)
+            _emit_upload_inbox(parked)
+        else:
+            # Audit R3-1: propagate client_id so the chained process job
+            # carries the same ownership stamp as the original scan job.
+            enqueue_process(upload_id, client_id=record.client_id)
     return {
         "upload_id": upload_id,
         "status": record.status,
@@ -178,3 +199,24 @@ def enqueue_process(
         logger.warning("process queue unavailable (%s); running inline", e)
         _process_job(upload_id)
         return None
+
+
+def confirm_prep(upload_id: str, mapping: Optional[dict] = None) -> Optional[str]:
+    """DP-1 (#321): user confirmed the column mapping (DP-4 API calls this) →
+    re-enter the parse. Idempotent — acts only on NEEDS_MAPPING uploads.
+
+    DP-3 will persist `mapping` as the upload's prep profile here and DP-2's
+    sandbox parser will consume it; DP-1 accepts the argument but the parse is
+    still the canonical one (mapping not yet applied). Returns the enqueued
+    process job id, or None when there's nothing to confirm."""
+    from src.storage import upload_registry as ur
+    reg = ur.get_upload_registry()
+    record = reg.get(upload_id)
+    if record is None:
+        raise KeyError(f"upload_id {upload_id!r} not found")
+    if record.status != ur.NEEDS_MAPPING:
+        logger.info("confirm_prep skipped: upload %s at %s (expected %s)",
+                    upload_id, record.status, ur.NEEDS_MAPPING)
+        return None
+    # DP-3: persist `mapping` as the prep profile for this upload here.
+    return enqueue_process(upload_id, client_id=record.client_id)

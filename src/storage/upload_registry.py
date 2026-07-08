@@ -61,12 +61,17 @@ UPLOADED         = "uploaded"
 SCANNING         = "scanning"
 SCANNED_CLEAN    = "scanned_clean"
 INFECTED         = "infected"
+# DP-1 (#321): prep stage — after AV, before the canonical parse. When the
+# sniff can't auto-confirm the mapping (non-canonical headers / low confidence)
+# the upload parks in NEEDS_MAPPING until the user confirms a column mapping
+# (DP-3/DP-4). Canonical uploads skip it (auto-confirm → straight to PROCESSING).
+NEEDS_MAPPING    = "needs_mapping"
 PROCESSING       = "processing"
 PROCESSED        = "processed"
 PROCESSING_FAIL  = "processing_failed"
 
 ALL_STATES = {
-    UPLOADED, SCANNING, SCANNED_CLEAN, INFECTED,
+    UPLOADED, SCANNING, SCANNED_CLEAN, INFECTED, NEEDS_MAPPING,
     PROCESSING, PROCESSED, PROCESSING_FAIL,
 }
 
@@ -74,7 +79,8 @@ TERMINAL_STATES   = {INFECTED, PROCESSED, PROCESSING_FAIL}
 ALLOWED_NEXT: dict[str, set[str]] = {
     UPLOADED:       {SCANNING},
     SCANNING:       {SCANNED_CLEAN, INFECTED, PROCESSING_FAIL},
-    SCANNED_CLEAN:  {PROCESSING},
+    SCANNED_CLEAN:  {PROCESSING, NEEDS_MAPPING},
+    NEEDS_MAPPING:  {PROCESSING, PROCESSING_FAIL},
     PROCESSING:     {PROCESSED, PROCESSING_FAIL},
 }
 
