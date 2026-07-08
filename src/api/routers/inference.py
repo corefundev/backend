@@ -264,9 +264,9 @@ def list_forecasts(
     # rows produced by older training runs (before the v0.8.26 schema
     # migration) or by models without quantile sub-models.
     from collections import defaultdict
-    by_sku: dict[str, list[tuple[str, float, "float | None", "float | None"]]] = defaultdict(list)
+    by_sku: dict[str, list[tuple[str, float, "float | None", "float | None", "float | None"]]] = defaultdict(list)
     for r in rows:
-        by_sku[r["sku"]].append((r["forecast_date"], r["value"], r.get("p10"), r.get("p90")))
+        by_sku[r["sku"]].append((r["forecast_date"], r["value"], r.get("p10"), r.get("p90"), r.get("order_qty")))
 
     all_dates  = sorted({fd for points in by_sku.values() for (fd, *_) in points})
     first_date = all_dates[0]
@@ -278,19 +278,23 @@ def list_forecasts(
         date_to_value: dict[str, float] = {}
         date_to_p10:   dict[str, "float | None"] = {}
         date_to_p90:   dict[str, "float | None"] = {}
-        for (fd, v, p10, p90) in by_sku[sku_name]:
+        date_to_order: dict[str, "float | None"] = {}
+        for (fd, v, p10, p90, oq) in by_sku[sku_name]:
             date_to_value[fd] = v
             date_to_p10[fd]   = p10
             date_to_p90[fd]   = p90
+            date_to_order[fd] = oq
         # Fill missing dates with None — clients can render gaps.
         values = [date_to_value.get(d) for d in all_dates]
         p10s   = [date_to_p10.get(d)   for d in all_dates]
         p90s   = [date_to_p90.get(d)   for d in all_dates]
+        order_qty = [date_to_order.get(d) for d in all_dates]
         skus_payload.append({
-            "sku":    sku_name,
-            "values": values,
-            "p10":    p10s,
-            "p90":    p90s,
+            "sku":       sku_name,
+            "values":    values,
+            "p10":       p10s,
+            "p90":       p90s,
+            "order_qty": order_qty,   # #308 newsvendor: recommended order quantity
         })
 
     return {

@@ -58,6 +58,10 @@ model:
   objective: mse
   tweedie_variance_power: 1.5    # used only when objective=tweedie. (1, 2): closer to 1 = poisson-like, closer to 2 = gamma-like
   quantiles: [0.1, 0.5, 0.9]   # for interval forecasts
+  # #308 newsvendor: service level τ for the ORDER-QUANTITY recommendation
+  # (interpolated from the calibrated [p10,p90]). 0.5 = median; higher = fewer
+  # stockouts / more holding. Optimal τ = Cu/(Cu+Co). Paid clients may override.
+  service_level: 0.7
   # #151 CQR: p10/p90 are conformalized — quantile heads train on history
   # minus the last `conformal_cal_days`, whose held-out targets calibrate the
   # band to the nominal 1−alpha coverage (0.2 → 80%, matching [p10, p90]).

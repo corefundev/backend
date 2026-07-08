@@ -62,10 +62,11 @@ class PostgresForecastsRegistry:
         self,
         client_id: str,
         run_id:    str,
-        rows:      list[tuple[str, str, float, Optional[float], Optional[float]]],
-        # Tuple shape: (sku, forecast_date, value, p10, p90).
-        # p10/p90 may be None when the model has no quantile sub-models
-        # (e.g. fallback SeasonalNaiveModel) — the ribbon hides itself.
+        rows:      list[tuple[str, str, float, Optional[float], Optional[float], Optional[float]]],
+        # Tuple shape: (sku, forecast_date, value, p10, p90, order_qty).
+        # p10/p90/order_qty may be None when the model has no quantile
+        # sub-models (e.g. fallback SeasonalNaiveModel) — ribbon + order
+        # recommendation hide themselves (#308).
     ) -> int:
         """
         Atomically replace this client's forecasts with the given rows.
@@ -93,16 +94,17 @@ class PostgresForecastsRegistry:
                 self._extras.execute_values(
                     cur,
                     "INSERT INTO sku_forecasts "
-                    "(client_id, sku, forecast_date, value, p10, p90, run_id, generated_at) "
+                    "(client_id, sku, forecast_date, value, p10, p90, order_qty, run_id, generated_at) "
                     "VALUES %s",
                     [
                         (
                             client_id, sku, fdate, float(v),
                             None if p10 is None else float(p10),
                             None if p90 is None else float(p90),
+                            None if order_qty is None else float(order_qty),
                             run_id, ts,
                         )
-                        for (sku, fdate, v, p10, p90) in rows
+                        for (sku, fdate, v, p10, p90, order_qty) in rows
                     ],
                 )
                 inserted = cur.rowcount
@@ -126,7 +128,7 @@ class PostgresForecastsRegistry:
         (never silent). Per-SKU reads (`sku` set) are tiny and unaffected.
         """
         sql = (
-            "SELECT sku, forecast_date, value, p10, p90, run_id, generated_at "
+            "SELECT sku, forecast_date, value, p10, p90, order_qty, run_id, generated_at "
             "FROM sku_forecasts WHERE client_id = %s"
         )
         params: list = [client_id]
@@ -153,6 +155,7 @@ class PostgresForecastsRegistry:
                 "value":         float(r["value"]),
                 "p10":           None if r["p10"] is None else float(r["p10"]),
                 "p90":           None if r["p90"] is None else float(r["p90"]),
+                "order_qty":     None if r["order_qty"] is None else float(r["order_qty"]),
                 "run_id":        r["run_id"],
                 "generated_at":  r["generated_at"].isoformat(),
             })

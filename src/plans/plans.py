@@ -101,6 +101,7 @@ class PlanSpec:
 # that's Business territory.
 _START_CONFIG_KEYS = frozenset({
     "model.horizon",
+    "model.service_level",              # #308 newsvendor order-quantity τ (paid)
     "model.objective",                  # ensemble / tweedie / mae / mse
     "model.tweedie_variance_power",     # active only when objective=tweedie
     "model.ensemble_lookback_days",     # weight-estimation window
