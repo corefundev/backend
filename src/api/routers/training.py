@@ -194,9 +194,13 @@ async def trigger_training(
         if urec is None or urec.client_id != client_id:
             raise HTTPException(404, detail=f"upload_id {req.upload_id!r} not found")
         if urec.status != "processed":
+            # DP-4b (#324): training is blocked until data prep is done. Actionable
+            # hint — the user must run «Подготовить» in «Подготовка данных» first.
             raise HTTPException(
                 409,
-                detail=f"upload {req.upload_id} is not yet processed (status={urec.status})",
+                detail=("Данные не подготовлены. Откройте «Подготовка данных», "
+                        "нажмите «Подготовить» и дождитесь готовности, затем "
+                        f"запустите обучение (текущий статус: {urec.status})."),
             )
 
         if get_plan_spec(record.plan).max_skus is not None:

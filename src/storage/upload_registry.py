@@ -59,19 +59,18 @@ logger = logging.getLogger(__name__)
 
 UPLOADED         = "uploaded"
 SCANNING         = "scanning"
+# After AV the upload STOPS at SCANNED_CLEAN and waits — data prep is a separate,
+# USER-triggered stage («Подготовка данных» → «Подготовить» button), NOT an
+# auto-chain from the scan worker (epic #320). Prep then transitions it straight
+# to PROCESSING (sniff + system auto-mapping happen inside the prep worker).
 SCANNED_CLEAN    = "scanned_clean"
 INFECTED         = "infected"
-# DP-1 (#321): prep stage — after AV, before the canonical parse. When the
-# sniff can't auto-confirm the mapping (non-canonical headers / low confidence)
-# the upload parks in NEEDS_MAPPING until the user confirms a column mapping
-# (DP-3/DP-4). Canonical uploads skip it (auto-confirm → straight to PROCESSING).
-NEEDS_MAPPING    = "needs_mapping"
 PROCESSING       = "processing"
 PROCESSED        = "processed"
 PROCESSING_FAIL  = "processing_failed"
 
 ALL_STATES = {
-    UPLOADED, SCANNING, SCANNED_CLEAN, INFECTED, NEEDS_MAPPING,
+    UPLOADED, SCANNING, SCANNED_CLEAN, INFECTED,
     PROCESSING, PROCESSED, PROCESSING_FAIL,
 }
 
@@ -79,8 +78,7 @@ TERMINAL_STATES   = {INFECTED, PROCESSED, PROCESSING_FAIL}
 ALLOWED_NEXT: dict[str, set[str]] = {
     UPLOADED:       {SCANNING},
     SCANNING:       {SCANNED_CLEAN, INFECTED, PROCESSING_FAIL},
-    SCANNED_CLEAN:  {PROCESSING, NEEDS_MAPPING},
-    NEEDS_MAPPING:  {PROCESSING, PROCESSING_FAIL},
+    SCANNED_CLEAN:  {PROCESSING},          # via «Подготовить» → prep worker
     PROCESSING:     {PROCESSED, PROCESSING_FAIL},
 }
 
@@ -117,6 +115,10 @@ class UploadRecord:
     # sandbox into manifest.json and then persisted here when processing
     # completes. Drives the plan-limit UX on the frontend.
     sku_count: Optional[int] = None
+    # DP-4b (#324) prep state — see migration 023.
+    sniff_report: Optional[dict] = None            # in-sandbox format sniff
+    mapping_proposal: Optional[dict] = None         # column-mapping engine output
+    confirmed_mapping: Optional[dict] = None        # {canonical: source} applied at parse
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -132,12 +134,20 @@ def compute_sha256(data: bytes) -> str:
 
 # ── Registry interface ────────────────────────────────────────────────────────
 
+# DP-4b (#324): prep columns persisted as JSONB — set via update_fields (no
+# status change) by the prep worker while the upload is at SCANNED_CLEAN.
+_PREP_COLUMNS = ("sniff_report", "mapping_proposal", "confirmed_mapping")
+
+
 class UploadRegistry:
     def create(self, record: UploadRecord) -> None: ...
     def get(self, upload_id: str) -> Optional[UploadRecord]: ...
     def update_status(
         self, upload_id: str, new_status: str, **extra
     ) -> UploadRecord: ...
+    def update_fields(self, upload_id: str, **fields) -> UploadRecord:
+        """Persist prep columns WITHOUT a status transition (DP-4b #324)."""
+        ...
     def list_for_client(
         self, client_id: str, limit: int = 50
     ) -> list[UploadRecord]: ...
@@ -197,7 +207,8 @@ class PostgresUploadRegistry(UploadRegistry):
         if new_status not in ALL_STATES:
             raise ValueError(f"Unknown status: {new_status!r}")
 
-        allowed_columns = {"scan_result", "error_message", "processed_key", "row_count", "sku_count"}
+        allowed_columns = {"scan_result", "error_message", "processed_key",
+                           "row_count", "sku_count", *_PREP_COLUMNS}
         bad = set(extra) - allowed_columns
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
@@ -217,7 +228,8 @@ class PostgresUploadRegistry(UploadRegistry):
                 values: list = [new_status]
                 for k, v in extra.items():
                     set_parts.append(f"{k} = %s")
-                    values.append(v)
+                    # JSONB columns need the Json adapter (a bare dict won't adapt).
+                    values.append(self._extras.Json(v) if k in _PREP_COLUMNS and v is not None else v)
                 values.append(upload_id)
                 cur.execute(
                     f"UPDATE sku_uploads SET {', '.join(set_parts)} WHERE upload_id = %s",
@@ -230,6 +242,38 @@ class PostgresUploadRegistry(UploadRegistry):
                 updated = cur.fetchone()
             conn.commit()
         logger.info(f"upload {upload_id}: {row['status']} → {new_status}")
+        return self._row_to_record(dict(updated))
+
+    def update_fields(self, upload_id: str, **fields) -> UploadRecord:
+        """DP-4b (#324): persist prep JSONB columns WITHOUT a status change.
+        The prep worker attaches the sniff report / mapping proposal / confirmed
+        mapping while the upload is still at SCANNED_CLEAN (a self-status
+        transition is not a legal FSM edge)."""
+        bad = set(fields) - set(_PREP_COLUMNS)
+        if bad:
+            raise ValueError(f"Cannot update columns: {bad}")
+        if not fields:
+            got = self.get(upload_id)
+            if got is None:
+                raise KeyError(f"upload_id {upload_id!r} not found")
+            return got
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                set_parts = ["updated_at = NOW()"]
+                values: list = []
+                for k, v in fields.items():
+                    set_parts.append(f"{k} = %s")
+                    values.append(self._extras.Json(v) if v is not None else None)
+                values.append(upload_id)
+                cur.execute(
+                    f"UPDATE sku_uploads SET {', '.join(set_parts)} WHERE upload_id = %s",
+                    values,
+                )
+                if cur.rowcount == 0:
+                    raise KeyError(f"upload_id {upload_id!r} not found")
+                cur.execute("SELECT * FROM sku_uploads WHERE upload_id = %s", (upload_id,))
+                updated = cur.fetchone()
+            conn.commit()
         return self._row_to_record(dict(updated))
 
     def list_recent(self, limit: int = 50) -> list[UploadRecord]:
@@ -281,6 +325,9 @@ class PostgresUploadRegistry(UploadRegistry):
             processed_key=row.get("processed_key"),
             row_count=row.get("row_count"),
             sku_count=row.get("sku_count"),
+            sniff_report=row.get("sniff_report"),
+            mapping_proposal=row.get("mapping_proposal"),
+            confirmed_mapping=row.get("confirmed_mapping"),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
         )
@@ -317,7 +364,8 @@ class LocalFileUploadRegistry(UploadRegistry):
     def update_status(self, upload_id: str, new_status: str, **extra) -> UploadRecord:
         if new_status not in ALL_STATES:
             raise ValueError(f"Unknown status: {new_status!r}")
-        allowed_columns = {"scan_result", "error_message", "processed_key", "row_count", "sku_count"}
+        allowed_columns = {"scan_result", "error_message", "processed_key",
+                           "row_count", "sku_count", *_PREP_COLUMNS}
         bad = set(extra) - allowed_columns
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
@@ -333,6 +381,21 @@ class LocalFileUploadRegistry(UploadRegistry):
             row[k] = v
         self._save(data)
         logger.info(f"upload {upload_id}: → {new_status}")
+        return UploadRecord(**row)
+
+    def update_fields(self, upload_id: str, **fields) -> UploadRecord:
+        bad = set(fields) - set(_PREP_COLUMNS)
+        if bad:
+            raise ValueError(f"Cannot update columns: {bad}")
+        data = self._load()
+        if upload_id not in data:
+            raise KeyError(f"upload_id {upload_id!r} not found")
+        row = data[upload_id]
+        if fields:
+            row["updated_at"] = datetime.now(timezone.utc).isoformat()
+            for k, v in fields.items():
+                row[k] = v
+            self._save(data)
         return UploadRecord(**row)
 
     def list_recent(self, limit: int = 50) -> list[UploadRecord]:

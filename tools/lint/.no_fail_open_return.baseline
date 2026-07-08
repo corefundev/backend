@@ -49,10 +49,12 @@ src/features/engineering.py:115  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:123  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +18 #229 market block) (revert #229 block → module)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:207  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:310  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:323  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:329  R9-T7-010 — uploads error_message never set; triage in R10 [+3 R13-LOW .xlsm comment]
-src/storage/upload_pipeline.py:390  pre-R9 baseline; triage in R10 — cancel_upload best-effort [+3 R13-LOW .xlsm comment]
+src/api/routers/inference.py:447  DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
+src/storage/upload_pipeline.py:258  DP-4b #324 — run_prepare best-effort sniff: a sniff failure sets result=None and falls through to a CANONICAL parse (never blocks the upload); logged loudly, no state swallowed
+src/storage/upload_pipeline.py:372  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment] (was :344, +24 DP-4b run_prepare)
+src/storage/upload_pipeline.py:385  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment] (was :357, +24 DP-4b run_prepare)
+src/storage/upload_pipeline.py:391  R9-T7-010 — uploads error_message never set; triage in R10 [+3 R13-LOW .xlsm comment] (was :363, +24 DP-4b run_prepare)
+src/storage/upload_pipeline.py:452  pre-R9 baseline; triage in R10 — cancel_upload best-effort [+3 R13-LOW .xlsm comment] (was :424, +24 DP-4b run_prepare)
 src/storage/sandbox.py:173  pre-R9 baseline (was :240); R11-#66 moved the site into spawn_and_wait — container remove is best-effort cleanup AFTER logs are read, failure logged [+10 DP-4 flags]
 src/storage/sandbox.py:357  pre-R9 baseline (was :228); R11-#66 refactor shifted — post-run persist error folds into stderr + ok=False, surfaced not swallowed [+31 DP-4 _stage_and_spawn extract]
 src/audit/log.py:262  R9-T4-004 — audit replica fallback; close as part of T6-006 audit HMAC fail-closed (+33 lines after R10 phantom-metric Counter insertion 2026-05-27) (was :257, #156 shift)
@@ -67,9 +69,9 @@ src/api/routers/notifications.py:157  pre-R9 baseline; triage in R10 — telegra
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
-src/api/routers/training.py:323  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits) (was :313, +10 #155 envelope)
-src/api/routers/training.py:352  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope)
-src/api/routers/training.py:365  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope)
+src/api/routers/training.py:327  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits) (was :313, +10 #155 envelope) (was :323, +4 DP-4b prep-gate msg)
+src/api/routers/training.py:356  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope) (was :352, +4 DP-4b prep-gate msg)
+src/api/routers/training.py:369  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope) (was :365, +4 DP-4b prep-gate msg)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
 src/pipeline/inference_utils.py:414  R11-#59 (was :404, +10 L-A4 #186 doc-comment) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
 src/pipeline/inference_utils.py:477  R11-#59 (was :460, +10 L-A4 #186 doc-comment) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply)
