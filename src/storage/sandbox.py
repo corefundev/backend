@@ -270,7 +270,7 @@ class DockerSandbox:
         Returns (exit_code, stdout, stderr, out_dir, staging_dir); the CALLER
         owns cleanup of staging_dir. On launch failure staging is removed here."""
         staging = Path(tempfile.mkdtemp(prefix="job-", dir=self.work_dir))
-        in_dir  = staging / "in"
+        in_dir = staging / "in"
         out_dir = staging / "out"
         in_dir.mkdir()
         out_dir.mkdir()
@@ -290,7 +290,7 @@ class DockerSandbox:
         input_path.write_bytes(input_bytes)
         input_path.chmod(0o444)
 
-        max_rows    = int(os.environ.get("SANDBOX_MAX_ROWS",    "5000000"))
+        max_rows = int(os.environ.get("SANDBOX_MAX_ROWS", "5000000"))
         max_columns = int(os.environ.get("SANDBOX_MAX_COLUMNS", "64"))
 
         try:

@@ -66,7 +66,8 @@ def test_mapping_flag_appended_with_value(tmp_path):
 def test_hardening_profile_unchanged(tmp_path):
     # the profile knobs must still be pinned regardless of the new toggles
     client = _FakeClient()
-    (tmp_path / "in").mkdir(); (tmp_path / "out").mkdir()
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
     sandbox.spawn_and_wait(
         client, image="img", in_dir=tmp_path / "in", out_dir=tmp_path / "out",
         input_name="original.csv", max_rows=100, max_columns=10, timeout_sec=5,
