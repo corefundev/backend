@@ -120,7 +120,6 @@ def _strip_formula_prefix(df: pd.DataFrame) -> pd.DataFrame:
 # mapping engine consumes (DP-3). It lives in THIS file because the sandbox image
 # copies in secure_parser.py alone (Dockerfile.sandbox) — untrusted bytes must
 # never be sniffed outside the isolation boundary.
-_ENCODINGS = ("utf-8-sig", "utf-8", "cp1251", "cp1252", "latin-1")
 _DELIMITERS = (",", ";", "\t", "|")
 _SNIFF_SAMPLE_BYTES = 64 * 1024
 _SNIFF_SAMPLE_ROWS = 20
@@ -133,9 +132,14 @@ _EU_DATE_RE = re.compile(r"^\d{1,2}[./]\d{1,2}[./]\d{2,4}$")   # DD.MM.YYYY (day
 
 
 def detect_encoding(raw: bytes) -> str:
-    """First encoding in the priority list that decodes `raw` cleanly. cp1251
-    covers Russian Excel/1С exports; latin-1 is the last resort (never fails)."""
-    for enc in _ENCODINGS:
+    """Detect the text encoding. A real UTF-8 BOM → 'utf-8-sig' (so the BOM is
+    stripped on read); otherwise the first encoding that decodes cleanly. cp1251
+    covers Russian Excel/1С exports; latin-1 is the last resort (never fails).
+    BOM-less UTF-8/ASCII is reported as plain 'utf-8', not 'utf-8-sig', so the
+    label shown to the user is accurate."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    for enc in ("utf-8", "cp1251", "cp1252", "latin-1"):
         try:
             raw.decode(enc)
             return enc
@@ -352,6 +356,26 @@ def _to_datetime(series: pd.Series) -> pd.Series:
     return result
 
 
+def _apply_mapping(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Apply a CONFIRMED column mapping (DP-3 #323): {canonical_field:
+    source_header} → rename the user's columns to canonical names, then keep
+    only the canonical schema (date/sku/sales + optional price/promo/stock).
+
+    Runs in-sandbox so the untrusted rename happens inside isolation. Unknown
+    canonical keys and sources absent from the file are ignored; a required
+    field left unmapped simply fails the downstream _validate (fail-closed)."""
+    schema = _REQUIRED + _OPTIONAL
+    rename: "dict[str, str]" = {}
+    for canonical, source in mapping.items():
+        if canonical in schema and isinstance(source, str) and source in df.columns:
+            rename[source] = canonical
+    df = df.rename(columns=rename)
+    # de-dup: if a rename collided with an existing canonical column, keep first
+    df = df.loc[:, ~df.columns.duplicated()]
+    keep = [c for c in schema if c in df.columns]
+    return df[keep]
+
+
 def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) -> pd.DataFrame:
     # Normalise column names (lowercase, strip).
     df = df.rename(columns={c: c.strip() for c in df.columns})
@@ -419,12 +443,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--target-col", default="sales")
     p.add_argument("--sniff", action="store_true",
                    help="emit a format sniff report to --manifest and exit (no parse, no parquet)")
+    p.add_argument("--mapping", default=None,
+                   help='JSON {canonical_field: source_header} applied before validation (DP-3)')
     args = p.parse_args(argv)
 
     input_path: Path = args.input
     if not input_path.is_file():
         print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
         return 2
+
+    mapping: "dict | None" = None
+    if args.mapping:
+        try:
+            mapping = json.loads(args.mapping)
+            if not isinstance(mapping, dict):
+                raise ValueError("mapping must be a JSON object")
+        except Exception as e:
+            print(f"ERROR: invalid --mapping JSON: {e}", file=sys.stderr)
+            return 2
 
     # DP-2 #322: sniff-only pass — detect format/encoding/delimiter/layout and
     # return a sample-based report. Never writes a parquet; feeds «Подготовка
@@ -449,6 +485,9 @@ def main(argv: list[str] | None = None) -> int:
             df_raw = _read_excel(input_path, args.max_rows, args.max_columns)
         else:
             raise ValueError(f"unsupported extension: {suffix!r}")
+
+        if mapping:
+            df_raw = _apply_mapping(df_raw, mapping)
 
         df_clean = _validate(
             df_raw,

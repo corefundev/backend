@@ -20,7 +20,10 @@ from src.validation import secure_parser as sp
 # ── detection primitives ──────────────────────────────────────────────────────
 
 def test_detect_encoding_utf8_and_cp1251():
-    assert sp.detect_encoding("дата,артикул\n".encode("utf-8")) in ("utf-8", "utf-8-sig")
+    # BOM-less utf-8 → reported as plain 'utf-8' (accurate label, not utf-8-sig)
+    assert sp.detect_encoding("дата,артикул\n".encode("utf-8")) == "utf-8"
+    # a real BOM → utf-8-sig (so the BOM is stripped on read)
+    assert sp.detect_encoding(b"\xef\xbb\xbfdate,sku\n") == "utf-8-sig"
     # cyrillic that is INVALID utf-8 but valid cp1251 → must fall back to cp1251
     assert sp.detect_encoding("Товар;Цена\n".encode("cp1251")) == "cp1251"
 
