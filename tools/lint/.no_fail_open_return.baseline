@@ -53,8 +53,8 @@ src/storage/upload_pipeline.py:310  pre-R9 baseline; triage in R10 — process-s
 src/storage/upload_pipeline.py:323  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:329  R9-T7-010 — uploads error_message never set; triage in R10 [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:390  pre-R9 baseline; triage in R10 — cancel_upload best-effort [+3 R13-LOW .xlsm comment]
-src/storage/sandbox.py:163  pre-R9 baseline (was :240); R11-#66 moved the site into spawn_and_wait — container remove is best-effort cleanup AFTER logs are read, failure logged
-src/storage/sandbox.py:326  pre-R9 baseline (was :228); R11-#66 refactor shifted — post-run persist error folds into stderr + ok=False, surfaced not swallowed
+src/storage/sandbox.py:173  pre-R9 baseline (was :240); R11-#66 moved the site into spawn_and_wait — container remove is best-effort cleanup AFTER logs are read, failure logged [+10 DP-4 flags]
+src/storage/sandbox.py:357  pre-R9 baseline (was :228); R11-#66 refactor shifted — post-run persist error folds into stderr + ok=False, surfaced not swallowed [+31 DP-4 _stage_and_spawn extract]
 src/audit/log.py:262  R9-T4-004 — audit replica fallback; close as part of T6-006 audit HMAC fail-closed (+33 lines after R10 phantom-metric Counter insertion 2026-05-27) (was :257, #156 shift)
 src/audit/log.py:451  pre-R9 baseline; triage in R10 — list_for_client read fallback (+61 lines after R10 phantom-metric Counter) (was :446, #156 shift)
 src/audit/log.py:491  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter) (was :486, #156 shift)
@@ -87,3 +87,4 @@ src/api/routers/ops.py:290  ADM-13 #281 — system-page redis ping guard: except
 src/api/routers/clients.py:325  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> []
 src/api/routers/clients.py:333  B4 #156 — export uploads guard: same rationale as :325
 src/api/routers/clients.py:338  B4 #156 — export access-log guard: same rationale as :325
+src/storage/sandbox.py:387  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed

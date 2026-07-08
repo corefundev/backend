@@ -97,6 +97,25 @@ def test_broker_spawns_with_validated_paths(broker, tmp_path, monkeypatch):
     assert seen["out_dir"] == staging.resolve() / "out"
     assert seen["input_name"] == "original.csv"
     assert seen["max_rows"] == 1000 and seen["max_columns"] == 8
+    # DP-4: default = no sniff, no mapping (backward compatible)
+    assert seen["sniff"] is False and seen["mapping"] is None
+
+
+def test_broker_forwards_sniff_and_mapping(broker, tmp_path, monkeypatch):
+    # DP-4 (#324): the broker passes the parser-CLI toggles straight through.
+    _mk_staging(tmp_path)
+    seen = {}
+    monkeypatch.setattr(broker_mod, "spawn_and_wait",
+                        lambda client, **kw: (seen.update(kw), (0, False, "", ""))[1])
+    r = _spawn(broker, sniff=True, mapping='{"date": "Дата", "sku": "Артикул", "sales": "Кол-во"}')
+    assert r.status_code == 200
+    assert seen["sniff"] is True
+    assert seen["mapping"] == '{"date": "Дата", "sku": "Артикул", "sales": "Кол-во"}'
+
+
+def test_broker_rejects_oversize_mapping(broker, tmp_path):
+    _mk_staging(tmp_path)
+    assert _spawn(broker, mapping="x" * 9000).status_code == 422   # max_length guard
 
 
 def test_broker_maps_sandbox_error_to_502(broker, tmp_path, monkeypatch):

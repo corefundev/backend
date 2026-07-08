@@ -29,6 +29,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -65,6 +66,12 @@ class SpawnRequest(BaseModel):
     input_name:  str
     max_rows:    int = Field(default=5_000_000, ge=1, le=50_000_000)
     max_columns: int = Field(default=64, ge=1, le=1024)
+    # DP-4 (#324): parser-CLI toggles only — the hardening profile is unaffected.
+    # `sniff` emits a report instead of a parquet; `mapping` is a bounded JSON
+    # {canonical: source} rename applied before validation. max_length caps abuse;
+    # the parser itself json.loads + validates it's a dict of canonical keys.
+    sniff:       bool = False
+    mapping:     Optional[str] = Field(default=None, max_length=8192)
 
 
 class SpawnResponse(BaseModel):
@@ -116,6 +123,8 @@ def spawn(req: SpawnRequest) -> SpawnResponse:
             mem_limit=os.environ.get("SANDBOX_MEM_LIMIT", "512m"),
             cpus=float(os.environ.get("SANDBOX_CPUS", "1.0")),
             runtime=os.environ.get("SANDBOX_RUNTIME", "runc"),
+            sniff=req.sniff,
+            mapping=req.mapping,
         )
     except SandboxError as e:
         logger.warning("spawn failed for %s: %s", req.job_dir, e)

@@ -81,6 +81,8 @@ def spawn_and_wait(
     mem_limit: str,
     cpus: float,
     runtime: str,
+    sniff: bool = False,
+    mapping: str | None = None,
 ) -> tuple[int, bool, str, str]:
     """
     Run secure_parser in a hardened container and reap it.
@@ -105,6 +107,14 @@ def spawn_and_wait(
         "--max-rows",    str(max_rows),
         "--max-columns", str(max_columns),
     ]
+    # DP-4 (#324): the parser CLI is the ONLY thing the request can influence —
+    # image/mounts/caps/limits stay pinned. --sniff emits a report instead of a
+    # parquet; --mapping applies a confirmed {canonical: source} rename. Both are
+    # data-only (json.loads, column rename) with no code path out of the sandbox.
+    if sniff:
+        command.append("--sniff")
+    if mapping is not None:
+        command += ["--mapping", mapping]
     try:
         container = client.containers.run(
             image=image,
@@ -212,7 +222,8 @@ class DockerSandbox:
     # ── broker transport ──────────────────────────────────────────────
 
     def _spawn_via_broker(
-        self, job_dir: str, input_name: str, max_rows: int, max_columns: int
+        self, job_dir: str, input_name: str, max_rows: int, max_columns: int,
+        sniff: bool = False, mapping: str | None = None,
     ) -> tuple[int, bool, str, str]:
         """POST /spawn on the broker; mirrors spawn_and_wait's return."""
         import urllib.error
@@ -223,6 +234,8 @@ class DockerSandbox:
             "input_name":  input_name,
             "max_rows":    max_rows,
             "max_columns": max_columns,
+            "sniff":       sniff,
+            "mapping":     mapping,
         }).encode("utf-8")
         req = urllib.request.Request(
             f"{self.broker_url}/spawn",
@@ -249,11 +262,13 @@ class DockerSandbox:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def run(self, input_bytes: bytes, input_filename: str) -> SandboxResult:
-        """
-        Execute the parser on `input_bytes` in a fresh container.
-        Cleans up the staging directory unconditionally.
-        """
+    def _stage_and_spawn(
+        self, input_bytes: bytes, input_filename: str, *,
+        sniff: bool = False, mapping: str | None = None,
+    ) -> tuple[int, str, str, Path, Path]:
+        """Stage the input into a fresh job dir and spawn the hardened parser.
+        Returns (exit_code, stdout, stderr, out_dir, staging_dir); the CALLER
+        owns cleanup of staging_dir. On launch failure staging is removed here."""
         staging = Path(tempfile.mkdtemp(prefix="job-", dir=self.work_dir))
         in_dir  = staging / "in"
         out_dir = staging / "out"
@@ -284,6 +299,7 @@ class DockerSandbox:
             if self.broker_url:
                 exit_code, _timed_out, stdout, stderr = self._spawn_via_broker(
                     staging.name, safe_name, max_rows, max_columns,
+                    sniff=sniff, mapping=mapping,
                 )
             else:
                 exit_code, _timed_out, stdout, stderr = spawn_and_wait(
@@ -298,11 +314,26 @@ class DockerSandbox:
                     mem_limit=self.mem_limit,
                     cpus=self.cpus,
                     runtime=self.runtime,
+                    sniff=sniff,
+                    mapping=mapping,
                 )
         except SandboxError:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        return exit_code, stdout, stderr, out_dir, staging
 
+    def run(
+        self, input_bytes: bytes, input_filename: str,
+        mapping: str | None = None,
+    ) -> SandboxResult:
+        """
+        Execute the parser on `input_bytes` in a fresh container. When `mapping`
+        (a JSON {canonical: source} string) is given, the parser applies it
+        before validation (DP-3). Cleans up the staging directory unconditionally.
+        """
+        exit_code, stdout, stderr, out_dir, staging = self._stage_and_spawn(
+            input_bytes, input_filename, mapping=mapping,
+        )
         try:
             # Parser exit convention: 0=ok, 2=input missing, 3=validation error
             ok = exit_code == 0
@@ -335,4 +366,30 @@ class DockerSandbox:
         finally:
             # Container reaping lives in spawn_and_wait (broker side for
             # the HTTP transport); only the staging dir is ours to clean.
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def sniff(self, input_bytes: bytes, input_filename: str) -> SandboxResult:
+        """
+        Run the parser in --sniff mode (DP-4 #324): detect format/encoding/
+        delimiter/layout and return a sample-based report in `manifest`. No
+        parquet is produced. The report drives «Подготовка данных» preview + the
+        column-mapping proposal. Same hardened container as run().
+        """
+        exit_code, stdout, stderr, out_dir, staging = self._stage_and_spawn(
+            input_bytes, input_filename, sniff=True,
+        )
+        try:
+            manifest_path = out_dir / "manifest.json"
+            report: dict | None = None
+            if exit_code == 0 and manifest_path.exists():
+                try:
+                    report = json.loads(manifest_path.read_text())
+                except Exception as e:
+                    stderr = f"{stderr}\nsniff report unreadable: {e}"
+            return SandboxResult(
+                ok=exit_code == 0 and report is not None,
+                exit_code=exit_code, stdout=stdout, stderr=stderr,
+                output_path=None, manifest=report,
+            )
+        finally:
             shutil.rmtree(staging, ignore_errors=True)
