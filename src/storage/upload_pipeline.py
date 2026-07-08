@@ -212,6 +212,19 @@ def run_scan(
 
 # ── Stage 3: process ──────────────────────────────────────────────────────────
 
+def sniff_needs_mapping(record: ur.UploadRecord) -> bool:
+    """DP-1 (#321) prep hook: does this clean upload need a user column-mapping
+    step before the canonical parse?
+
+    DP-2/DP-3 implement the real sniff — a SANDBOXED header/format detection +
+    synonym auto-map + confidence, parking non-canonical / low-confidence
+    uploads in NEEDS_MAPPING. DP-1 is a pure stub that always auto-confirms, so
+    behaviour is IDENTICAL to the pre-prep pipeline (SCANNED_CLEAN → PROCESSING)
+    until the sniff lands. It deliberately does NOT read the file here —
+    parsing is the attack surface and must stay in the sandbox."""
+    return False
+
+
 def run_process(
     upload_id: str,
     sandbox: Optional[DockerSandbox] = None,
@@ -223,10 +236,13 @@ def run_process(
     record = registry.get(upload_id)
     if record is None:
         raise KeyError(f"upload_id {upload_id!r} not found")
-    if record.status != ur.SCANNED_CLEAN:
+    # DP-1 (#321): enter from SCANNED_CLEAN (canonical auto-confirm) OR
+    # NEEDS_MAPPING (user confirmed a column mapping). Both transition to
+    # PROCESSING; run_process is otherwise unchanged.
+    if record.status not in (ur.SCANNED_CLEAN, ur.NEEDS_MAPPING):
         logger.info(
-            "process skipped: upload %s is at %s (expected %s)",
-            upload_id, record.status, ur.SCANNED_CLEAN,
+            "process skipped: upload %s is at %s (expected %s or %s)",
+            upload_id, record.status, ur.SCANNED_CLEAN, ur.NEEDS_MAPPING,
         )
         return record
 
