@@ -42,6 +42,7 @@ import json
 import re
 import sys
 import warnings
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -152,19 +153,46 @@ def detect_encoding(raw: bytes) -> str:
     return "latin-1"
 
 
+def _delimiter_scores(lines: "list[str]") -> "dict[str, tuple[int, float]]":
+    """Per-delimiter (modal per-line count, consistency-weighted score) over the
+    sample lines. The true delimiter splits every row into the same N fields → a
+    high, STABLE per-line count; a stray comma in a header/decimal appears ≤1×
+    and loses. score = modal_count × (fraction of lines carrying that count)."""
+    n = max(1, len(lines))
+    scores: "dict[str, tuple[int, float]]" = {}
+    for d in _DELIMITERS:
+        counts = [ln.count(d) for ln in lines] or [0]
+        modal, freq = Counter(counts).most_common(1)[0]
+        scores[d] = (modal, modal * (freq / n))
+    return scores
+
+
 def detect_delimiter(sample_text: str) -> str:
-    """Sniff the CSV delimiter — csv.Sniffer first, header-line frequency as a
-    fallback. RU spreadsheet exports use ';' (Excel list-separator locale)."""
+    """Sniff the CSV delimiter. RU spreadsheet exports use ';' (Excel list-
+    separator locale) AND comma decimals, so a unit-annotated header like
+    «Цена, руб» puts a comma on every line — which fools csv.Sniffer into picking
+    ',' over the real ';'. We cross-check the Sniffer against a per-line
+    frequency+consistency score and override it when another delimiter recurs far
+    more consistently (#348). csv.Sniffer still wins the ambiguous/quoted cases."""
+    lines = [ln for ln in sample_text.splitlines() if ln.strip()][:_SNIFF_SAMPLE_ROWS]
+    if not lines:
+        return ","
+    scores = _delimiter_scores(lines)
+    freq_best = max(_DELIMITERS, key=lambda d: scores[d][1])
     try:
         dialect = csv.Sniffer().sniff(sample_text, delimiters="".join(_DELIMITERS))
-        if dialect.delimiter in _DELIMITERS:
-            return dialect.delimiter
+        picked = dialect.delimiter
+        if picked in _DELIMITERS:
+            # Trust the Sniffer unless another candidate recurs with a strictly
+            # higher modal per-line count AND a higher consistency score — the RU
+            # ';'+unit-comma case (',' at ~1/line vs ';' at ~4/line).
+            if (scores[freq_best][0] > scores[picked][0]
+                    and scores[freq_best][1] > scores[picked][1]):
+                return freq_best
+            return picked
     except csv.Error:
         pass
-    first = next((ln for ln in sample_text.splitlines() if ln.strip()), "")
-    counts = {d: first.count(d) for d in _DELIMITERS}
-    best = max(_DELIMITERS, key=lambda d: counts[d])
-    return best if counts[best] > 0 else ","
+    return freq_best if scores[freq_best][0] > 0 else ","
 
 
 def detect_decimal(values: "list[str]") -> str:

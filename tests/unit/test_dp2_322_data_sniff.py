@@ -34,6 +34,28 @@ def test_detect_delimiter_semicolon_comma_tab():
     assert sp.detect_delimiter("a\tb\tc\n1\t2\t3\n") == "\t"
 
 
+def test_detect_delimiter_ru_unit_comma_header():
+    # #348: ';'-delimited RU export whose header carries a unit-comma («Цена, руб»)
+    # + comma decimals → a comma sits on EVERY line, fooling csv.Sniffer into ',';
+    # ';' recurs far more consistently (4×/line) so it must win.
+    txt = (
+        "Дата;Артикул;Кол-во;Цена, руб;Категория\n"
+        "01.01.2025;АРТ-500;48;1234,50;Бытовая техника\n"
+        "02.01.2025;АРТ-500;40;1234,50;Электроника\n"
+    )
+    assert sp.detect_delimiter(txt) == ";"
+    # comma decimals ALONE (clean header) were never the trigger — still ';'
+    assert sp.detect_delimiter("Дата;Кол-во;Цена\n01.01.2025;48;1234,50\n") == ";"
+
+
+def test_detect_delimiter_no_regression_quoted_comma_field():
+    # A genuinely comma-delimited file whose field contains a quoted comma must
+    # still resolve to ',' (the override only fires for a STRICTLY higher-count
+    # rival — here ',' is both the Sniffer pick and the frequency winner).
+    txt = 'name,note\n"a, b",x\n"c, d",y\n'
+    assert sp.detect_delimiter(txt) == ","
+
+
 def test_detect_decimal_comma_vs_dot():
     assert sp.detect_decimal(["1 234,50", "12,5", "0,99"]) == ","
     assert sp.detect_decimal(["1234.50", "12.5", "0.99"]) == "."
