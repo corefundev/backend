@@ -12,7 +12,10 @@ image, the cron image has only psql/curl).
 Semantics:
   - age = newest PROMOTED run (model_path IS NOT NULL — a gate-blocked
     retrain must not look fresh, #248/#268 semantics);
-  - thresholds 45d («model_stale_45») and 90d («model_stale_90»), each
+  - thresholds 45d («model_stale_45:{model_epoch}») and 90d
+    («model_stale_90:{model_epoch}») — dedup scoped to the STALENESS EPISODE
+    via the promoted model's identity (AUD-3 #355: a lifetime key silently
+    killed the feature after each client's first episode), each
     fires ONCE per client — the inbox dedup key is the idempotency: a
     fresh insert (create() -> True) is the only trigger for push;
   - escalation stops after 90d — no infinite nagging;
@@ -63,7 +66,11 @@ def _stale_clients() -> list[dict]:
                 WITH ages AS (
                     SELECT client_id,
                            EXTRACT(EPOCH FROM (now() - max(ended_at))) / 86400
-                               AS age_days
+                               AS age_days,
+                           -- AUD-3 (#355): the promoted model's identity —
+                           -- scopes the nudge dedup to THIS staleness episode
+                           EXTRACT(EPOCH FROM max(ended_at))::bigint
+                               AS model_epoch
                     FROM sku_training_runs
                     WHERE status = 'finished' AND ended_at IS NOT NULL
                       AND model_path IS NOT NULL
@@ -80,7 +87,7 @@ def _stale_clients() -> list[dict]:
                 )
                 SELECT c.client_id, c.email,
                        c.suspended_at IS NOT NULL,
-                       a.age_days, l.last_login_days
+                       a.age_days, a.model_epoch, l.last_login_days
                 FROM sku_clients c
                 JOIN ages a USING (client_id)
                 LEFT JOIN logins l USING (client_id)
@@ -88,8 +95,9 @@ def _stale_clients() -> list[dict]:
             )
             return [
                 {"client_id": r[0], "email": r[1], "suspended": r[2],
-                 "age_days": float(r[3]), "last_login_days":
-                     float(r[4]) if r[4] is not None else None}
+                 "age_days": float(r[3]), "model_epoch": int(r[4]),
+                 "last_login_days":
+                     float(r[5]) if r[5] is not None else None}
                 for r in cur.fetchall()
             ]
     finally:
@@ -134,10 +142,19 @@ def run_staleness_nudge() -> dict:
             summary["suspended_skipped"] += 1
             continue
 
-        key = ("model_stale_90" if c["age_days"] >= ESCALATION_DAYS
-               else "model_stale_45")
-        title, body_tpl = _WORDING[key]
-        body = body_tpl.format(days=NUDGE_DAYS if key.endswith("45")
+        threshold = ("model_stale_90" if c["age_days"] >= ESCALATION_DAYS
+                     else "model_stale_45")
+        # AUD-3 (#355): scope dedup to the STALENESS EPISODE, not the client
+        # lifetime. The key carries the promoted model's identity (epoch of
+        # its ended_at): a retrain → new promoted run → new epoch → nudges
+        # arm again for the next episode. Same episode + cron rerun → same
+        # key → idempotent (the original purpose, now WITHOUT the
+        # feature-killing lifetime reach). Old-format lifetime rows never
+        # collide with the new format — currently-stale clients would get
+        # one fresh nudge post-deploy (today: zero stale clients, no-op).
+        key = f"{threshold}:{c['model_epoch']}"
+        title, body_tpl = _WORDING[threshold]
+        body = body_tpl.format(days=NUDGE_DAYS if threshold.endswith("45")
                                else ESCALATION_DAYS)
 
         fresh = reg.create(
