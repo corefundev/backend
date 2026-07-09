@@ -154,7 +154,7 @@ def run_scan(
         logger.error("scan: cannot read untrusted object %s: %s", key, e)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"could not read uploaded file: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     try:
@@ -164,7 +164,7 @@ def run_scan(
         logger.error("scan transport error for %s: %s", upload_id, e)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"scanner unavailable: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     if result.verdict == ScanVerdict.INFECTED:
@@ -180,13 +180,14 @@ def run_scan(
         return registry.update_status(
             upload_id, ur.INFECTED,
             scan_result=result.signature or "infected",
-            error_message=result.raw_response,
+            error_message="Файл не прошёл проверку безопасности и был удалён.",
         )
 
     if result.verdict == ScanVerdict.ERROR:
+        logger.error("scanner error for %s: %s", upload_id, result.raw_response)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"scanner returned error: {result.raw_response}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     # CLEAN → copy to quarantine, then remove from untrusted.
@@ -197,7 +198,7 @@ def run_scan(
         logger.error("quarantine upload failed for %s: %s", upload_id, e)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"quarantine write failed: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     # Only after quarantine copy is confirmed do we drop untrusted. This
@@ -223,6 +224,49 @@ def _missing_columns_message(missing: "list[str]") -> str:
     names = ", ".join(_FIELD_LABELS_RU.get(f, f) for f in missing)
     return (f"Не удалось определить обязательные колонки: {names}. "
             f"Проверьте, что в файле есть эти столбцы, и загрузите файл заново.")
+
+
+# Client-facing failure text MUST NOT leak internals (parser tracebacks, file
+# paths, sandbox/quarantine/scanner jargon) — that's reconnaissance for an
+# attacker and noise for the user. The raw detail is always logged server-side;
+# only these curated, path-free messages ever reach `error_message` (which the
+# uploads API returns to the client).
+_GENERIC_PREP_ERROR = (
+    "Не удалось подготовить файл. Проверьте, что это корректный CSV или Excel "
+    "с колонками даты, товара и продаж, и загрузите заново."
+)
+_GENERIC_INFRA_ERROR = "Временная ошибка обработки. Попробуйте ещё раз позже."
+
+
+def _client_parse_error(stderr: str) -> str:
+    """Map the parser's stderr to a client-safe RU reason. The parser prints
+    `ERROR: <reason>` for validation failures; we surface only curated,
+    path-free reasons and fall back to a generic message for everything else
+    (uncaught tracebacks, path leaks, unmapped English)."""
+    for line in reversed((stderr or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("ERROR:"):
+            continue
+        low = line[len("ERROR:"):].strip().lower()
+        if any(tok in low for tok in (
+            "/", "\\", ".py", "sandbox", "traceback", "errno",
+            "usage:", "permission", "no such file", "not found", "json",
+        )):
+            return _GENERIC_PREP_ERROR
+        if "no numeric values" in low:
+            return "В колонке продаж нет числовых значений. Проверьте данные и загрузите заново."
+        if "negative values" in low:
+            return "В колонке продаж есть отрицательные значения. Исправьте и загрузите заново."
+        if "empty values" in low:
+            return "В колонке товара есть пустые значения. Заполните их и загрузите заново."
+        if "too many rows" in low or "too many columns" in low:
+            return "Файл слишком большой для вашего тарифа."
+        if ".xls" in low and "xlsx" in low:
+            return "Формат .xls не поддерживается — сохраните файл как .xlsx и загрузите заново."
+        if "excel workbook" in low:
+            return "Файл не распознан как корректный Excel. Сохраните как .xlsx или CSV."
+        return _GENERIC_PREP_ERROR
+    return _GENERIC_PREP_ERROR
 
 
 def run_prepare(
@@ -310,9 +354,10 @@ def run_process(
     try:
         data = quarantine.download_bytes(key)
     except Exception as e:
+        logger.error("prep: cannot read quarantined object %s: %s", key, e)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"quarantine read failed: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     # DP-4b (#324): apply the column mapping the prep worker's SYSTEM auto-mapping
@@ -324,19 +369,22 @@ def run_process(
     try:
         result: SandboxResult = sandbox.run(data, record.filename, mapping=mapping)
     except SandboxError as e:
+        logger.error("sandbox launch failed for %s: %s", upload_id, e)
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"sandbox launch failed: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
 
     if not result.ok or result.output_path is None:
-        err = (result.stderr or "").strip()[:2000] or "parser failed"
+        raw = (result.stderr or "").strip()[:2000] or "parser failed"
         logger.warning(
             "parse failed id=%s exit=%s err=%s",
-            upload_id, result.exit_code, err,
+            upload_id, result.exit_code, raw,
         )
+        # NEVER surface raw parser stderr (tracebacks / paths) to the client.
         return registry.update_status(
-            upload_id, ur.PROCESSING_FAIL, error_message=err,
+            upload_id, ur.PROCESSING_FAIL,
+            error_message=_client_parse_error(result.stderr or ""),
         )
 
     # Move output to the PROCESSED zone.
@@ -362,6 +410,7 @@ def run_process(
             manifest_key,
         )
     except Exception as e:
+        logger.error("processed write failed for %s: %s", upload_id, e)
         if parquet_uploaded:
             # Rollback: best-effort delete of the orphan parquet so we
             # don't pollute PROCESSED. Failure here just means a stale
@@ -376,7 +425,7 @@ def run_process(
                 )
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
-            error_message=f"processed write failed: {e}",
+            error_message=_GENERIC_INFRA_ERROR,
         )
     finally:
         # Clean up the on-disk parquet the sandbox handed us.
