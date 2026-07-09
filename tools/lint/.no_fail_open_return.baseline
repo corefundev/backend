@@ -81,8 +81,8 @@ src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: 
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
 src/api/routers/clients.py:581  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly (was :455, #156 shift)
 src/api/routers/clients.py:589  ADM-3 #256 — overview runs-enrichment guard: same rationale as :455 (was :463, #156 shift)
-src/notifications/staleness_nudge.py:108  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly
-src/notifications/staleness_nudge.py:116  NC-3 #243 — telegram-push guard: same rationale as :108
+src/notifications/staleness_nudge.py:116  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly (was :108, +8 AUD-3 #355 episode-key)
+src/notifications/staleness_nudge.py:124  NC-3 #243 — telegram-push guard: same rationale as :116 (was :116, +8 AUD-3 #355)
 src/api/routers/ops.py:296  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500 (was :279, #156 shift)
 src/api/routers/ops.py:321  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it) (was :304, #156 shift)
 src/api/routers/ops.py:290  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278) (was :273, #156 shift)
