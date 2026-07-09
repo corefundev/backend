@@ -27,7 +27,7 @@ Ansible scaffold lands (tracked as R11-#74):
    [`docker-storage-driver-overlay2.md`](../runbook/docker-storage-driver-overlay2.md)
    (required for cAdvisor metrics).
 2. Lay down `/srv/backend` with the repo's `docker/` configs, the bind-mount
-   directories, and `secrets/yc-sa-key.json` (the Lockbox SA key).
+   directories, and `secrets/yc/yc-sa-key.json` (the Lockbox SA key, DIR-mount #303).
 3. Run the migrate job, then let GitHub Actions CD (`scripts/cd_deploy.sh`)
    take over all subsequent deploys.
 
