@@ -117,7 +117,7 @@ jobs:
           # Explicit — matches the default in the script. If you
           # deploy to a non-standard dir on VPS, override here.
           VPS_COMPOSE_DIR: /srv/backend
-          VPS_PATH:        /srv/backend/secrets/yc-sa-key.json
+          VPS_PATH:        /srv/backend/secrets/yc/yc-sa-key.json   # dir-mount source (#303/#353)
           YC_SA_NAME:      sku-lockbox-reader
           KEEP_KEYS:       "2"
         run: |

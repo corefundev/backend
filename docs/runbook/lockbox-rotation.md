@@ -43,7 +43,7 @@ Use the canonical script — it handles the safety window
 bash scripts/rotate_lockbox_key.sh
 # The script:
 #   1. yc iam key create — new JSON
-#   2. scp to /srv/backend/secrets/yc-sa-key.json.new on api VPS
+#   2. scp to /srv/backend/secrets/yc/yc-sa-key.json.new on api VPS
 #   3. atomic mv .new → yc-sa-key.json
 #   4. docker compose restart api worker scan-worker process-worker
 #   5. Wait for /readyz=200 (Lockbox bootstrap must succeed)
@@ -111,6 +111,6 @@ Forensic copy: see audit_log secret_rotation event id <Y>
   not live on prod.
 * **DO NOT** delete the previous key without confirming the new
   one bootstrapped successfully (`/readyz=200`).
-* **DO NOT** edit `secrets/yc-sa-key.json` in-place on the VPS
+* **DO NOT** edit `secrets/yc/yc-sa-key.json` in-place on the VPS
   without the .new → atomic rename pattern. A partially-written
   file will brick api on the next container restart.

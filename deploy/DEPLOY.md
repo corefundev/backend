@@ -665,11 +665,13 @@ cp .env.lockbox.example .env
 chmod 600 .env
 nano .env   # впиши YC_LOCKBOX_SECRET_ID=e6q... + API_DOMAIN + CORS
 
-# Положить ключ SA в ./secrets/yc-sa-key.json (создать директорию)
-mkdir -p secrets && chmod 700 secrets
+# Положить ключ SA в ./secrets/yc/yc-sa-key.json (DIR-mount, #303 — контейнеры
+#   монтируют каталог secrets/yc, а не файл: file-mount пиннит инод и
+#   ротация оставляет контейнер на отозванном ключе, инцидент #190)
+mkdir -p secrets/yc && chmod 700 secrets && chmod 755 secrets/yc
 # Скопируй туда файл sku-sa-key.json с локальной машины через scp:
-#   scp sku-sa-key.json deploy@<BACKEND_IP>:/srv/backend/secrets/yc-sa-key.json
-chmod 600 secrets/yc-sa-key.json
+#   scp sku-sa-key.json deploy@<BACKEND_IP>:/srv/backend/secrets/yc/yc-sa-key.json
+chmod 644 secrets/yc/yc-sa-key.json   # 644: containers run as 3 UIDs (root/999/65534); parent dir 700 is the guard (R5-21)
 
 # Добавить /secrets/ в .gitignore (один раз)
 grep -qxF "secrets/" .gitignore || echo "secrets/" >> .gitignore
@@ -742,7 +744,7 @@ yc lockbox secret schedule-version-destruction --id <version-id>
 | Backend VPS | ✅ Да. Docker рестартует контейнеры, lockbox_agent.py фетчит секреты, всё поднимается ~за 60–90 секунд. |
 
 На диске остаётся только **SA-ключ**. Защита:
-- `chmod 600 secrets/yc-sa-key.json`
+- `chmod 644 secrets/yc/yc-sa-key.json   # 644: containers run as 3 UIDs (root/999/65534); parent dir 700 is the guard (R5-21)`
 - SA имеет ровно одну роль — `lockbox.payloadViewer` на **один конкретный** секрет
 - Сам ключ **можно ротировать** без даунтайма: `yc iam key create`,
   подменить файл, `docker compose restart api worker scan-worker process-worker`,
@@ -811,7 +813,7 @@ sudo mkdir -p /home/ci-deploy/.ssh
 sudo chown ci-deploy:ci-deploy /home/ci-deploy/.ssh
 sudo chmod 700 /home/ci-deploy/.ssh
 
-# Разрешить запись в /srv/backend/secrets/yc-sa-key.json и restart compose
+# Разрешить запись в /srv/backend/secrets/yc/yc-sa-key.json и restart compose
 sudo chown -R ci-deploy:ci-deploy /srv/backend/secrets
 ```
 
@@ -880,7 +882,7 @@ VPS_HOST=api.example.com \
    yc iam key list --service-account-name sku-lockbox-reader
    # выбери второй по свежести (предыдущий)
    yc iam key create --service-account-name sku-lockbox-reader --output previous.json
-   scp previous.json ci-deploy@VPS:/srv/backend/secrets/yc-sa-key.json
+   scp previous.json ci-deploy@VPS:/srv/backend/secrets/yc/yc-sa-key.json
    ssh ci-deploy@VPS "cd /srv/backend && docker compose restart api worker scan-worker process-worker"
    ```
 3. **Alertmanager notify** — в workflow есть шаг `Notify on failure`, который дёрнет `ALERT_WEBHOOK_URL` (Slack/Telegram). Настрой это, чтобы не узнать через неделю.
@@ -1826,8 +1828,8 @@ chmod 600 new-sa-key.json
 
 # Копируем на новый VPS
 mkdir -p /srv/backend/secrets
-scp new-sa-key.json deploy@<NEW_VPS_IP>:/srv/backend/secrets/yc-sa-key.json
-ssh deploy@<NEW_VPS_IP> "chmod 600 /srv/backend/secrets/yc-sa-key.json"
+scp new-sa-key.json deploy@<NEW_VPS_IP>:/srv/backend/secrets/yc/yc-sa-key.json
+ssh deploy@<NEW_VPS_IP> "chmod 644 /srv/backend/secrets/yc/yc-sa-key.json"   # 644: 3 container UIDs (R5-21)
 
 # Локально — удалить копию
 shred -u new-sa-key.json
@@ -2279,7 +2281,7 @@ docker compose exec api sh -c "
 - [ ] `.env` с правами 600, не лежит в git
 **Если идёшь через Lockbox (рекомендуется для Beget+YC, см. §4.3):**
 - [ ] `.env` содержит ТОЛЬКО `YC_LOCKBOX_SECRET_ID` + `YC_SA_KEY_FILE` (никаких других секретов)
-- [ ] `secrets/yc-sa-key.json` смонтирован read-only, права 600
+- [ ] `secrets/yc/` смонтирован read-only как КАТАЛОГ (не файл — инод-ловушка #190), ключ 644, каталог-родитель 700
 - [ ] Все ключи приложения (JWT_SECRET_KEY, API_KEY, ADMIN_API_KEY, MODEL_SIGNING_KEY, BACKUP_PASSPHRASE, S3-ключи 4 зон) положены в Lockbox через `lockbox_load_env.sh`
 - [ ] `sku-lockbox-reader` SA имеет роль `lockbox.payloadViewer` ТОЛЬКО на конкретный секрет, не на всю папку
 - [ ] Авторотация SA-ключа настроена через GitHub Actions (`.github/workflows/rotate-lockbox-key.yml`) — хотя бы один цикл прошёл вручную

@@ -142,10 +142,10 @@ Level 3 (current prod):
 Настройка Level 3 (Yandex Lockbox, наш текущий путь — см. `deploy/DEPLOY.md` §4.3):
 ```bash
 # 1. В YC: создать Lockbox secret + viewer SA-ключ, положить
-#    SA-ключ на VPS как secrets/yc-sa-key.json.
+#    SA-ключ на VPS как secrets/yc/yc-sa-key.json (DIR-mount, #303).
 
 # 2. В docker-compose.lockbox.yml перечислить:
-#      YC_SA_KEY_FILE=/run/secrets/yc-sa-key.json
+#      YC_SA_KEY_FILE=/run/secrets/yc/yc-sa-key.json
 #      YC_LOCKBOX_SECRET_ID=<secret-id>
 
 # 3. Bootstrap — автоматический:

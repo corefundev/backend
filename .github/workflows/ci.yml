@@ -86,7 +86,11 @@ jobs:
           # test (~25 lines of log spam per job). Tests pass either
           # way; this is purely log-cleanliness.
           pip install pytest pydantic
-          python -m pytest tests/lint/test_no_fail_open_return.py -v
+          # AUD-1 (#353): run the WHOLE lint suite, not one file. Naming
+          # each lint test individually let test_grafana_lockbox_aware.py rot
+          # unnoticed — it asserted the pre-#303 file-mount path and had been
+          # failing (uncollected) on main. A directory run cannot silently rot.
+          python -m pytest tests/lint/ -v
 
   # ── 1c. Lint (COMPOSE_PWD_INTERP — Phase 0-C PR-1) ─────────
   # Forbids ${POSTGRES_PASSWORD} interpolation inside docker-compose

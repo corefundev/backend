@@ -85,7 +85,7 @@ NEVER restore on top of the running primary. Either:
   restore in place. (Only if step (a) is infeasible.)
 
 For (a), provision a Beget VPS, install docker + compose, scp the
-repo, scp `secrets/yc-sa-key.json`, run `cd /srv/backend`.
+repo, scp the key to `secrets/yc/yc-sa-key.json` (DIR-mount, #303), run `cd /srv/backend`.
 
 ### Phase 2 — Download base + WAL window
 
@@ -122,8 +122,8 @@ chmod 700 $RESTORE_DIR/data
 ```bash
 docker run --rm -d --name pitr-restore \
     -v $RESTORE_DIR/data:/var/lib/postgresql/data \
-    -v /srv/backend/secrets/yc-sa-key.json:/run/secrets/yc-sa-key.json:ro \
-    -e YC_SA_KEY_FILE=/run/secrets/yc-sa-key.json \
+    -v /srv/backend/secrets/yc:/run/secrets/yc:ro \
+    -e YC_SA_KEY_FILE=/run/secrets/yc/yc-sa-key.json \
     -e YC_LOCKBOX_SECRET_ID=$YC_LOCKBOX_SECRET_ID \
     docker-postgres:custom
 

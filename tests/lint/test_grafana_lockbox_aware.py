@@ -91,8 +91,11 @@ def test_grafana_in_lockbox_overlay_with_tight_allowlist():
         "has no Lockbox env at startup and the entrypoint exits 2"
     )
     env = g.get("environment") or {}
-    assert env.get("YC_SA_KEY_FILE") == "/run/secrets/yc-sa-key.json", (
-        "YC_SA_KEY_FILE must point at the bind-mounted SA key"
+    # #303/#353: DIR-mount, not a file mount — a file bind-mount pins the
+    # container to the mount-time inode, so an atomic rotation leaves it on
+    # the REVOKED key (#190 prod incident).
+    assert env.get("YC_SA_KEY_FILE") == "/run/secrets/yc/yc-sa-key.json", (
+        "YC_SA_KEY_FILE must point into the SA-key DIRECTORY mount"
     )
     assert "YC_LOCKBOX_SECRET_ID" in env, (
         "YC_LOCKBOX_SECRET_ID must be set (from .env / runtime)"
@@ -103,12 +106,15 @@ def test_grafana_in_lockbox_overlay_with_tight_allowlist():
         f"(tightest allowlist), got {allowed!r}. Broadening this would "
         f"expose other Lockbox keys to the grafana process env."
     )
-    # The SA key must be bind-mounted ro.
+    # The SA key DIRECTORY must be bind-mounted ro (never the file itself).
     vols = g.get("volumes") or []
-    sa_mounts = [v for v in vols if "/run/secrets/yc-sa-key.json" in str(v)]
+    sa_mounts = [v for v in vols if "/run/secrets/yc" in str(v)]
     assert len(sa_mounts) == 1, (
-        f"lockbox overlay grafana must mount the SA key exactly once, "
+        f"lockbox overlay grafana must mount the SA-key dir exactly once, "
         f"got {sa_mounts!r}"
+    )
+    assert not any("yc-sa-key.json:/run" in str(v) for v in vols), (
+        "grafana must not FILE-mount the SA key (inode trap, #190)"
     )
     assert str(sa_mounts[0]).endswith(":ro"), (
         f"SA key mount must be :ro, got {sa_mounts[0]!r}"

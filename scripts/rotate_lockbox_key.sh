@@ -9,7 +9,7 @@
 #        │ yc iam key create (новый JSON)            ← master-creds
 #        │                                              (не на VPS!)
 #        ▼
-#   [prod VPS / /srv/backend/secrets/yc-sa-key.json]
+#   [prod VPS / /srv/backend/secrets/yc/yc-sa-key.json]
 #        │ atomic rename: .new → actual
 #        │ docker compose restart api worker …         ← подхватят ключ
 #        │                                              при старте
@@ -37,7 +37,7 @@
 #   YC_SA_NAME        имя SA, чей ключ ротируем    (default: sku-lockbox-reader)
 #   VPS_USER          ssh-пользователь на VPS       (default: deploy)
 #   VPS_HOST          hostname или IP VPS           (required)
-#   VPS_PATH          путь к json-файлу на VPS      (default: /srv/backend/secrets/yc-sa-key.json)
+#   VPS_PATH          путь к json-файлу на VPS      (default: /srv/backend/secrets/yc/yc-sa-key.json — DIR-mount source, #303/#353)
 #   VPS_COMPOSE_DIR   где `docker compose`          (default: /srv/backend)
 #   API_HEALTH_URL    URL для post-check           (default: https://$VPS_HOST/readyz)
 #   KEEP_KEYS         сколько самых новых оставить  (default: 2)
@@ -61,7 +61,12 @@ set -eu
 YC_SA_NAME="${YC_SA_NAME:-sku-lockbox-reader}"
 VPS_USER="${VPS_USER:-deploy}"
 VPS_HOST="${VPS_HOST:?ERROR: set VPS_HOST}"
-VPS_PATH="${VPS_PATH:-/srv/backend/secrets/yc-sa-key.json}"
+# AUD-1 (#353): MUST be the dir-mount SOURCE (secrets/yc/), not the legacy
+# flat file. #303 moved all 14 container mounts to `../secrets/yc` →
+# /run/secrets/yc/; writing the legacy path rotated a file nothing reads,
+# so the fleet kept authenticating on the OLD key until step 5 revoked it
+# (fleet-wide Lockbox 401 on the SECOND rotation — the #190 incident class).
+VPS_PATH="${VPS_PATH:-/srv/backend/secrets/yc/yc-sa-key.json}"
 VPS_COMPOSE_DIR="${VPS_COMPOSE_DIR:-/srv/backend}"
 API_HEALTH_URL="${API_HEALTH_URL:-https://${VPS_HOST}/readyz}"
 KEEP_KEYS="${KEEP_KEYS:-2}"
@@ -170,6 +175,22 @@ if [ "$OK" -ne 1 ]; then
     echo "       Rollback: ssh to VPS, restore previous .json, restart." >&2
     exit 5
 fi
+
+# ── Step 4b: prove the CONTAINERS read the new key (AUD-1 #353) ─────────
+# /readyz alone is NOT evidence: until step 5 prunes it, the old key is
+# still valid, so a container reading a stale path stays healthy — exactly
+# how the legacy-path bug hid. Assert the key id inside the container's
+# mount matches the one we just created, BEFORE revoking anything.
+echo "[4b/5] verifying containers read key id $NEW_KEY_ID"
+IN_CONTAINER_ID="$(ssh -q "${VPS_USER}@${VPS_HOST}" \
+    "docker exec docker-api-1 sh -c 'cat \"\$YC_SA_KEY_FILE\"' 2>/dev/null | jq -r .id" 2>/dev/null || true)"
+if [ "$IN_CONTAINER_ID" != "$NEW_KEY_ID" ]; then
+    echo "ERROR: container reads key id '${IN_CONTAINER_ID:-<none>}', expected $NEW_KEY_ID." >&2
+    echo "       The rotated file is NOT the one the fleet mounts (VPS_PATH wrong?)." >&2
+    echo "       ABORTING before key pruning — no key revoked, prod untouched." >&2
+    exit 6
+fi
+echo "       confirmed: containers are on the new key"
 
 # ── Step 5: prune old keys (keep $KEEP_KEYS newest) ─────────────────────
 # Only runs after readyz passes — ensures we never delete a key that the
