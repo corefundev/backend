@@ -123,6 +123,10 @@ def _strip_formula_prefix(df: pd.DataFrame) -> pd.DataFrame:
 _DELIMITERS = (",", ";", "\t", "|")
 _SNIFF_SAMPLE_BYTES = 64 * 1024
 _SNIFF_SAMPLE_ROWS = 20
+# DP-4b (#324): a small CANONICAL sample embedded in the parse manifest so the
+# read-only prep preview serves it from the (tiny) manifest JSON — never re-loads
+# the full processed parquet just to show a handful of rows.
+_PREVIEW_SAMPLE_ROWS = 10
 _DATE_HEADER_RE = re.compile(
     r"^\d{4}[-/.]\d{1,2}([-/.]\d{1,2})?$"      # 2024-01, 2024/01/31
     r"|^\d{1,2}[.]\d{1,2}[.]\d{2,4}$"           # 31.01.2024
@@ -503,6 +507,12 @@ def main(argv: list[str] | None = None) -> int:
     df_clean.to_parquet(args.output, index=False)
 
     sha = hashlib.sha256(args.output.read_bytes()).hexdigest()
+    # JSON-safe canonical preview sample via pandas' own serializer: NaN → null,
+    # numpy scalars → native numbers, datetimes → ISO strings. Round-tripped so it
+    # embeds as real JSON (list-of-rows) rather than stringified numpy.
+    sample_rows = json.loads(
+        df_clean.head(_PREVIEW_SAMPLE_ROWS).to_json(orient="values", date_format="iso")
+    )
     manifest = {
         "input_filename": input_path.name,
         "row_count": int(len(df_clean)),
@@ -512,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         "date_min": str(df_clean[args.date_col].min()),
         "date_max": str(df_clean[args.date_col].max()),
         "output_sha256": sha,
+        "sample_rows": sample_rows,
     }
     args.manifest.write_text(json.dumps(manifest, indent=2, default=str))
 

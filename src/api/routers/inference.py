@@ -42,6 +42,7 @@ Preserves verbatim
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Optional
@@ -373,6 +374,83 @@ async def list_upload_skus(
         })
     skus.sort(key=lambda s: s["sku"])
     return {"upload_id": upload_id, "count": len(skus), "skus": skus}
+
+
+# ── DP-4b (#324): «Подготовка данных» — trigger + read-only preview ───────────
+# The system auto-maps columns (authoritative); the user only TRIGGERS prep and
+# then SEES the result. There is deliberately NO user column-editing surface.
+
+@router.post("/clients/{client_id}/uploads/{upload_id}/prepare")
+async def prepare_upload(
+    client_id: str,
+    upload_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """«Подготовить» trigger: queue the prep job (sniff + system auto-mapping +
+    parse) for a clean upload. Valid only from SCANNED_CLEAN. Idempotent-ish —
+    a second call while already processing/processed is a 409."""
+    require_client_access(client_id, auth)
+    from src.storage import upload_registry as ur
+    from src.pipeline.upload_workers import enqueue_prepare
+
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None or urec.client_id != client_id:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+    if urec.status != ur.SCANNED_CLEAN:
+        raise HTTPException(
+            409, detail=f"upload is not ready to prepare (status={urec.status})")
+
+    job_id = enqueue_prepare(upload_id, client_id=client_id)
+    return {"upload_id": upload_id, "status": "preparing", "job_id": job_id}
+
+
+@router.get("/clients/{client_id}/uploads/{upload_id}/prep")
+async def get_upload_prep(
+    client_id: str,
+    upload_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """READ-ONLY preview for «Подготовка данных». Reports the prep status and,
+    once PROCESSED, a small sample of the parsed CANONICAL data + a detection
+    summary — so the user can eyeball «это мои данные» and click «Готово,
+    использовать». No mapping-editing surface (the system is authoritative)."""
+    require_client_access(client_id, auth)
+    from src.storage import upload_registry as ur
+
+    urec = ur.get_upload_registry().get(upload_id)
+    if urec is None or urec.client_id != client_id:
+        raise HTTPException(404, detail=f"upload_id {upload_id!r} not found")
+
+    sniff = urec.sniff_report or {}
+    out: dict = {
+        "upload_id": upload_id,
+        "status": urec.status,
+        "filename": urec.filename,
+        "detected": {
+            "format": sniff.get("format"),
+            "encoding": sniff.get("encoding"),
+            "delimiter": sniff.get("delimiter"),
+        },
+        "row_count": urec.row_count,
+        "sku_count": urec.sku_count,
+        "error_message": urec.error_message,
+        "sample": None,
+    }
+    if urec.status == ur.PROCESSED:
+        # Serve the small CANONICAL sample the parser embedded in the manifest
+        # (bounded JSON GET) — never re-load the full processed parquet here.
+        from src.storage import zones as z
+        manifest: dict = {}
+        try:
+            mkey = z.processed_manifest_key(client_id, upload_id)
+            manifest = json.loads(z.get_zone_backend(z.Zone.PROCESSED).download_bytes(mkey))
+        except Exception as e:    # noqa: BLE001 — sample is optional; degrade gracefully
+            logger.warning("prep preview: manifest read failed for %s (%s)", upload_id, e)
+        out["sample"] = {
+            "columns": [str(c) for c in manifest.get("columns", [])],
+            "rows": manifest.get("sample_rows", []),
+        }
+    return out
 
 
 # #184: declared `def` (NOT async) on purpose — the body is entirely synchronous

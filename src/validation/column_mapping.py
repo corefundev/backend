@@ -231,10 +231,11 @@ def propose_mapping(headers: List[str]) -> MappingProposal:
 
     Each canonical field is assigned its best-scoring header; a header is used
     for at most one field (highest score wins, resolved greedily). REQUIRED
-    fields with no match land in `missing_required`. `auto_confirmable` is True
-    only when every REQUIRED field is matched at HIGH confidence — that's the
-    signal DP-1's sniff uses to skip the user step (canonical files stay
-    zero-click) and otherwise route the upload to NEEDS_MAPPING.
+    fields with no match land in `missing_required` (the prep worker fails the
+    upload with a human hint in that case). `auto_confirmable` — every REQUIRED
+    field matched at HIGH confidence — is retained as informational metadata on
+    the stored proposal (the system auto-maps regardless; there is no user
+    confirmation step), useful for observability of low-confidence auto-maps.
     """
     norm = {h: _normalize(h) for h in headers}
     # score[field][header] = match score

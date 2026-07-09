@@ -212,17 +212,70 @@ def run_scan(
 
 # ── Stage 3: process ──────────────────────────────────────────────────────────
 
-def sniff_needs_mapping(record: ur.UploadRecord) -> bool:
-    """DP-1 (#321) prep hook: does this clean upload need a user column-mapping
-    step before the canonical parse?
+# Human labels for the canonical fields, used in the "column not found" message
+# the user sees when the system can't auto-locate a required column.
+_FIELD_LABELS_RU = {
+    "date": "дата", "sku": "артикул / товар", "sales": "продажи / количество",
+}
 
-    DP-2/DP-3 implement the real sniff — a SANDBOXED header/format detection +
-    synonym auto-map + confidence, parking non-canonical / low-confidence
-    uploads in NEEDS_MAPPING. DP-1 is a pure stub that always auto-confirms, so
-    behaviour is IDENTICAL to the pre-prep pipeline (SCANNED_CLEAN → PROCESSING)
-    until the sniff lands. It deliberately does NOT read the file here —
-    parsing is the attack surface and must stay in the sandbox."""
-    return False
+
+def _missing_columns_message(missing: "list[str]") -> str:
+    names = ", ".join(_FIELD_LABELS_RU.get(f, f) for f in missing)
+    return (f"Не удалось определить обязательные колонки: {names}. "
+            f"Проверьте, что в файле есть эти столбцы, и загрузите файл заново.")
+
+
+def run_prepare(
+    upload_id: str, sandbox: Optional[DockerSandbox] = None,
+) -> ur.UploadRecord:
+    """DP-4b (#324): the USER-triggered «Подготовить» step. Sniff the clean
+    upload IN-SANDBOX, AUTO-map the columns to our canonical schema (the system
+    decides — there is NO user column-editing), then parse. Runs on the prep
+    worker; it is NOT chained from the scan worker.
+
+    - Sniff ok + all REQUIRED columns located → store the auto-mapping and parse.
+    - Sniff ok but a REQUIRED column is missing → fail with a human hint (not a
+      mapping editor).
+    - Sniff fails → fall back to a canonical parse (mapping=None) rather than
+      blocking; a genuinely non-canonical file then fails validation with a
+      clear error. The sniff runs in the sandbox (parsing is the attack
+      surface); we only ever touch header STRINGS here."""
+    from src.validation.column_mapping import propose_mapping
+    registry = ur.get_upload_registry()
+    record = registry.get(upload_id)
+    if record is None:
+        raise KeyError(f"upload_id {upload_id!r} not found")
+    if record.status != ur.SCANNED_CLEAN:
+        logger.info("prepare skipped: upload %s at %s (expected %s)",
+                    upload_id, record.status, ur.SCANNED_CLEAN)
+        return record
+
+    sandbox = sandbox or DockerSandbox()
+    try:
+        key = z.upload_key(record.client_id, upload_id, record.filename)
+        data = z.get_zone_backend(z.Zone.QUARANTINE).download_bytes(key)
+        result = sandbox.sniff(data, record.filename)
+    except Exception as e:    # noqa: BLE001 — best-effort sniff; parse still runs
+        logger.warning("prep sniff errored for %s (%s); canonical parse", upload_id, e)
+        result = None
+
+    if result is not None and result.ok and result.manifest:
+        proposal = propose_mapping(result.manifest.get("headers", []))
+        fields = {"sniff_report": result.manifest, "mapping_proposal": proposal.to_dict()}
+        if proposal.missing_required:
+            # system couldn't locate a required column → fail with a human hint
+            registry.update_fields(upload_id, **fields)
+            registry.update_status(upload_id, ur.PROCESSING)
+            logger.info("prepare %s: missing required %s", upload_id, proposal.missing_required)
+            return registry.update_status(
+                upload_id, ur.PROCESSING_FAIL,
+                error_message=_missing_columns_message(proposal.missing_required),
+            )
+        fields["confirmed_mapping"] = {k: v for k, v in proposal.mapping.items() if v}
+        registry.update_fields(upload_id, **fields)
+        logger.info("prepare %s: auto-mapped %s", upload_id, fields["confirmed_mapping"])
+
+    return run_process(upload_id, sandbox=sandbox)
 
 
 def run_process(
@@ -236,13 +289,17 @@ def run_process(
     record = registry.get(upload_id)
     if record is None:
         raise KeyError(f"upload_id {upload_id!r} not found")
-    # DP-1 (#321): enter from SCANNED_CLEAN (canonical auto-confirm) OR
-    # NEEDS_MAPPING (user confirmed a column mapping). Both transition to
-    # PROCESSING; run_process is otherwise unchanged.
-    if record.status not in (ur.SCANNED_CLEAN, ur.NEEDS_MAPPING):
+    # DP-4b (#324): run_process is invoked by the prep worker (run_prepare) after
+    # sniff + auto-mapping; it enters from SCANNED_CLEAN and transitions to
+    # PROCESSING. record.confirmed_mapping (set by run_prepare) is applied below.
+    #
+    # Concurrency: this SCANNED_CLEAN→PROCESSING claim is single-winner only while
+    # sku-process runs a SINGLE replica (jobs serialize). Before scaling that
+    # worker >1, make the claim atomic (conditional UPDATE) — see #347.
+    if record.status != ur.SCANNED_CLEAN:
         logger.info(
-            "process skipped: upload %s is at %s (expected %s or %s)",
-            upload_id, record.status, ur.SCANNED_CLEAN, ur.NEEDS_MAPPING,
+            "process skipped: upload %s is at %s (expected %s)",
+            upload_id, record.status, ur.SCANNED_CLEAN,
         )
         return record
 
@@ -258,9 +315,14 @@ def run_process(
             error_message=f"quarantine read failed: {e}",
         )
 
+    # DP-4b (#324): apply the column mapping the prep worker's SYSTEM auto-mapping
+    # stored on this record (run_prepare). None → canonical parse, unchanged from
+    # pre-prep behaviour (e.g. sniff failed and we fell back).
+    mapping = json.dumps(record.confirmed_mapping) if record.confirmed_mapping else None
+
     sandbox = sandbox or DockerSandbox()
     try:
-        result: SandboxResult = sandbox.run(data, record.filename)
+        result: SandboxResult = sandbox.run(data, record.filename, mapping=mapping)
     except SandboxError as e:
         return registry.update_status(
             upload_id, ur.PROCESSING_FAIL,
