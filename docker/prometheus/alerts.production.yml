@@ -239,6 +239,14 @@ groups:
   # the nudge, the admin console and dashboards.
   - name: model_staleness
     rules:
+      # AUD-11 (#363): still no absent() arm here (a fresh-volume deploy would
+      # false-warn until the first 07:15 tick — the PR #38 storm class), but
+      # the recreate-blindness it left is now closed on the PRODUCER side:
+      # staleness_nudge.sh persists /var/lib/backup-state/staleness_nudge
+      # .last_success and backup_metric_warmup.sh re-pushes it on container
+      # start — after a pushgateway recreate the OLD timestamp reappears
+      # within seconds, so a genuinely-dead nudge cron trips this freshness
+      # expr instead of hiding behind an absent metric.
       - alert: StalenessNudgeStale
         expr: time() - sku_staleness_nudge_last_success_timestamp_seconds > 50 * 3600
         for:   30m
@@ -248,6 +256,24 @@ groups:
         annotations:
           summary:     "staleness nudge cron is stale (>50h)"
           description: "scripts/staleness_nudge.sh (daily 07:15, backup container) hasn't pushed a success in 50+h — stale-model clients are no longer being nudged (NC-3 #243). Check /var/log/staleness_nudge.log in docker-backup-1, the api /internal/staleness-nudge endpoint, and pushgateway reachability."
+
+      # AUD-11 (#363): the 152-ФЗ purge cron pushed a metric NOTHING alerted
+      # on — a dead purge = retention silently not enforced (legal exposure,
+      # not a UX nit). absent() arm is safe here because the producer warmup
+      # (state file, see staleness note above) restores the series within
+      # seconds of any pushgateway recreate: absent now means "never
+      # succeeded on this volume", which is exactly what must page.
+      - alert: PiiPurgeStale
+        expr: |
+          (time() - sku_pii_purge_last_success_timestamp_seconds > 50 * 3600)
+            or absent(sku_pii_purge_last_success_timestamp_seconds)
+        for:   30m
+        labels:
+          severity: warning
+          team:     forecasting
+        annotations:
+          summary:     "PII retention purge cron is stale or missing (>50h)"
+          description: "scripts/pii_purge.sh (daily 04:40, backup container) hasn't pushed a success in 50+h — 152-ФЗ retention purge of closed accounts is NOT running (erasure cascade #356 included). Check /var/log/pii_purge.log in docker-backup-1, the api /internal/pii-purge endpoint, and pushgateway reachability."
 
       # NOTE: no absent() arm — on a fresh deploy the metric appears within
       # the first hourly cron tick, and a dead crond is already caught by the

@@ -50,6 +50,10 @@ PROD_ONLY_RULES = frozenset({
     # precedent); the probe freshness guard lives with its rule.
     "StalenessNudgeStale",
     "ModelAgeCheckStale",
+    # 152-ФЗ purge-cron watchdog (AUD-11 #363) — prod-only like its nudge
+    # sibling: the cron runs against prod data; staging's purge would be
+    # chronic noise. absent() arm is paired with the state-file warmup.
+    "PiiPurgeStale",
     # postgres-replica streaming metrics (`job="postgres-replica"`).
     "PgReplicaLagHigh",
     "PgReplicaWalReceiverDown",
@@ -243,7 +247,7 @@ def test_no_rule_was_dropped_silently_in_the_split():
     #
     # Updating this constant requires conscious justification — each
     # change should be a deliberate decision recorded in a PR.
-    EXPECTED_TOTAL = 45   # +1 PR #77 ContainerMetricsAbsent (2026-06-03);
+    EXPECTED_TOTAL = 46  # +1 PiiPurgeStale (AUD-11 #363, 2026-07-10)
     #                       +1 R11-#80 PostgresArchiveModeOff (2026-06-06);
     #                       +1 R11-#80 PostgresArchiveModeCheckStale (2026-06-08);
     #                       +2 QW2-3 #226 ModelStale + ModelAgeCheckStale (2026-07-05)

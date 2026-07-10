@@ -39,3 +39,10 @@ curl -fsS --max-time 5 -X PUT --data-binary "# TYPE sku_pii_purge_last_success_t
 sku_pii_purge_last_success_timestamp_seconds $NOW
 " "$PUSHGATEWAY_URL/metrics/job/pii_purge/instance/sku-forecasting" >/dev/null 2>&1 \
     || echo "[$(date -u +%FT%TZ)] pii_purge: WARNING metric push failed (purge itself ran)" >&2
+
+# AUD-11 (#363) — persist last-success epoch for backup_metric_warmup.sh
+# (same rationale as staleness_nudge.sh; PiiPurgeStale's absent() arm counts
+# on the warmup to keep pushgateway recreates from false-firing it).
+STATE_DIR=/var/lib/backup-state
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+printf '%s\n' "$NOW" > "$STATE_DIR/pii_purge.last_success" 2>/dev/null || true

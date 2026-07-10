@@ -168,5 +168,19 @@ warm_from_state_file audit_log_retention \
     sku_audit_log_retention_last_success_timestamp_seconds \
     audit_log_retention
 
+# AUD-11 (#363) — the NC-3 nudge and 152-ФЗ purge crons are DB/API-only
+# (nothing in S3 to derive from); their scripts persist last-success state
+# files the same way audit_log_retention does. Warming them closes the
+# "cron broken + pushgateway recreated → metric absent forever, watchdog
+# blind" gap, and lets PiiPurgeStale carry an absent() failsafe without
+# false-firing on every pushgateway recreate.
+warm_from_state_file staleness_nudge \
+    sku_staleness_nudge_last_success_timestamp_seconds \
+    staleness_nudge
+
+warm_from_state_file pii_purge \
+    sku_pii_purge_last_success_timestamp_seconds \
+    pii_purge
+
 log "complete (best-effort; exiting 0 regardless)"
 exit 0

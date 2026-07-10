@@ -39,3 +39,13 @@ curl -fsS --max-time 5 -X PUT --data-binary "# TYPE sku_staleness_nudge_last_suc
 sku_staleness_nudge_last_success_timestamp_seconds $NOW
 " "$PUSHGATEWAY_URL/metrics/job/staleness_nudge/instance/sku-forecasting" >/dev/null 2>&1 \
     || echo "[$(date -u +%FT%TZ)] staleness_nudge: WARNING metric push failed (nudge itself ran)" >&2
+
+# AUD-11 (#363) — persist last-success epoch so backup_metric_warmup.sh can
+# re-push the metric after a pushgateway recreate (#97 class). Without this,
+# "nudge broken + pushgateway recreated" left the metric absent forever while
+# the sibling *CronSilent stayed green (crond alive) — the watchdog never
+# fired and clients went silently un-nudged. Best-effort, mirrors
+# audit_log_retention.sh: monitoring resilience must not fail the nudge run.
+STATE_DIR=/var/lib/backup-state
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+printf '%s\n' "$NOW" > "$STATE_DIR/staleness_nudge.last_success" 2>/dev/null || true

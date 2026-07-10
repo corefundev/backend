@@ -1026,6 +1026,50 @@ tests:
         alertname: StalenessNudgeStale
         exp_alerts: []
 
+  # ── PiiPurgeStale (AUD-11 #363) ──────────────────────────────────────────
+  # 152-ФЗ purge cron watchdog. UNLIKE the nudge rule it carries an absent()
+  # arm — safe because backup_metric_warmup.sh re-pushes the state-file
+  # timestamp on every container start, so absent = "never succeeded on
+  # this volume" (exactly what must page), not "pushgateway just recreated".
+  - interval: 1m
+    name: "PiiPurgeStale fires when the purge cron stops (>50h + 30m for)"
+    input_series:
+      - series: 'sku_pii_purge_last_success_timestamp_seconds{instance="sku-forecasting", job="pii_purge"}'
+        values: '0x3121'              # frozen at 0, sampled every 1m for 52h
+    alert_rule_test:
+      - eval_time: 40h                # 144000 < 180000 → healthy
+        alertname: PiiPurgeStale
+        exp_alerts: []
+      - eval_time: 51h                # 183600 > 180000, past for:30m → fires
+        alertname: PiiPurgeStale
+        exp_alerts:
+          - exp_labels: {instance: "sku-forecasting", job: "pii_purge", severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "PII retention purge cron is stale or missing (>50h)"
+              description: "scripts/pii_purge.sh (daily 04:40, backup container) hasn't pushed a success in 50+h — 152-ФЗ retention purge of closed accounts is NOT running (erasure cascade #356 included). Check /var/log/pii_purge.log in docker-backup-1, the api /internal/pii-purge endpoint, and pushgateway reachability."
+
+  - interval: 1h
+    name: "PiiPurgeStale DOES fire when metric absent (never succeeded on this volume — the failsafe arm)"
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: PiiPurgeStale
+        exp_alerts:
+          - exp_labels: {severity: warning, team: forecasting}
+            exp_annotations:
+              summary: "PII retention purge cron is stale or missing (>50h)"
+              description: "scripts/pii_purge.sh (daily 04:40, backup container) hasn't pushed a success in 50+h — 152-ФЗ retention purge of closed accounts is NOT running (erasure cascade #356 included). Check /var/log/pii_purge.log in docker-backup-1, the api /internal/pii-purge endpoint, and pushgateway reachability."
+
+  - interval: 1m
+    name: "PiiPurgeStale stays quiet while the purge cron is fresh"
+    input_series:
+      - series: 'sku_pii_purge_last_success_timestamp_seconds{instance="sku-forecasting", job="pii_purge"}'
+        values: '0+60x300'            # tracks time() — always fresh
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: PiiPurgeStale
+        exp_alerts: []
+
   - interval: 1m
     name: "ModelAgeCheckStale fires when the probe stops pushing (>3h + 30m for)"
     input_series:
