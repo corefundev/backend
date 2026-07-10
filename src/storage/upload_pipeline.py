@@ -443,12 +443,34 @@ def run_process(
     manifest = result.manifest or {}
     row_count = manifest.get("row_count")
     sku_count = manifest.get("sku_count")
-    return registry.update_status(
-        upload_id, ur.PROCESSED,
-        processed_key=processed_key,
-        row_count=int(row_count) if row_count is not None else None,
-        sku_count=int(sku_count) if sku_count is not None else None,
-    )
+    try:
+        return registry.update_status(
+            upload_id, ur.PROCESSED,
+            processed_key=processed_key,
+            row_count=int(row_count) if row_count is not None else None,
+            sku_count=int(sku_count) if sku_count is not None else None,
+        )
+    except KeyError:
+        # AUD-9 (#361): the user DELETEd the upload while this job was
+        # parsing. cancel_upload removed the row (and whatever objects
+        # existed at that moment) — but we have just written a parquet +
+        # manifest AFTER its sweep. The row is the single source of truth;
+        # without it these objects are ownerless customer PII: invisible
+        # to the uploads UI, to cancel, and to the #310 retention purge.
+        # The registry write is the publish CAS — on "row gone", unpublish.
+        logger.info(
+            "prep: upload %s was cancelled mid-flight — removing the "
+            "just-written processed objects", upload_id,
+        )
+        for orphan in (processed_key, manifest_key):
+            try:
+                processed.delete(orphan)
+            except Exception as e:    # noqa: BLE001 — best-effort like cancel_upload's own sweep
+                logger.warning(
+                    "prep: could not remove %s after mid-flight cancel: %s",
+                    orphan, e,
+                )
+        raise
 
 
 def get_processed_path(record: ur.UploadRecord) -> str:
@@ -486,14 +508,18 @@ def cancel_upload(upload_id: str) -> bool:
         return False
 
     # Compute candidate keys for each zone. The same {client}/{upload}/{file}
-    # path is used by untrusted + quarantine; processed has its own filename.
+    # path is used by untrusted + quarantine; processed has its own filename
+    # AND a manifest sibling (AUD-9 #361 — the manifest was never swept here,
+    # leaving a client-identifying JSON behind every cancelled processed upload).
     untrusted_q_key = z.upload_key(record.client_id, record.upload_id, record.filename)
     proc_key        = z.processed_key(record.client_id, record.upload_id)
+    manifest_key    = z.processed_manifest_key(record.client_id, record.upload_id)
 
     for zone, key in [
         (z.Zone.UNTRUSTED,  untrusted_q_key),
         (z.Zone.QUARANTINE, untrusted_q_key),
         (z.Zone.PROCESSED,  proc_key),
+        (z.Zone.PROCESSED,  manifest_key),
     ]:
         try:
             backend = z.get_zone_backend(zone)
