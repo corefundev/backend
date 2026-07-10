@@ -153,15 +153,35 @@ def detect_encoding(raw: bytes) -> str:
     return "latin-1"
 
 
+def _count_outside_quotes(line: str, delim: str) -> int:
+    """Occurrences of `delim` OUTSIDE double-quoted cells (AUD-9 #361).
+
+    Raw `line.count(d)` sees delimiters INSIDE quoted text — a comma file
+    with `"болт; гайка"` in a description column scores ';' once per row,
+    exactly the stable-count signature the #348 override trusts, flipping
+    the detection to ';' (the mirror image of the bug #348 fixed). CSV
+    quoting rules: a bare `"` toggles quoted state; the doubled `""`
+    escape toggles twice with nothing between, so it can't miscount."""
+    count, in_quotes = 0, False
+    for ch in line:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == delim and not in_quotes:
+            count += 1
+    return count
+
+
 def _delimiter_scores(lines: "list[str]") -> "dict[str, tuple[int, float]]":
     """Per-delimiter (modal per-line count, consistency-weighted score) over the
     sample lines. The true delimiter splits every row into the same N fields → a
     high, STABLE per-line count; a stray comma in a header/decimal appears ≤1×
-    and loses. score = modal_count × (fraction of lines carrying that count)."""
+    and loses. score = modal_count × (fraction of lines carrying that count).
+    Counting is quote-aware — a delimiter inside a quoted cell is field TEXT,
+    not structure (AUD-9 #361)."""
     n = max(1, len(lines))
     scores: "dict[str, tuple[int, float]]" = {}
     for d in _DELIMITERS:
-        counts = [ln.count(d) for ln in lines] or [0]
+        counts = [_count_outside_quotes(ln, d) for ln in lines] or [0]
         modal, freq = Counter(counts).most_common(1)[0]
         scores[d] = (modal, modal * (freq / n))
     return scores
@@ -396,6 +416,13 @@ def _apply_mapping(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     Runs in-sandbox so the untrusted rename happens inside isolation. Unknown
     canonical keys and sources absent from the file are ignored; a required
     field left unmapped simply fails the downstream _validate (fail-closed)."""
+    # AUD-9 (#361): strip header padding BEFORE matching. sniff_file strips
+    # headers, so the auto-map's source names are stripped — but pandas keeps
+    # `" Дата "` verbatim, `source in df.columns` matched nothing, every
+    # column was dropped, and _validate failed "missing required columns" on
+    # a file the system had just said it mapped. Mirrors _validate's strip.
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    df = df.loc[:, ~df.columns.duplicated()]
     schema = _REQUIRED + _OPTIONAL
     rename: "dict[str, str]" = {}
     for canonical, source in mapping.items():
