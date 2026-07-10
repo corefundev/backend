@@ -221,6 +221,19 @@ class PostgresTrainingRunsRegistry:
                 )
                 return [self._row_to_record(dict(r)) for r in cur.fetchall()]
 
+    def delete_for_client(self, client_id: str) -> int:
+        """AUD-4 (#356): erase this client's training-run rows — data_path and
+        model_path embed the client's own filenames/objects, so 152-ФЗ erasure
+        must remove them. PRIMARY write; returns rows removed (idempotent: a
+        second call returns 0). Tenant-scoped by client_id, never a bare
+        DELETE."""
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM sku_training_runs WHERE client_id = %s",
+                (client_id,),
+            )
+            return cur.rowcount
+
     def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
         # Read path → replica when configured.
         with self._conn_read() as conn:

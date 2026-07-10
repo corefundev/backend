@@ -15,6 +15,14 @@ legally retained and references it) + non-PII bookkeeping (plan, created_at,
 deleted_at). What is cleared: email(+canonical/verified), config, api_key_hash,
 notes, oauth linkage. status flips to 'purged' (idempotent — already-purged
 rows are skipped).
+
+AUD-4 (#356): the row was only HALF the erasure — the client's uploaded sales
+files, the model derived from them and the rows naming both survived forever.
+`pii_erasure.erase_client_data` now runs FIRST, and the row is anonymised /
+marked purged ONLY when it reports zero failures. A storage outage therefore
+leaves the client in the queue (deleted_at set, status unchanged) and the next
+daily run retries the whole cascade — a half-erased client must never be
+recorded as erased.
 """
 from __future__ import annotations
 
@@ -60,6 +68,7 @@ def run_pii_purge() -> dict:
     registry = get_registry()
 
     purged: list[str] = []
+    failed: list[str] = []
     for rec in registry.list_clients():
         if rec.deleted_at is None or rec.status == PURGED_STATUS:
             continue
@@ -73,16 +82,34 @@ def run_pii_purge() -> dict:
         if deleted_dt > cutoff:
             continue    # still inside the retention/restore window
 
+        # AUD-4 (#356): erase the DATA before the identity. Fail-closed —
+        # a partial erasure leaves the client in the queue for the next run.
+        from src.pipeline.pii_erasure import erase_client_data
+        erasure = erase_client_data(rec.client_id)
+        if not erasure.ok:
+            failed.append(rec.client_id)
+            logger.error(
+                "pii_purge: erasure INCOMPLETE for %s (%d failure(s)) — client "
+                "stays in the purge queue, retrying next run: %s",
+                rec.client_id, len(erasure.failures), erasure.failures[:3],
+            )
+            continue
+
         registry.update(rec.client_id, **_ANONYMISE)
         # Audit AFTER the anonymisation commits — the erasure is the fact we
         # record. record_event never raises (audit is a passive observer).
         record_event(
             event_type=EVT_CLIENT_PURGE, client_id=rec.client_id,
             target_type="client", target_id=rec.client_id,
-            metadata={"retention_days": days, "deleted_at": str(rec.deleted_at)},
+            metadata={"retention_days": days, "deleted_at": str(rec.deleted_at),
+                      **erasure.as_dict()},
         )
         purged.append(rec.client_id)
-        logger.info("pii_purge: anonymised %s (deleted_at=%s)", rec.client_id, rec.deleted_at)
+        logger.info("pii_purge: erased+anonymised %s (deleted_at=%s, %s)",
+                    rec.client_id, rec.deleted_at, erasure.as_dict())
 
-    logger.info("pii_purge: done, purged=%d retention_days=%d", len(purged), days)
-    return {"purged": len(purged), "retention_days": days, "client_ids": purged}
+    logger.info("pii_purge: done, purged=%d failed=%d retention_days=%d",
+                len(purged), len(failed), days)
+    return {"purged": len(purged), "failed": len(failed),
+            "retention_days": days, "client_ids": purged,
+            "failed_client_ids": failed}
