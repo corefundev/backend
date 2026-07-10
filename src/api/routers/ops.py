@@ -451,3 +451,58 @@ def admin_security(
         "named_admins": False,       # ADM-8 (#261): trigger = второй оператор
         "ip_allowlist": False,       # H8: опция, строится поверх ADM-0 shell
     }
+
+
+# ── ADM-v3-1 (#386): firing alerts for the console ───────────────────────────
+#
+# The operator's triage today spans three tools (console, Grafana,
+# Telegram). This proxies Prometheus's live alert state into the panel so
+# «Система» answers not only "are components alive" but "is anything ON
+# FIRE". Read-only; Prometheus stays unexposed publicly (same posture as
+# Grafana/MLflow — SSH-tunnel per runbook; the console talks to it over
+# the compose network).
+
+@router.get("/admin/alerts")
+def admin_alerts(auth: AuthContext = Depends(get_current_client)):
+    """Live alert state from Prometheus (/api/v1/alerts).
+
+    Fail-CLOSED: if Prometheus can't be consulted the endpoint returns
+    503 — "state unknown" must render as an outage on the ops console,
+    never as «не горит ничего» (AUD-12 discipline, same reason the FE
+    error-gates its empty states)."""
+    auth.require_role("admin")
+    import json as _json
+    import urllib.request
+
+    prometheus = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
+    try:
+        with urllib.request.urlopen(f"{prometheus}/api/v1/alerts", timeout=5) as resp:
+            payload = _json.loads(resp.read().decode())
+    except Exception as e:    # noqa: BLE001 — mapped to explicit 503, not swallowed
+        logger.warning("admin_alerts: prometheus unreachable: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Prometheus недоступен — состояние алертов неизвестно",
+        ) from e
+
+    alerts = []
+    for a in (payload.get("data") or {}).get("alerts", []):
+        labels = a.get("labels") or {}
+        alerts.append({
+            "name":      labels.get("alertname", "?"),
+            "severity":  labels.get("severity", "none"),
+            "state":     a.get("state", "unknown"),        # firing | pending
+            "active_at": a.get("activeAt"),
+            "summary":   (a.get("annotations") or {}).get("summary", ""),
+        })
+    # firing first, then pending; critical before warning within each.
+    _sev_rank = {"critical": 0, "warning": 1}
+    alerts.sort(key=lambda x: (x["state"] != "firing",
+                               _sev_rank.get(x["severity"], 2), x["name"]))
+    return {
+        "alerts": alerts,
+        "counts": {
+            "firing":  sum(1 for x in alerts if x["state"] == "firing"),
+            "pending": sum(1 for x in alerts if x["state"] == "pending"),
+        },
+    }
