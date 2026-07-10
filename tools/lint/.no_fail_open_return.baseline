@@ -61,7 +61,7 @@ src/audit/log.py:262  R9-T4-004 — audit replica fallback; close as part of T6-
 src/audit/log.py:451  pre-R9 baseline; triage in R10 — list_for_client read fallback (+61 lines after R10 phantom-metric Counter) (was :446, #156 shift)
 src/audit/log.py:491  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter) (was :486, #156 shift)
 src/audit/log.py:571  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines R10 phantom-metric; +10 R13-3 no-gap, 2026-06-23) (was :566, #156 shift)
-src/api/routers/auth.py:468  pre-R9 baseline; triage in R10 — signup OAuth race retry (was :362, +63 after ARCH-2 #206 shared-guard helpers added above) (was :425, +38 ADM-7 H3 tripwire helper) (+5 ADM-10 token gate)
+src/api/routers/auth.py:470  pre-R9 baseline; triage in R10 — signup OAuth race retry (was :362, +63 after ARCH-2 #206 shared-guard helpers added above) (was :425, +38 ADM-7 H3 tripwire helper) (+5 ADM-10 token gate) (+2 AUD-5 #357 issuance gates)
 src/api/routers/config.py:284  pre-R9 baseline; triage in R10 — config-reset write fallback (was :201, +70 lines #95; +13 R13-2 horizon-clamp wiring, 2026-06-22)
 src/api/routers/ops.py:151  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. (was :145, +5 CONTRACT-2 #208 probe-contract docstring) (+1 Optional import)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback
@@ -79,14 +79,14 @@ src/pipeline/inference_utils.py:489  QW2-1 #224 — serve_forecast chained branc
 
 src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
-src/api/routers/clients.py:581  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly (was :455, #156 shift)
-src/api/routers/clients.py:589  ADM-3 #256 — overview runs-enrichment guard: same rationale as :455 (was :463, #156 shift)
+src/api/routers/clients.py:594  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly (was :455, #156 shift) (+13 AUD-5 #357 revoke-sessions)
+src/api/routers/clients.py:602  ADM-3 #256 — overview runs-enrichment guard: same rationale as :594 (was :463, #156 shift) (+13 AUD-5 #357)
 src/notifications/staleness_nudge.py:116  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly (was :108, +8 AUD-3 #355 episode-key)
 src/notifications/staleness_nudge.py:124  NC-3 #243 — telegram-push guard: same rationale as :116 (was :116, +8 AUD-3 #355)
 src/api/routers/ops.py:296  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500 (was :279, #156 shift)
 src/api/routers/ops.py:321  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it) (was :304, #156 shift)
 src/api/routers/ops.py:290  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278) (was :273, #156 shift)
-src/api/routers/clients.py:325  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> []
-src/api/routers/clients.py:333  B4 #156 — export uploads guard: same rationale as :325
-src/api/routers/clients.py:338  B4 #156 — export access-log guard: same rationale as :325
+src/api/routers/clients.py:334  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> [] (+9 AUD-5 #357 import/revoke lines)
+src/api/routers/clients.py:342  B4 #156 — export uploads guard: same rationale as :334
+src/api/routers/clients.py:347  B4 #156 — export access-log guard: same rationale as :334
 src/storage/sandbox.py:387  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed

@@ -102,11 +102,13 @@ def test_unknown_client_404(monkeypatch):
 
 
 def test_token_issuance_gate_pinned():
+    # AUD-5 (#357) folded the inline suspended_at check into the shared
+    # assert_account_open gate (suspended AND closed, all issuance paths).
     src = Path("src/api/routers/auth.py").read_text()
     i_verify = src.index("if verify_api_key(req.secret, record_hash):")
     i_token  = src.index("create_access_token(client_id=req.client_id, roles=[\"forecast\"])")
-    assert "suspended_at is not None" in src[i_verify:i_token], (
-        "suspended clients must be denied NEW tokens at the verify site"
+    assert "assert_account_open(record)" in src[i_verify:i_token], (
+        "suspended/closed clients must be denied NEW tokens at the verify site"
     )
 
 

@@ -54,6 +54,7 @@ from src.audit import (
 )
 from src.auth.jwt_auth import (
     AuthContext,
+    assert_account_open,
     create_access_token,
     get_current_client,
 )
@@ -199,11 +200,9 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
 
     if is_well_formed(req.secret):
         if verify_api_key(req.secret, record_hash):
-            # ADM-10 (#278): suspended clients get no NEW tokens (existing
-            # ones are refused per-request in require_client_access).
-            if record is not None and record.suspended_at is not None:
-                raise HTTPException(status_code=403,
-                                    detail="Account suspended. Contact support.")
+            # ADM-10 (#278) + AUD-5 (#357): a suspended OR closed account
+            # gets no NEW tokens on any issuance path — shared gate.
+            assert_account_open(record)
             token = create_access_token(client_id=req.client_id, roles=["forecast"])
             return TokenResponse(access_token=token)
         # Well-formed sku_* key that doesn't match → explicit fail.
@@ -221,6 +220,9 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
     # point the env-check below returns 503 for legacy attempts.
     if record_hash is None and api_key_legacy and \
        _hmac.compare_digest(secret_bytes, api_key_legacy.encode()):
+        # AUD-5 (#357): the legacy branch skipped the account-state gate —
+        # a suspended/closed pre-Phase-6 client could still mint here.
+        assert_account_open(record)
         token = create_access_token(client_id=req.client_id, roles=["forecast"])
         return TokenResponse(access_token=token)
 
@@ -861,6 +863,13 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
         raise HTTPException(status_code=401, detail="Invalid or expired code")
     # Row already marked used by claim_active — no extra mark_used here.
 
+    # AUD-5 (#357): OTP proves email ownership, not that the account is
+    # open — a suspended/closed client could re-enter here for the whole
+    # 30-day retention window. Runs AFTER OTP verification, so the 403
+    # discloses account state only to someone holding the mailbox (same
+    # post-credential disclosure /auth/token has made since ADM-10).
+    assert_account_open(client)
+
     # Email-login → forecast role. Admin role is reserved for the
     # ADMIN_API_KEY path; you don't get to be admin via email-OTP.
     token = create_access_token(client_id=client.client_id, roles=["forecast"])
@@ -1231,6 +1240,11 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
             record.client_id, identity.provider,
         )
         raise HTTPException(403, detail="Email verification missing")
+
+    # AUD-5 (#357): an existing OAuth-linked (or email-linked) record may
+    # be suspended or closed — the provider only vouches for identity,
+    # not account state. Same shared gate as every other issuance path.
+    assert_account_open(record)
 
     # ── Step 5: redirect to frontend with JWT ────────────────────────
     token = create_access_token(client_id=record.client_id, roles=["forecast"])
