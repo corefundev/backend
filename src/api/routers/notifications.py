@@ -276,14 +276,26 @@ def admin_send_notification(
         logger.warning("admin announcement failed: %s", e)
         raise HTTPException(503, detail="notifications temporarily unavailable") from e
 
+    # AUD-7 (#359): the row used to source actor_email from a phantom
+    # `auth.email` — AuthContext has no such attribute, so the actor was
+    # ALWAYS NULL and the target only "{n} client(s)": "who sent what to
+    # whom" untraceable.
+    # Real operator identity = the token's client_id + auth_method + jti
+    # (the jti chains this send to its audited admin_token_issued event,
+    # which carries the login IP); target set = the actual ids ("all" for
+    # broadcast — the recipients are every client at send time by definition).
     record_event(
         event_type=EVT_ADMIN_ACTION, event_subtype="announcement_send",
-        actor_email=getattr(auth, "email", None),
+        client_id=auth.client_id,
         ip=http_req.client.host if http_req.client else None,
         user_agent=http_req.headers.get("user-agent"),
         target_type="notification", target_id=target_desc,
         metadata={"title": req.title[:80], "type": req.type,
-                  "severity": req.severity, "created": created},
+                  "severity": req.severity, "created": created,
+                  "actor_client_id": auth.client_id,
+                  "actor_auth_method": auth.auth_method,
+                  "actor_jti": auth.jti,
+                  "target": "all" if target == "all" else ids},
     )
     return {"created": created, "target": target_desc}
 
