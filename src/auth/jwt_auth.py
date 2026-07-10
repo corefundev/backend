@@ -225,10 +225,24 @@ def decode_access_token(token: str) -> dict:
         )
 
     jti = payload.get("jti")
+    _admin = "admin" in (payload.get("roles") or [])
     # Admin tokens fail CLOSED on a Redis outage (R13-4): a revoked admin
     # session must not survive while the denylist is unreachable.
-    if jti and is_token_revoked(jti, fail_closed="admin" in (payload.get("roles") or [])):
+    if jti and is_token_revoked(jti, fail_closed=_admin):
         logger.info("rejected revoked token jti=%s sub=%s", jti, payload.get("sub"))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # AUD-5 (#357): suspend/close revokes the client's LIVE sessions, not
+    # just future issuance — any token minted at or before the revocation
+    # moment is dead, whatever route it authenticates. Applies to admin
+    # tokens carrying this sub too (an admin re-mints in seconds; a stolen
+    # token for a closed account must not survive on the admin exemption).
+    sub, iat = payload.get("sub"), payload.get("iat")
+    if sub and iat and are_client_sessions_revoked(sub, int(iat), fail_closed=_admin):
+        logger.info("rejected pre-revocation token sub=%s iat=%s", sub, iat)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -368,17 +382,121 @@ def is_token_revoked(jti: str, *, redis=_USE_DEFAULT, fail_closed: bool = False)
         return fail_closed
 
 
+# ── Per-client session revocation (AUD-5 #357) ────────────────────────
+#
+# jti revocation kills ONE token; suspend/close must kill ALL of a
+# client's live tokens at once, and we don't track issued jtis per
+# client. Standard pattern instead: store the revocation MOMENT per
+# client; any token whose `iat` is at or before that moment is dead.
+# Entries expire after the max JWT lifetime — older tokens are past
+# `exp` anyway, so storage stays bounded. Unsuspend needs no cleanup:
+# tokens minted after re-login carry a later `iat` and pass.
+#
+# Same fallback discipline as the jti set: Redis is authoritative;
+# bounded in-memory map covers single-process dev / Redis blips.
+
+_inmem_client_revoked: dict[str, tuple[float, float]] = {}   # cid → (revoked_at, expires_at)
+
+
+def _prune_inmem_client_revoked(now: float | None = None) -> None:
+    """Same bounding rules as `_prune_inmem_revoked` (R3-5): drop expired
+    entries, then enforce the `jwt_inmem_revoked_max` ceiling oldest-first."""
+    if not _inmem_client_revoked:
+        return
+    cutoff = time.time() if now is None else now
+    for cid in [c for c, (_, exp) in _inmem_client_revoked.items() if exp <= cutoff]:
+        _inmem_client_revoked.pop(cid, None)
+    ceiling = _settings.jwt_inmem_revoked_max
+    if len(_inmem_client_revoked) > ceiling:
+        excess = len(_inmem_client_revoked) - ceiling
+        for cid, _ in sorted(_inmem_client_revoked.items(), key=lambda kv: kv[1][1])[:excess]:
+            _inmem_client_revoked.pop(cid, None)
+
+
+def revoke_client_sessions(client_id: str, *, redis=_USE_DEFAULT) -> None:
+    """Invalidate every JWT issued to `client_id` up to now (AUD-5 #357).
+
+    Called on suspend and on account closure — the moments where "no new
+    tokens" is not enough and the sessions already in the wild must stop
+    working. Idempotent; re-revoking just moves the moment forward.
+
+    `redis`: R5-M7 DI hook (None = use canonical pool).
+    """
+    if not client_id:
+        return
+    now = time.time()
+    expires_at = now + _revocation_ttl_seconds()
+    client = _redis_client() if redis is _USE_DEFAULT else redis
+    if client is None:
+        _inmem_client_revoked[client_id] = (now, expires_at)
+        _prune_inmem_client_revoked(now)
+        return
+    try:
+        client.setex(f"jwt:client_revoked_before:{client_id}",
+                     _revocation_ttl_seconds(), repr(now))
+    except Exception as e:
+        logger.warning("Redis revoke_client_sessions failed for %s: %s — "
+                       "using in-memory fallback", client_id, e)
+        _inmem_client_revoked[client_id] = (now, expires_at)
+        _prune_inmem_client_revoked(now)
+
+
+def are_client_sessions_revoked(client_id: str, iat: int, *,
+                                redis=_USE_DEFAULT, fail_closed: bool = False) -> bool:
+    """True iff `client_id`'s sessions were revoked at or after `iat`.
+
+    `iat <= revoked_at` (not `<`) because JWT `iat` has second granularity:
+    a token minted within the same second as the revocation must die too.
+
+    Fail semantics mirror `is_token_revoked` (R13-4): when Redis can't be
+    consulted and the in-memory fallback has no entry, `fail_closed`
+    decides — True for admin-bearing tokens, bounded fail-open otherwise.
+
+    `redis`: R5-M7 DI hook (None = use canonical pool).
+    """
+    if not client_id:
+        return False
+    now = time.time()
+    _prune_inmem_client_revoked(now)
+    entry = _inmem_client_revoked.get(client_id)
+    if entry is not None and iat <= entry[0]:
+        return True
+    client = _redis_client() if redis is _USE_DEFAULT else redis
+    if client is None:
+        return fail_closed
+    try:
+        raw = client.get(f"jwt:client_revoked_before:{client_id}")
+    except Exception as e:
+        logger.warning(
+            "Redis are_client_sessions_revoked failed for %s: %s — failing %s",
+            client_id, e, "closed (admin)" if fail_closed else "open",
+        )
+        return fail_closed
+    if raw is None:
+        return False
+    try:
+        revoked_at = float(raw if isinstance(raw, (str, float, int)) else raw.decode())
+    except (ValueError, UnicodeDecodeError):
+        logger.error("corrupt client-revocation entry for %s: %r — failing closed "
+                     "for this client", client_id, raw)
+        return True    # a corrupt entry only exists post-revocation; deny
+    return iat <= revoked_at
+
+
 def reset_revocation_set_for_tests(*, redis=_USE_DEFAULT) -> None:
     """Wipe both in-memory and Redis revocation entries. Test-only.
 
     `redis`: R5-M7 DI hook (None = use canonical pool).
     """
     _inmem_revoked.clear()
+    _inmem_client_revoked.clear()
     client = _redis_client() if redis is _USE_DEFAULT else redis
     if client is None:
         return
     try:
         for key in client.scan_iter(match="jwt:revoked:*", count=500):
+            client.delete(key)
+        for key in client.scan_iter(match="jwt:client_revoked_before:*", count=500):
             client.delete(key)
     except Exception:
         pass
@@ -408,6 +526,32 @@ class AuthContext:
         return role in self.roles
 
 
+def assert_account_open(record) -> None:
+    """403 unless the account is open (AUD-5 #357). THE shared gate for
+    every token-issuance path AND the per-request access check — one
+    definition of "closed", so a new login route can't miss half of it.
+
+    `record` is a ClientRecord or None. None passes: "client unknown"
+    is the caller's problem (404 / legacy-key transition path), not an
+    account-state problem. `getattr` on deleted_at tolerates pre-#310
+    records/stubs that predate the column.
+    """
+    if record is None:
+        return
+    if record.suspended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account suspended. Contact support.",
+        )
+    # B4 (#156): a soft-deleted (closed) account is denied immediately,
+    # like suspension — access must stop at closure, not at JWT expiry.
+    if getattr(record, "deleted_at", None) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account closed.",
+        )
+
+
 def require_client_access(client_id: str, auth: AuthContext) -> None:
     """Ensure the authenticated user can access the given client's data.
 
@@ -430,18 +574,7 @@ def require_client_access(client_id: str, auth: AuthContext) -> None:
         rec = get_registry().get(client_id)
     except Exception:    # noqa: BLE001 — see docstring: infra fail-open
         return
-    if rec is not None and rec.suspended_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account suspended. Contact support.",
-        )
-    # B4 (#156): a soft-deleted (closed) account is denied immediately, like
-    # suspension — access must stop at closure, not at JWT expiry.
-    if rec is not None and getattr(rec, "deleted_at", None) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account closed.",
-        )
+    assert_account_open(rec)
 
 
 # ── FastAPI dependency ────────────────────────────────────────

@@ -29,7 +29,12 @@ from src.audit import (
     record_event,
 )
 from src.auth.api_keys import generate_api_key, hash_api_key
-from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
+from src.auth.jwt_auth import (
+    AuthContext,
+    get_current_client,
+    require_client_access,
+    revoke_client_sessions,
+)
 from src.auth.signup_rate_limit import (
     RateLimited,
     check_rotate_attempt,
@@ -182,6 +187,10 @@ def admin_suspend_client(
         raise HTTPException(status_code=404, detail="Client not found")
     from datetime import datetime, timezone
     registry.update(client_id, suspended_at=datetime.now(timezone.utc).isoformat())
+    # AUD-5 (#357): suspension kills the sessions already in the wild, not
+    # just future issuance — otherwise a live JWT rides out its ~1h expiry
+    # on any route that doesn't hit require_client_access.
+    revoke_client_sessions(client_id)
     record_event(
         event_type=EVT_ADMIN_ACTION, event_subtype="client_suspend",
         client_id=client_id, ip=client_ip(http_req),
@@ -374,6 +383,10 @@ async def close_client_account(
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     registry.update(client_id, deleted_at=now)
+    # AUD-5 (#357): closure revokes the live sessions too — "access is
+    # revoked IMMEDIATELY" must hold for tokens already issued, on every
+    # route, not only where require_client_access runs.
+    revoke_client_sessions(client_id)
     invalidate_service_cache(client_id)
 
     record_event(
