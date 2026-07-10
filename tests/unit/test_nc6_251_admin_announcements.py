@@ -22,7 +22,13 @@ import src.storage.notifications as ns
 def _admin(monkeypatch):
     audits = []
     monkeypatch.setattr(nr, "record_event", lambda **kw: audits.append(kw))
-    auth = SimpleNamespace(require_role=lambda r: None, email="admin@x")
+    # AUD-7 (#359): the REAL AuthContext — the old SimpleNamespace fixture
+    # carried a phantom `email` attribute the real class doesn't have, which
+    # masked the actor=NULL audit bug in production. Never re-add fields the
+    # production class lacks.
+    from src.auth.jwt_auth import AuthContext
+    auth = AuthContext(client_id="admin-ops", roles=["admin", "forecast"],
+                       auth_method="jwt", jti="a" * 32)
     req = SimpleNamespace(client=SimpleNamespace(host="1.2.3.4"),
                           headers={"user-agent": "t"})
     return auth, req, audits
@@ -47,6 +53,32 @@ def test_broadcast_all_fans_out_and_audits(monkeypatch):
     assert calls[0][0] is None                       # None = ALL (SQL fan-out)
     assert audits and audits[0]["event_subtype"] == "announcement_send"
     assert audits[0]["metadata"]["created"] == 2
+    # AUD-7 (#359): a real actor identity + the target set — "who sent what
+    # to whom" must be reconstructable from the row alone.
+    assert audits[0]["client_id"] == "admin-ops"
+    meta = audits[0]["metadata"]
+    assert meta["actor_client_id"] == "admin-ops"
+    assert meta["actor_auth_method"] == "jwt"
+    assert meta["actor_jti"] == "a" * 32
+    assert meta["target"] == "all"
+
+
+def test_targeted_audit_records_the_actual_id_set(monkeypatch):
+    auth, req, audits = _admin(monkeypatch)
+    _reg_stub(monkeypatch)
+    nr.admin_send_notification(
+        nr.AdminAnnouncementRequest(target=["c1", "c2"], title="T"), req, auth=auth)
+    assert audits[0]["metadata"]["target"] == ["c1", "c2"]
+    assert audits[0]["client_id"] == "admin-ops"
+
+
+def test_no_phantom_email_reaches_the_audit(monkeypatch):
+    """The fixture-masking regression: AuthContext has no `email`, so the
+    handler must not source the actor from one (it audited NULL for every
+    send in production while the SimpleNamespace test passed)."""
+    from src.auth.jwt_auth import AuthContext
+    assert not hasattr(AuthContext("x", ["admin"]), "email")
+    assert 'getattr(auth, "email"' not in inspect.getsource(nr.admin_send_notification)
 
 
 def test_single_client_target(monkeypatch):
