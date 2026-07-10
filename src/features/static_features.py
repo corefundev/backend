@@ -97,3 +97,28 @@ def apply_model_static(model, df: pd.DataFrame, sku_col: str) -> pd.DataFrame:
     if smap is None:
         return df
     return merge_static_features(df, smap, sku_col)
+
+
+def fold_static_recompute(train_df: pd.DataFrame, test_df: pd.DataFrame,
+                          sku_col: str, target_col: str,
+                          ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """AUD-6 (#358): честный walk-forward для static-фич.
+
+    Полнофреймовая карта построена и на report-tail днях, на которых
+    walk-forward затем меряет метрику: velocity_band SKU частично кодирует
+    уровень продаж тестового окна → систематически оптимистичная метрика,
+    promotion gate (#227), HPO-slice (#180) и clean-blend (#152). Внутри
+    фолда карта строится ЗАНОВО и только на train-строках этого фолда;
+    test-строки получают train-карту — ровно как serve получает карту,
+    вшитую в артефакт на обучении (SKU без train-истории → _FALLBACK_BAND,
+    тот же контракт). Финальный fit не меняется: там полный df = полный train.
+
+    Перезаписывает STATIC_COLS в обоих срезах (merge_static_features
+    идемпотентно пропускает присутствующие колонки — поэтому сначала drop)."""
+    smap = compute_static_map(train_df, sku_col, target_col)
+    drop = list(STATIC_COLS)
+    train_df = merge_static_features(
+        train_df.drop(columns=drop, errors="ignore"), smap, sku_col)
+    test_df = merge_static_features(
+        test_df.drop(columns=drop, errors="ignore"), smap, sku_col)
+    return train_df, test_df

@@ -38,11 +38,17 @@ def run_hpo(
     config: dict,
     n_trials: int = 30,
     timeout_sec: int = 600,
+    fold_feature_fn=None,
 ) -> dict:
     """
     Run Optuna HPO. Returns dict of best LightGBM hyperparameters.
     Falls back to an empty dict (= keep config defaults) if Optuna isn't
     installed.
+
+    `fold_feature_fn` — threaded into the trial walk-forward (AUD-6 #358):
+    the #180 tune slice excludes the report-tail ROWS, but whole-frame
+    features (#307 static bands) baked into `df` were still computed over
+    that tail; the hook rebuilds them per trial fold from train rows only.
     """
     try:
         import optuna
@@ -93,7 +99,8 @@ def run_hpo(
 
         try:
             factory = lambda: MIMOForecaster(trial_config)
-            result  = walk_forward_validate(df, factory, feature_cols, trial_config)
+            result  = walk_forward_validate(df, factory, feature_cols, trial_config,
+                                            fold_feature_fn=fold_feature_fn)
             # Prefer pooled-global WMAPE: per-SKU mean blows up when a
             # few SKUs have intermittent demand in the test window.
             agg = result.aggregated

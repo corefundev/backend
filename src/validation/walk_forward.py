@@ -75,6 +75,7 @@ def walk_forward_validate(
     config: dict,
     sample_weight_fn=None,
     target_censor_fn=None,
+    fold_feature_fn=None,
 ) -> WalkForwardResult:
     """
     Expanding-window walk-forward validation.
@@ -86,6 +87,17 @@ def walk_forward_validate(
         instance. Strongly preferred for MIMO/Ensemble: the validator
         needs the SAME class as production so metrics are honest, and
         a factory guarantees per-fold isolation.
+
+    `fold_feature_fn(train_df, test_df) -> (train_df, test_df)` — AUD-6
+    (#358): per-fold recompute hook for cross-series features whose values
+    depend on the WHOLE frame they were built from (e.g. the #307 static
+    tercile bands). Such columns arrive in `df` computed over the full
+    history — including this fold's test window — so the fold model would
+    train on a feature partly encoding the test-window level. The hook
+    receives the fold slices BEFORE weights/censor/fit and must return
+    them with those columns rebuilt from train rows only (test rows get
+    the train-built values, mirroring how serve reads the model-carried
+    map). Row order/count must be preserved.
     """
     cfg_v       = config["validation"]
     horizon     = config["model"]["horizon"]
@@ -135,6 +147,13 @@ def walk_forward_validate(
         if len(test_df) == 0:
             logger.warning(f"Fold {fold_idx}: empty test set, skipping")
             continue
+
+        # AUD-6 (#358): rebuild whole-frame-derived features from THIS fold's
+        # train rows before anything downstream (weights, censor, fit) sees
+        # them — otherwise the fold model trains on values that encode the
+        # test window it is about to be graded on.
+        if fold_feature_fn is not None:
+            train_df, test_df = fold_feature_fn(train_df, test_df)
 
         fold_model = model() if callable(model) else model
         # #183: fold-aware anomaly weights — computed on THIS fold's train rows

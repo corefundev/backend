@@ -396,10 +396,24 @@ def run_training_pipeline(
     # #307: cross-series static positioning (velocity_band, price_tier) —
     # тот же MODEL-CARRIED контракт, что у market. Карта строится на полном
     # train-фрейме, вшивается в артефакт (attach ниже), на serve мержится.
-    from src.features.static_features import compute_static_map, merge_static_features
+    from src.features.static_features import (
+        compute_static_map,
+        fold_static_recompute,
+        merge_static_features,
+    )
     static_map = compute_static_map(df, config["data"]["sku_col"],
                                     config["data"]["target_col"])
     df = merge_static_features(df, static_map, config["data"]["sku_col"])
+
+    # AUD-6 (#358): walk-forward/HPO must NOT see this full-frame map — it
+    # was computed over the report-tail days they grade on (velocity_band
+    # partly encodes the test-window sales level → optimistic metric, gate,
+    # HPO). Each fold rebuilds the map from its own train rows; the final
+    # fit below keeps the full-frame map (full df = full train, serve-parity).
+    def _fold_statics(train_df: Any, test_df: Any) -> tuple:
+        return fold_static_recompute(train_df, test_df,
+                                     config["data"]["sku_col"],
+                                     config["data"]["target_col"])
 
     feature_cols = get_feature_columns(df, config)
     storage.save_features(df)
@@ -468,7 +482,9 @@ def run_training_pipeline(
         if n_tune_dates >= min_tune_dates:
             _progress(5, 9, "Подбор гиперпараметров (Optuna)")
             from src.models.hpo import run_hpo
-            best_params = run_hpo(df_tune, feature_cols, config, hpo_cfg.get("n_trials", 30))
+            best_params = run_hpo(df_tune, feature_cols, config,
+                                  hpo_cfg.get("n_trials", 30),
+                                  fold_feature_fn=_fold_statics)
             if best_params:
                 config["model"].update(best_params)
                 logger.info(
@@ -514,7 +530,7 @@ def run_training_pipeline(
     logger.info(f"  Walk-forward validator class: {val_label}")
     wf_result = walk_forward_validate(
         df, val_factory, feature_cols, config, sample_weight_fn=sample_weight_fn,
-        target_censor_fn=target_censor_fn,
+        target_censor_fn=target_censor_fn, fold_feature_fn=_fold_statics,
     )
     agg = wf_result.aggregated
     logger.info(f"  WMAPE={agg.get('wmape_mean',0):.3f} MASE={agg.get('mase_mean',0):.3f}")
