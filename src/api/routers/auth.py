@@ -204,6 +204,17 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
             # gets no NEW tokens on any issuance path — shared gate.
             assert_account_open(record)
             token = create_access_token(client_id=req.client_id, roles=["forecast"])
+            # AUD-10 (#362): this path issued tokens with NO audit trace —
+            # a 1C/API-key-only client looked forever-inactive to the
+            # staleness nudge and the admin activity card, and key-auth
+            # left nothing for brute-force forensics. Counted as activity
+            # by both queries (event_type='login').
+            record_event(
+                event_type=EVT_LOGIN, event_subtype="api_key_token_issued",
+                client_id=req.client_id, ip=client_ip(http_req),
+                user_agent=http_req.headers.get("user-agent"),
+                metadata={"method": "api_key"},
+            )
             return TokenResponse(access_token=token)
         # Well-formed sku_* key that doesn't match → explicit fail.
         # We do NOT fall through to legacy global key here — once a
@@ -224,6 +235,13 @@ def get_token(req: TokenRequest, http_req: Request):    # #184: sync body (bcryp
         # a suspended/closed pre-Phase-6 client could still mint here.
         assert_account_open(record)
         token = create_access_token(client_id=req.client_id, roles=["forecast"])
+        # AUD-10 (#362): same missing-audit gap as the per-client branch.
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="api_key_token_issued",
+            client_id=req.client_id, ip=client_ip(http_req),
+            user_agent=http_req.headers.get("user-agent"),
+            metadata={"method": "api_key_legacy"},
+        )
         return TokenResponse(access_token=token)
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
