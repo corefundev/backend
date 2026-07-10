@@ -597,15 +597,24 @@ async def get_current_client(
         _ensure_secrets_loaded()
         # R5-9 (2026-05-17) — constant-time compare. Raw `==` leaks
         # the static API key via per-byte timing latency. `/auth/token`
-        # already uses hmac.compare_digest at lines 619/649 — making
-        # the auth dependency consistent. The static key grants ADMIN
-        # role, so the timing channel was high-value.
+        # already uses hmac.compare_digest — making the auth dependency
+        # consistent.
         if STATIC_API_KEY and hmac.compare_digest(
             api_key.encode("utf-8"), STATIC_API_KEY.encode("utf-8"),
         ):
+            # AUD-8 (#360): forecast ONLY — this used to grant admin.
+            # A static header is a per-request credential: no token is
+            # minted, so nothing expires (bypassed the H2 30-min TTL),
+            # nothing is jti-revocable, and neither the H3 login
+            # tripwire nor an audit row ever fired. A leaked API_KEY
+            # was a permanent, silent admin session — exactly the blast
+            # window H2/H3 exist to close. Admin access goes through
+            # /auth/token + ADMIN_API_KEY (audited, tripwired, 30-min
+            # TTL, revocable). Prod impact: none — API_KEY is unset in
+            # production and 0 clients lack per-client keys.
             return AuthContext(
                 client_id   = "api_key_client",
-                roles       = ["admin", "forecast"],
+                roles       = ["forecast"],
                 auth_method = "api_key",
             )
         raise HTTPException(
