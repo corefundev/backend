@@ -546,7 +546,9 @@ def admin_client_activity(
                 """
                 SELECT client_id, max(ts)
                 FROM audit_log
-                WHERE event_type = 'login' AND success
+                -- AUD-10 (#362): same activity definition as the staleness
+                -- nudge — OAuth callbacks and api-key token issuance count.
+                WHERE event_type IN ('login', 'oauth_callback') AND success
                   AND (event_subtype IS NULL OR event_subtype != 'admin_token_issued')
                 GROUP BY client_id
                 """

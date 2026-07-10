@@ -80,7 +80,12 @@ def _stale_clients() -> list[dict]:
                            EXTRACT(EPOCH FROM (now() - max(ts))) / 86400
                                AS last_login_days
                     FROM audit_log
-                    WHERE event_type = 'login' AND success
+                    -- AUD-10 (#362): activity ≠ only email-OTP. OAuth logins
+                    -- land as 'oauth_callback'; per-client api-key issuance
+                    -- as 'login'/'api_key_token_issued' (event added in the
+                    -- same change). Counting bare 'login' left OAuth/1C
+                    -- clients forever "inactive" → inbox row, never a push.
+                    WHERE event_type IN ('login', 'oauth_callback') AND success
                       AND (event_subtype IS NULL
                            OR event_subtype != 'admin_token_issued')
                     GROUP BY client_id
