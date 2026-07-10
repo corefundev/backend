@@ -102,3 +102,9 @@ artifacts/weather_cache.parquet
 !**/configs/disposable_domains.txt
 .env.level3
 .env.lockbox
+
+# Agent scratch git-worktrees (AUD-14 #370). Nested repos: an over-broad
+# `git add` records them as mode-160000 gitlinks with no `.gitmodules`,
+# i.e. pointers a fresh clone cannot resolve. Guarded by
+# tests/lint/test_no_stray_gitlinks.py.
+.claude/worktrees/
