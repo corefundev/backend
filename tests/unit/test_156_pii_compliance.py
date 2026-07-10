@@ -63,6 +63,15 @@ def _purge_env(monkeypatch, records):
     )
     monkeypatch.setattr(pp, "get_registry", lambda: stub)
     monkeypatch.setattr(pp, "record_event", lambda **kw: audited.append(kw))
+    # AUD-4 (#356): purge now erases the client's DATA first and only
+    # anonymises the identity on a complete erasure. These tests pin the
+    # ANONYMISATION contract, so the data cascade is stubbed successful here;
+    # the cascade itself (incl. its fail-closed behaviour, which is what a
+    # real un-stubbed backend triggers) is covered in test_aud4_356_pii_erasure.
+    monkeypatch.setattr(
+        "src.pipeline.pii_erasure.erase_client_data",
+        lambda cid: SimpleNamespace(ok=True, failures=[], as_dict=lambda: {}),
+    )
     monkeypatch.setenv("PII_RETENTION_DAYS", "30")
     return updates, audited
 
