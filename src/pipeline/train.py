@@ -388,10 +388,20 @@ def run_training_pipeline(
     # #229: market features — MODEL-CARRIED state (см. src/features/market.py:
     # serve-parity запрещает считать их в build_features). Train-мерж по
     # полному ряду; хвост вшивается в модель перед save (attach ниже).
-    from src.features.market import compute_market_tail, merge_market_features
-    market_series = compute_market_tail(df, config["data"]["date_col"],
-                                        config["data"]["target_col"])
-    df = merge_market_features(df, market_series, config["data"]["date_col"])
+    #
+    # #380 (2026-07-11): default OFF. Честный 3-fold walk-forward на живом
+    # 1c-датасете: +5.05% WMAPE ВРЕДА (шаг 1 горизонта +58%) — абсолютные
+    # уровни каталога нестационарны (−60% за период) и не переносятся
+    # вперёд. Включение — осознанный opt-in через client config
+    # (features.market.enabled: true); кандидаты на возврат в default —
+    # нормализованные варианты (share-only/momentum) после замера стендом.
+    market_series = None
+    if bool(config.get("features", {}).get("market", {}).get("enabled", False)):
+        from src.features.market import compute_market_tail, merge_market_features
+        market_series = compute_market_tail(df, config["data"]["date_col"],
+                                            config["data"]["target_col"])
+        df = merge_market_features(df, market_series, config["data"]["date_col"])
+        logger.info("#229: market features ENABLED by client config (opt-in)")
 
     # #307: cross-series static positioning (velocity_band, price_tier) —
     # тот же MODEL-CARRIED контракт, что у market. Карта строится на полном
@@ -651,8 +661,9 @@ def run_training_pipeline(
     # #229: market-хвост вшивается в артефакт ДО сохранения (serve мержит
     # колонки из него — см. src/features/market.py). Также до MLflow-лога:
     # хелпер выше сохраняет во временный pkl тот же объект.
-    from src.features.market import attach_market_to_model
-    attach_market_to_model(final_model, market_series)
+    if market_series is not None:
+        from src.features.market import attach_market_to_model
+        attach_market_to_model(final_model, market_series)
     # #307: static-карта вшивается тем же образом, ДО save/MLflow-лога.
     from src.features.static_features import attach_static_to_model
     attach_static_to_model(final_model, static_map)

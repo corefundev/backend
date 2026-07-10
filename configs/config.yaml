@@ -47,6 +47,18 @@ features:
     cache_dir: artifacts/regressors_ru
     cache_ttl_hours: 24
 
+  # Cross-series market features (#229): lagged catalog totals + SKU share.
+  # Default OFF (#380, 2026-07-11): the honest 3-fold walk-forward on the
+  # real 1c dataset measured them at +5.05% WMAPE (WORSE), with horizon
+  # step 1 degraded by +58% — the absolute-level totals track a
+  # non-stationary catalog trend (-60% over the dataset) that does not
+  # generalize forward. The original -7.32% came from the retired
+  # single-window stand (see the measurement ledger). Per-client opt-in
+  # stays (FX precedent, #94); normalized variants (share-only / momentum)
+  # are the revival candidates - measure via scripts/bench_wf_ab.py first.
+  market:
+    enabled: false
+
 model:
   type: mimo                     # "lgbm" (single-step) or "mimo" (direct multi-step)
   horizon: 14
