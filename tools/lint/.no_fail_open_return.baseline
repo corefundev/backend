@@ -80,14 +80,14 @@ src/pipeline/inference_utils.py:489  QW2-1 #224 — serve_forecast chained branc
 
 src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
-src/api/routers/clients.py:674  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly (was :455, #156 shift) (+13 AUD-5 #357 revoke-sessions)
-src/api/routers/clients.py:682  ADM-3 #256 — overview runs-enrichment guard: same rationale as :594 (was :463, #156 shift) (+13 AUD-5 #357)
+src/api/routers/clients.py:671  ADM-3 #256 — overview logins-enrichment guard: recent logins are best-effort; their DB failure must not blank the client PROFILE (the card's core); logged loudly (was :455, #156 shift) (+13 AUD-5 #357 revoke-sessions) (−3 #387 fix: retention field moved export→overview)
+src/api/routers/clients.py:679  ADM-3 #256 — overview runs-enrichment guard: same rationale as :594 (was :463, #156 shift) (+13 AUD-5 #357) (−3 #387 fix)
 src/notifications/staleness_nudge.py:121  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly (was :108, +8 AUD-3 #355 episode-key)
 src/notifications/staleness_nudge.py:129  NC-3 #243 — telegram-push guard: same rationale as :116 (was :116, +8 AUD-3 #355)
 src/api/routers/ops.py:296  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500 (was :279, #156 shift)
 src/api/routers/ops.py:321  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it) (was :304, #156 shift)
 src/api/routers/ops.py:290  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278) (was :273, #156 shift)
-src/api/routers/clients.py:412  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> [] (+9 AUD-5) (+78 ADM-v3-2 #387 card endpoints)
-src/api/routers/clients.py:420  B4 #156 — export uploads guard: same rationale as :334
-src/api/routers/clients.py:425  B4 #156 — export access-log guard: same rationale as :334
+src/api/routers/clients.py:409  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> [] (+9 AUD-5) (+78 ADM-v3-2 #387 card endpoints) (−3 #387 fix)
+src/api/routers/clients.py:417  B4 #156 — export uploads guard: same rationale as :334 (−3 #387 fix)
+src/api/routers/clients.py:422  B4 #156 — export access-log guard: same rationale as :334 (−3 #387 fix)
 src/storage/sandbox.py:387  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed

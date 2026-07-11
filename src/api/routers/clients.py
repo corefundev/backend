@@ -91,7 +91,7 @@ _CLIENT_SAFE_FIELDS = frozenset({
     "created_at", "last_trained_at", "last_mlflow_run_id",
     "last_wmape", "last_mase",
     "status", "model_version", "horizon", "notes",
-    "plan", "trained_sku_count", "suspended_at",
+    "plan", "trained_sku_count", "suspended_at", "deleted_at",
     "email", "email_verified_at", "oauth_provider",
 })
 
@@ -381,9 +381,6 @@ async def export_client_data(
         "status":            record.status,
         "suspended_at":      record.suspended_at,
         "deleted_at":        record.deleted_at,
-        # #387: PII-блок карточки — FE считает «авто-purge через N дн»
-        # из deleted_at + этого окна; status=purged = «данные стёрты».
-        "pii_retention_days": _pii_retention_days(),
         "config":            record.config,
         "email_verified_at": record.email_verified_at,
     }
@@ -689,5 +686,9 @@ def admin_client_overview(
         user_agent=http_req.headers.get("user-agent"),
         target_type="client", target_id=client_id,
     )
-    return {"client": _client_to_safe_dict(record),
+    # #387: PII-блок карточки — FE считает «авто-purge через N дн» из
+    # deleted_at + этого окна; status=purged = «данные стёрты».
+    client = {**_client_to_safe_dict(record),
+              "pii_retention_days": _pii_retention_days()}
+    return {"client": client,
             "recent_logins": logins, "training_runs": runs}

@@ -121,6 +121,26 @@ def test_erase_now_fail_closed_is_503(monkeypatch):
     assert "НЕ завершено" in ei.value.detail
 
 
+# ── overview несёт поля PII-блока ────────────────────────────────────────
+
+def test_overview_client_carries_deleted_at_and_retention(monkeypatch):
+    """FE-карточка считает «авто-стирание через N дн» из deleted_at +
+    pii_retention_days — оба обязаны быть в overview.client (не в export!)."""
+    rec = _rec(deleted_at="2026-06-01T00:00:00Z")
+    rec.__dict__.update(client_id="acme", config={}, storage_path="s",
+                        created_at="c", last_trained_at=None,
+                        last_mlflow_run_id=None, last_wmape=None,
+                        last_mase=None, model_version=None, horizon=14,
+                        notes=None, plan="business", trained_sku_count=0,
+                        email="a@b.c", email_verified_at=None,
+                        oauth_provider=None)
+    _env(monkeypatch, rec)
+    monkeypatch.setattr(cr, "_pii_retention_days", lambda: 30)
+    out = cr.admin_client_overview("acme", _http(), auth=_auth())
+    assert out["client"]["deleted_at"] == "2026-06-01T00:00:00Z"
+    assert out["client"]["pii_retention_days"] == 30
+
+
 # ── общий путь с кроном ──────────────────────────────────────────────────
 
 def test_cron_loop_uses_the_same_purge_one():
