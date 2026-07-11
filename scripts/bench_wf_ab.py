@@ -42,6 +42,8 @@ from typing import Any, Callable, Optional
 # exclude: имена фич, скрываемые от модели В ЭТОМ ПЛЕЧЕ (колонки в фрейме
 # остаются — исключение только из feature_cols; так выключается фича,
 # вшитая в build_features безусловно, напр. payday).
+# recency_half_life: дни; включает recency-decay sample-веса (#319) в этом
+# плече через sample_weight_fn (в остальных плечах весов нет).
 ARMS: dict[str, dict] = {
     "base":          {"model": "mimo",     "statics": "fold_clean", "market": False},
     "mimo":          {"model": "mimo",     "statics": "fold_clean", "market": False},
@@ -53,6 +55,13 @@ ARMS: dict[str, dict] = {
     "statics_leaky": {"model": "mimo",     "statics": "leaky",      "market": False},
     "payday_off":    {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "exclude": ("days_to_payday", "is_payday_window")},
+    # B1 #319: recency-decay sample-weights (0.5 ** (age/half_life), floor
+    # 0.05, якорь = cutoff трейн-фолда → fold-clean по построению). Два
+    # half-life — dose-response: если 90d лучше 180d, сигнал реален.
+    "recency_hl180": {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "recency_half_life": 180},
+    "recency_hl90":  {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "recency_half_life": 90},
 }
 
 # Абсолютные market-колонки — нестационарная часть (#380): плечи
@@ -152,6 +161,17 @@ def run_arm(arm_name: str, base_df, config: dict,
         if spec["statics"] == "fold_clean" else None
     )
 
+    # B1 #319: recency-плечо весит строки фолда от ЕГО cutoff'а (train_df
+    # max date) — тот же hook, что anomaly-веса в prod (#183); в остальных
+    # плечах sample_weight_fn=None (харнесс: веса выключены).
+    sample_weight_fn = None
+    _rd_hl = spec.get("recency_half_life")
+    if _rd_hl:
+        from src.data.recency import recency_weights
+        sample_weight_fn = (
+            lambda tr: recency_weights(tr, date_col, half_life_days=_rd_hl)
+        )
+
     if model_factory is None:
         arm_config = {**config, "model": {**config["model"]}}
         if spec["model"] == "ensemble":
@@ -171,7 +191,8 @@ def run_arm(arm_name: str, base_df, config: dict,
 
     t0 = time.time()
     res = walk_forward_validate(df, model_factory, feature_cols, config,
-                                fold_feature_fn=fold_feature_fn)
+                                fold_feature_fn=fold_feature_fn,
+                                sample_weight_fn=sample_weight_fn)
 
     # Метки band по полной истории — для декомпозиции отчёта.
     full_map = compute_static_map(df, sku_col, target_col)

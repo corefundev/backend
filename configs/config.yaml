@@ -124,6 +124,16 @@ anomaly_detection:
   iqr_factor: 3.0
   anomaly_weight: 0.1
 
+# B1 #319 — exponential recency sample-weights: 0.5 ** (age_days / half_life),
+# anchored to the train cutoff, composed multiplicatively with anomaly weights.
+# Default OFF until the honest 1c-live bench (scripts/bench_wf_ab.py) shows a
+# real gain — measure-first discipline; см. журнал замеров. `floor` keeps old
+# rows from starving short-history SKUs of effective sample size.
+recency_decay:
+  enabled: false
+  half_life_days: 180
+  floor: 0.05
+
 hpo:
   enabled: false                 # set true to run Optuna HPO
   n_trials: 30
