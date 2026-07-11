@@ -48,6 +48,7 @@ from src.plans.enforcement import (
     assert_config_keys_allowed,
     assert_horizon_within_plan,
 )
+from src.pipeline.pii_purge import _retention_days as _pii_retention_days
 from src.plans.plans import Plan, get_plan_spec
 from src.storage.backend import ClientStorage
 
@@ -221,6 +222,80 @@ def admin_unsuspend_client(
     return {"client_id": client_id, "suspended": False}
 
 
+@router.post("/admin/clients/{client_id}/revoke-sessions")
+def admin_revoke_sessions(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """ADM-v3-2 (#387): оператор гасит ВСЕ живые сессии клиента, не трогая
+    аккаунт (утёкший токен, «выйдите меня со всех устройств»). Дергает тот
+    же механизм #357, что suspend/close, но без смены статуса аккаунта."""
+    auth.require_role("admin")
+    record = get_registry().get(client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    revoke_client_sessions(client_id)
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="client_revoke_sessions",
+        client_id=client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="client", target_id=client_id,
+        metadata={"actor_client_id": auth.client_id,
+                  "actor_auth_method": auth.auth_method,
+                  "actor_jti": auth.jti},
+    )
+    return {"client_id": client_id, "sessions_revoked": True}
+
+
+@router.post("/admin/clients/{client_id}/erase-now")
+def admin_erase_now(
+    client_id: str,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """ADM-v3-2 (#387): 152-ФЗ «сотрите меня немедленно» — стирание данных
+    БЕЗ ожидания retention-окна. Ровно тот же fail-closed путь, что у
+    ежедневного purge-крона (pii_purge.purge_one: каскад #356 → анонимизация
+    → EVT_CLIENT_PURGE), плюс актор в метаданных (AUD-7 дисциплина).
+
+    Защита от случайности: работает ТОЛЬКО по уже закрытому аккаунту
+    (deleted_at установлен) — активного клиента сначала закрывают, это
+    отдельное осознанное действие. Идемпотентен по purged-статусу."""
+    auth.require_role("admin")
+    from src.pipeline.pii_purge import PURGED_STATUS, purge_one
+
+    record = get_registry().get(client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if record.status == PURGED_STATUS:
+        return {"client_id": client_id, "already_purged": True}
+    if record.deleted_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Аккаунт открыт. Стирание доступно только для закрытого "
+                   "аккаунта — сначала закройте его (DELETE /clients/{id}).",
+        )
+
+    ok, erasure = purge_one(
+        client_id,
+        extra_metadata={"mode": "admin_erase_now",
+                        "deleted_at": str(record.deleted_at),
+                        "actor_client_id": auth.client_id,
+                        "actor_auth_method": auth.auth_method,
+                        "actor_jti": auth.jti,
+                        "ip": client_ip(http_req)},
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Стирание НЕ завершено: {len(erasure.failures)} сбой(я) "
+                   "хранилищ — ничего не анонимизировано, аккаунт остался в "
+                   "очереди purge. Повторите позже.",
+        )
+    return {"client_id": client_id, "purged": True, **erasure.as_dict()}
+
+
 @router.post("/clients/{client_id}/api-key/rotate")
 async def rotate_api_key(
     client_id: str,
@@ -306,6 +381,9 @@ async def export_client_data(
         "status":            record.status,
         "suspended_at":      record.suspended_at,
         "deleted_at":        record.deleted_at,
+        # #387: PII-блок карточки — FE считает «авто-purge через N дн»
+        # из deleted_at + этого окна; status=purged = «данные стёрты».
+        "pii_retention_days": _pii_retention_days(),
         "config":            record.config,
         "email_verified_at": record.email_verified_at,
     }
