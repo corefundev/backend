@@ -25,7 +25,7 @@ from typing import Optional
 import os
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
@@ -234,3 +234,123 @@ def admin_uploads(
         raise HTTPException(status_code=503,
                             detail="uploads temporarily unavailable") from e
     return {"uploads": rows, "count": len(rows)}
+
+
+# ADM-v3-6 #391 — bounds for the consistency sweep. The AUD-9 class
+# («object without a registry row») is closed forward by the publication
+# CAS; this report catches HISTORICAL/new strays. Read-only by design of
+# record — no deletions in this iteration (look first, act later).
+_CONSISTENCY_MAX_CLIENTS = 50
+_CONSISTENCY_MAX_ROWS_PER_CLIENT = 1000
+
+
+@router.post("/admin/data/consistency-check")
+def admin_data_consistency_check(
+    http_req: Request,
+    client_id: Optional[str] = None,
+    quarantine_stale_days: int = 7,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """ADM-v3-6 #391 — сверка объектов зон (UNTRUSTED/QUARANTINE/PROCESSED)
+    со строками sku_uploads. Находит:
+      • orphans   — объект зоны, чей upload_id не имеет строки реестра;
+      • leftovers — объект зоны, который по статусу строки уже должен был
+        быть удалён (UNTRUSTED после скана; QUARANTINE в terminal-статусе
+        старше порога);
+      • missing   — строка status=processed без data.parquet в PROCESSED.
+    Read-only, bounded (≤50 клиентов, ≤1000 строк/клиент — лимиты видны в
+    ответе как truncated-флаги), admin-only, запуск аудируется."""
+    auth.require_role("admin")
+    if not (1 <= quarantine_stale_days <= 365):
+        raise HTTPException(status_code=422, detail="bad quarantine_stale_days")
+
+    from datetime import datetime, timedelta, timezone
+
+    from src.audit import EVT_ADMIN_ACTION, record_event
+    from src.auth.signup_rate_limit import client_ip
+    from src.clients.registry import get_registry
+    from src.storage import zones as z
+    from src.storage.upload_registry import (
+        PROCESSED, SCANNED_CLEAN, TERMINAL_STATES, get_upload_registry,
+    )
+
+    if client_id is not None:
+        client_ids = [client_id]
+        truncated_clients = False
+    else:
+        all_ids = sorted(c.client_id for c in get_registry().list_clients())
+        client_ids = all_ids[:_CONSISTENCY_MAX_CLIENTS]
+        truncated_clients = len(all_ids) > _CONSISTENCY_MAX_CLIENTS
+
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(days=quarantine_stale_days)
+    reg = get_upload_registry()
+    report: dict = {"orphans": [], "leftovers": [], "missing": [],
+                    "clients_checked": client_ids,
+                    "truncated_clients": truncated_clients,
+                    "truncated_rows": []}
+    try:
+        for cid in client_ids:
+            rows = reg.list_for_client(cid, limit=_CONSISTENCY_MAX_ROWS_PER_CLIENT)
+            if len(rows) == _CONSISTENCY_MAX_ROWS_PER_CLIENT:
+                report["truncated_rows"].append(cid)
+            by_id = {r.upload_id: r for r in rows}
+            for zone in (z.Zone.UNTRUSTED, z.Zone.QUARANTINE, z.Zone.PROCESSED):
+                backend = z.get_zone_backend(zone)
+                for key in backend.list_keys(f"{cid}/"):
+                    parts = key.split("/")
+                    uid = parts[1] if len(parts) >= 2 else None
+                    rec = by_id.get(uid) if uid else None
+                    if rec is None:
+                        report["orphans"].append(
+                            {"zone": zone.value, "key": key, "client_id": cid})
+                        continue
+                    # Zone-object that the pipeline should have removed:
+                    if zone is z.Zone.UNTRUSTED and rec.status not in ("uploaded", "scanning"):
+                        report["leftovers"].append(
+                            {"zone": zone.value, "key": key, "client_id": cid,
+                             "status": rec.status, "reason": "untrusted after scan"})
+                    elif zone is z.Zone.QUARANTINE and rec.status in TERMINAL_STATES:
+                        updated = rec.updated_at
+                        try:
+                            is_stale = datetime.fromisoformat(
+                                updated.replace("Z", "+00:00")) < stale_cutoff
+                        except (ValueError, AttributeError):
+                            is_stale = True   # unparseable age = report it
+                        if is_stale:
+                            report["leftovers"].append(
+                                {"zone": zone.value, "key": key, "client_id": cid,
+                                 "status": rec.status,
+                                 "reason": f"quarantine terminal >{quarantine_stale_days}d"})
+            # Rows that promise an object which is not there:
+            processed_zone = z.get_zone_backend(z.Zone.PROCESSED)
+            processed_keys = set(processed_zone.list_keys(f"{cid}/"))
+            for r in rows:
+                if r.status == PROCESSED:
+                    expected = r.processed_key or z.processed_key(cid, r.upload_id)
+                    if expected not in processed_keys:
+                        report["missing"].append(
+                            {"client_id": cid, "upload_id": r.upload_id,
+                             "expected_key": expected})
+                # SCANNED_CLEAN must still hold its quarantine source
+                elif r.status == SCANNED_CLEAN:
+                    qkey = z.upload_key(cid, r.upload_id, r.filename)
+                    if qkey not in set(z.get_zone_backend(z.Zone.QUARANTINE)
+                                       .list_keys(f"{cid}/{r.upload_id}/")):
+                        report["missing"].append(
+                            {"client_id": cid, "upload_id": r.upload_id,
+                             "expected_key": qkey, "zone": "quarantine"})
+    except Exception as e:    # noqa: BLE001 — surfaced, not swallowed
+        logger.error("consistency check failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="consistency check failed — см. логи api") from e
+
+    counts = {k: len(report[k]) for k in ("orphans", "leftovers", "missing")}
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="data_consistency_check",
+        client_id=auth.client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="storage_zones", target_id=client_id or "all",
+        metadata={**counts, "actor_client_id": auth.client_id,
+                  "actor_auth_method": auth.auth_method, "actor_jti": auth.jti},
+    )
+    return {**report, "counts": counts}
