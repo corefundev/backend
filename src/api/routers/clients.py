@@ -674,8 +674,10 @@ def admin_client_overview(
     runs: list = []
     try:
         from src.storage.training_runs import get_training_runs_registry, to_dict
+        # ADM-v3-3 #388: 30 runs feed the card's quality-trend sparklines
+        # (WMAPE/MASE + gate ribbon); the runs TABLE still renders 5.
         runs = [to_dict(r) for r in
-                get_training_runs_registry().list_for_client(client_id, limit=5)]
+                get_training_runs_registry().list_for_client(client_id, limit=30)]
     except Exception as e:    # noqa: BLE001 — runs are enrichment too
         logger.warning("overview runs skipped: %s", e)
 

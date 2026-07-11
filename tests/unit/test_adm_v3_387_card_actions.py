@@ -182,3 +182,10 @@ def test_purge_one_success_anonymises_and_audits_with_extra_meta(monkeypatch):
     assert cid == "acme" and kw["status"] == pii_purge.PURGED_STATUS
     assert events[0]["metadata"]["mode"] == "admin_erase_now"
     assert events[0]["metadata"]["objects_deleted"] == 2
+
+def test_overview_fetches_thirty_runs_for_the_trend():
+    """ADM-v3-3 #388: карточке нужен тренд по ≥20 тренировкам — overview
+    обязан запрашивать 30 (таблица рендерит 5 на FE)."""
+    import inspect
+    src = inspect.getsource(cr.admin_client_overview)
+    assert "limit=30" in src
