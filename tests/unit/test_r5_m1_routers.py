@@ -36,7 +36,8 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 64  # +1 ADM-v3-1 #386: GET /admin/alerts (Prometheus alert state for the console).
+_EXPECTED_ROUTE_COUNT = 66  # +2 ADM-v3-2 #387: POST /admin/clients/{id}/revoke-sessions + /erase-now (card actions).
+# +1 ADM-v3-1 #386: GET /admin/alerts (Prometheus alert state for the console).
 # +2 DP-4b #324: POST /clients/{id}/uploads/{id}/prepare + GET /clients/{id}/uploads/{id}/prep («Подготовка данных» trigger + read-only preview). +3 B4 #156: GET /clients/{id}/export + DELETE /clients/{id} + POST /internal/pii-purge (self-service PII lifecycle). (58 was ADM-6 #259 admin-uploads in src/api/uploads.py — outside this main+routers/ inventory)
 
 
