@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.api.service_cache import invalidate as invalidate_service_cache
-from src.audit import EVT_MODEL_TRAIN, record_event
+from src.audit import EVT_ADMIN_ACTION, EVT_MODEL_TRAIN, record_event
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
 from src.auth.signup_rate_limit import client_ip
 from src.clients.registry import get_registry
@@ -478,4 +478,51 @@ def admin_training_runs(
         logger.warning("training oversight failed: %s", e)
         raise HTTPException(status_code=503,
                             detail="oversight temporarily unavailable") from e
-    return {"runs": runs, "model_age_days": ages, "count": len(runs)}
+    return {"runs": runs, "model_age_days": ages, "count": len(runs),
+            "stuck_threshold_min": STUCK_THRESHOLD_MIN}
+
+
+# ADM-v3-4 #389: a 'running' row older than this smells abandoned
+# (AbandonedJobError class, R11-H4 lockout). Single source of truth for the
+# FE badge — surfaced in the /admin/training-runs response above. Trainings
+# legitimately run 40-70 min (ensemble); 90 keeps false alarms rare while a
+# truly stuck row still surfaces the same operator shift.
+STUCK_THRESHOLD_MIN = 90
+
+
+@router.post("/admin/training/reconcile")
+def admin_training_reconcile(
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """ADM-v3-4 #389 — manual trigger for the #265 abandoned-run self-heal.
+
+    The startup hook only fires on worker restarts; a stuck 'running' row
+    (dead RQ job + R11-H4 single-in-flight lockout) otherwise waits for the
+    next deploy. Same mechanism, operator-initiated: heals ONLY rows whose
+    job is demonstrably dead (live jobs are skipped inside), so the button
+    is safe to press with a real training in flight. Fail-CLOSED: unlike
+    the never-block-worker startup path, an operator action must surface
+    its errors."""
+    auth.require_role("admin")
+    try:
+        from src.pipeline.reconcile_runs import reconcile_abandoned_runs
+        healed = reconcile_abandoned_runs()
+    except Exception as e:    # noqa: BLE001 — surfaced as 503, not swallowed
+        logger.error("manual reconcile failed: %s", e)
+        raise HTTPException(
+            status_code=503, detail="reconcile failed — см. логи api"
+        ) from e
+    record_event(
+        event_type=EVT_ADMIN_ACTION, event_subtype="training_reconcile",
+        client_id=auth.client_id, ip=client_ip(http_req),
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="training_runs", target_id="reconcile",
+        metadata={
+            "healed": healed,
+            "actor_client_id": auth.client_id,
+            "actor_auth_method": auth.auth_method,
+            "actor_jti": auth.jti,
+        },
+    )
+    return {"healed": healed}
