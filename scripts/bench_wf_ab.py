@@ -36,14 +36,44 @@ from typing import Any, Callable, Optional
 # ── Реестр плеч ──────────────────────────────────────────────────────────
 # statics: "fold_clean" (честно, как в prod после AUD-6) | "leaky"
 # (до-AUD-6 поведение, для оценки утечки) | "off".
+# market:  False | "full" (абсолютные тоталы — снятый с default вариант,
+# #380) | "share" (только стационарная доля SKU) | "momentum" (доля +
+# отношение рынка к неделе назад — оба стационарные возврат-кандидаты).
+# exclude: имена фич, скрываемые от модели В ЭТОМ ПЛЕЧЕ (колонки в фрейме
+# остаются — исключение только из feature_cols; так выключается фича,
+# вшитая в build_features безусловно, напр. payday).
 ARMS: dict[str, dict] = {
     "base":          {"model": "mimo",     "statics": "fold_clean", "market": False},
     "mimo":          {"model": "mimo",     "statics": "fold_clean", "market": False},
     "ensemble":      {"model": "ensemble", "statics": "fold_clean", "market": False},
-    "market_on":     {"model": "mimo",     "statics": "fold_clean", "market": True},
+    "market_on":     {"model": "mimo",     "statics": "fold_clean", "market": "full"},
+    "market_share_only": {"model": "mimo", "statics": "fold_clean", "market": "share"},
+    "market_momentum":   {"model": "mimo", "statics": "fold_clean", "market": "momentum"},
     "statics_off":   {"model": "mimo",     "statics": "off",        "market": False},
     "statics_leaky": {"model": "mimo",     "statics": "leaky",      "market": False},
+    "payday_off":    {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "exclude": ("days_to_payday", "is_payday_window")},
 }
+
+# Абсолютные market-колонки — нестационарная часть (#380): плечи
+# share/momentum считают их (share строится из тотала), но прячут от модели.
+_MARKET_ABSOLUTE = ("market_total_lag_1", "market_total_lag_7")
+
+
+def _fingerprint(df, sku_col: str, date_col: str, target_col: str) -> dict:
+    """Отпечаток ДАННЫХ в отчёте — защита класса «мерили не то»
+    (feedback_dataset_provenance): контент-хэш + размерности позволяют
+    сверить прогон с реестром датасетов в журнале замеров."""
+    import hashlib
+    import pandas as pd
+    key = (df[[sku_col, date_col, target_col]]
+           .sort_values([sku_col, date_col]).reset_index(drop=True))
+    h = hashlib.sha256(
+        pd.util.hash_pandas_object(key, index=False).to_numpy().tobytes()
+    ).hexdigest()[:12]
+    return {"content_sha12": h, "rows": len(df),
+            "skus": int(df[sku_col].nunique()),
+            "dates": int(df[date_col].nunique())}
 
 
 def _wmape(g) -> Optional[float]:
@@ -100,9 +130,22 @@ def run_arm(arm_name: str, base_df, config: dict,
     if spec["statics"] != "off":
         smap = compute_static_map(df, sku_col, target_col)
         df = merge_static_features(df, smap, sku_col)
-    if spec["market"]:
+    market_mode = spec.get("market") or False
+    market_excluded: tuple = ()
+    if market_mode:
         market = compute_market_tail(df, date_col, target_col)
         df = merge_market_features(df, market, date_col)
+        if market_mode == "momentum":
+            # Стационарный momentum: рынок вчера к рынку неделю назад.
+            # NaN на warmup ОСТАЁТСЯ NaN (LightGBM various handling) —
+            # никакого ложного 0.0 (урок sku_share, #380).
+            import numpy as np
+            df["market_momentum_7"] = (
+                df["market_total_lag_1"]
+                / df["market_total_lag_7"].replace(0, np.nan)
+            )
+        if market_mode in ("share", "momentum"):
+            market_excluded = _MARKET_ABSOLUTE
 
     fold_feature_fn = (
         (lambda tr, te: fold_static_recompute(tr, te, sku_col, target_col))
@@ -121,8 +164,10 @@ def run_arm(arm_name: str, base_df, config: dict,
             from src.models.mimo import MIMOForecaster
             model_factory = lambda: MIMOForecaster(arm_config)      # noqa: E731
 
+    excluded = set(spec.get("exclude", ())) | set(market_excluded)
     feature_cols = [c for c in get_feature_columns(df, config)
-                    if spec["statics"] != "off" or c not in STATIC_COLS]
+                    if (spec["statics"] != "off" or c not in STATIC_COLS)
+                    and c not in excluded]
 
     t0 = time.time()
     res = walk_forward_validate(df, model_factory, feature_cols, config,
@@ -184,18 +229,20 @@ def main(argv: Optional[list] = None) -> int:
     df = load_data(args.data_path, config)
     df = build_features(df, config)
     print(json.dumps({"harness": {
-        "rows": len(df), "skus": int(df[config["data"]["sku_col"]].nunique()),
-        "dates": int(df[config["data"]["date_col"]].nunique()),
+        "data": _fingerprint(df, config["data"]["sku_col"],
+                             config["data"]["date_col"],
+                             config["data"]["target_col"]),
+        "source": args.data_path,
         "horizon": config["model"]["horizon"],
         "n_splits": config.get("validation", {}).get("n_splits", 3),
         "arms": arms,
-    }}, ensure_ascii=False))
+    }}, ensure_ascii=False), flush=True)
 
     results = []
     for arm in arms:
         out = run_arm(arm, df, config)
         results.append(out)
-        print(json.dumps(out, ensure_ascii=False))
+        print(json.dumps(out, ensure_ascii=False), flush=True)
 
     ref = results[0]
     print(json.dumps({"summary": {
