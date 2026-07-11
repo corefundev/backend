@@ -322,9 +322,82 @@ def admin_system(auth: AuthContext = Depends(get_current_client)):
         components["pushgateway"] = f"error: {type(e).__name__}"
 
     jobs.sort(key=lambda j: (not j["stale"], j["job"]))
+
+    # ADM-v3-8 #393: возраст секретов. SA-ключ ротируется еженедельным
+    # workflow (#353) — created_at лежит в самом authorized-key JSON;
+    # >10 дней = ротация пропущена. ADMIN_API_KEY — H6-регламент 90 дней,
+    # метка ставится рецептом ротации в ops_settings (ADM-12). Возраст,
+    # который не удалось прочитать, отдаётся honest-unknown/error — никогда
+    # молча «здоровым».
     return {"components": components, "jobs": jobs,
             "models_cached": len(cached_client_ids()),
-            "storage_backend": os.getenv("STORAGE_BACKEND", "local")}
+            "storage_backend": os.getenv("STORAGE_BACKEND", "local"),
+            "secrets": {"sa_key": _sa_key_age(),
+                        "admin_api_key": _admin_key_age()}}
+
+
+_SA_KEY_MAX_AGE_DAYS = 10     # weekly rotation workflow (#353) + grace
+_ADMIN_KEY_MAX_AGE_DAYS = 90  # H6 reglament (docs/OPERATIONS.md)
+
+
+def _sa_key_age() -> dict:
+    """Age of the mounted YC SA authorized key (its own created_at)."""
+    import json as _json
+    from datetime import datetime, timezone
+    path = os.environ.get("YC_SA_KEY_FILE")
+    if not path:
+        return {"known": False, "reason": "YC_SA_KEY_FILE not set"}
+    try:
+        created_raw = str(_json.load(open(path)).get("created_at") or "")
+        # YC stamps nanosecond precision — fromisoformat wants <= 6 digits
+        trimmed = created_raw.replace("Z", "+00:00")
+        if "." in trimmed:
+            head, tail = trimmed.split(".", 1)
+            digits = ""
+            for ch in tail:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            tz = tail[len(digits):]
+            trimmed = f"{head}.{digits[:6]}{tz or '+00:00'}"
+        created = datetime.fromisoformat(trimmed)
+        age_days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
+    except Exception as e:    # noqa: BLE001 — surfaced as error state
+        logger.warning("sa-key age read failed: %s", e)
+        return {"known": False, "reason": f"error: {type(e).__name__}"}
+    return {"known": True, "created_at": created_raw,
+            "age_days": round(age_days, 1),
+            "max_age_days": _SA_KEY_MAX_AGE_DAYS,
+            "overdue": age_days > _SA_KEY_MAX_AGE_DAYS}
+
+
+def _admin_key_age() -> dict:
+    """Age of ADMIN_API_KEY from the H6 rotation marker (ops_settings)."""
+    from datetime import datetime, timezone
+    try:
+        from src.audit.log import _connect
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT value FROM ops_settings "
+                        "WHERE key = 'admin_api_key_rotated_at'")
+            row = cur.fetchone()
+    except Exception as e:    # noqa: BLE001 — surfaced as error state
+        logger.warning("admin-key age read failed: %s", e)
+        return {"known": False, "reason": f"error: {type(e).__name__}"}
+    if row is None:
+        # честный unknown — до первой записанной ротации (ADM-12 прецедент)
+        return {"known": False, "reason": "no rotation recorded yet"}
+    try:
+        rotated = datetime.fromisoformat(str(row[0]))
+        if rotated.tzinfo is None:
+            rotated = rotated.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - rotated).total_seconds() / 86400
+    except ValueError:
+        return {"known": False, "reason": "unparseable marker"}
+    return {"known": True, "rotated_at": str(row[0]),
+            "age_days": round(age_days, 1),
+            "max_age_days": _ADMIN_KEY_MAX_AGE_DAYS,
+            "overdue": age_days > _ADMIN_KEY_MAX_AGE_DAYS}
 
 
 # ── ADM-5 (#258): audit-log viewer for the console ───────────────────────────
