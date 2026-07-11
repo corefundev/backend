@@ -469,6 +469,40 @@ def run_training_pipeline(
 
         sample_weight_fn = _fold_weights
 
+    # B1 #319: recency decay — recent rows count more. Composed
+    # MULTIPLICATIVELY with the anomaly weights above (orthogonal signals);
+    # per-fold weights anchor to the fold's OWN cutoff (train_df max date),
+    # so walk-forward stays fold-clean. Default OFF until the honest 1c-live
+    # bench shows a gain (measure-first; см. журнал замеров).
+    rd_cfg = config.get("recency_decay", {}) or {}
+    if rd_cfg.get("enabled", False):
+        import numpy as np
+
+        from src.data.recency import (
+            DEFAULT_FLOOR, DEFAULT_HALF_LIFE_DAYS, recency_weights,
+        )
+        _rd_hl    = rd_cfg.get("half_life_days", DEFAULT_HALF_LIFE_DAYS)
+        _rd_floor = rd_cfg.get("floor", DEFAULT_FLOOR)
+        _date_col = config["data"]["date_col"]
+        _rec_full = recency_weights(df, _date_col,
+                                    half_life_days=_rd_hl, floor=_rd_floor)
+        sample_weights_full = (
+            _rec_full if sample_weights_full is None
+            else np.asarray(sample_weights_full) * _rec_full
+        )
+        _anom_weight_fn = sample_weight_fn
+
+        def _rec_fold_weights(train_df: Any) -> Any:
+            w = recency_weights(train_df, _date_col,
+                                half_life_days=_rd_hl, floor=_rd_floor)
+            if _anom_weight_fn is not None:
+                w = np.asarray(_anom_weight_fn(train_df)) * w
+            return w
+
+        sample_weight_fn = _rec_fold_weights
+        logger.info("#319: recency decay ENABLED (half_life=%sd, floor=%s)",
+                    _rd_hl, _rd_floor)
+
     X = df[feature_cols]
     y = df[target_col]
 

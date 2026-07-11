@@ -29,9 +29,16 @@
 | `payday_off` | MIMO/tweedie | fold-clean | нет | скрывает days_to_payday + is_payday_window |
 | `statics_off` | MIMO/tweedie | нет | нет | |
 | `statics_leaky` | MIMO/tweedie | full-frame (до-AUD-6) | нет | |
+| `recency_hl180` | MIMO/tweedie | fold-clean | нет | recency-decay веса, half-life 180d (#319) |
+| `recency_hl90` | MIMO/tweedie | fold-clean | нет | то же, half-life 90d (dose-response) |
 
 Механика `exclude`: колонки остаются в фрейме, но прячутся от модели —
 так выключается фича, вшитая в build_features безусловно.
+
+Механика `recency_half_life`: включает sample-веса `0.5 ** (age/half_life)`
+(floor 0.05) через тот же `sample_weight_fn`-hook, что prod-anomaly-веса;
+якорь = cutoff трейн-фолда → fold-clean по построению. Пара 180/90 —
+dose-response: согласованное направление обеих доз = реальный сигнал.
 
 Вывод — JSON-строки (flush после каждого плеча — прогресс виден в логе
 по мере готовности): харнесс **с отпечатком данных** (content-sha12 +
