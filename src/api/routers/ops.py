@@ -344,6 +344,8 @@ _AUDIT_EVENT_TYPES = frozenset({
 def admin_audit_log(
     client_id: Optional[str] = None,
     event_type: Optional[str] = None,
+    event_subtype: Optional[str] = None,
+    actor: Optional[str] = None,
     days: int = 7,
     limit: int = 100,
     offset: int = 0,
@@ -353,10 +355,18 @@ def admin_audit_log(
     payloads are NOT returned — they may carry PII fragments; the row
     identity (who/what/when/ip/success) is the viewer's contract, deep
     payloads stay psql-only. Integrity check = the existing
-    /internal/audit/verify chain walk (on-demand from the page)."""
+    /internal/audit/verify chain walk (on-demand from the page).
+
+    ADM-v3-5 #390: + event_subtype / actor filters. Subtypes are free-form
+    strings (no closed catalog like _AUDIT_EVENT_TYPES) — validated by
+    shape, matched exactly; actor matches actor_email exactly (equality,
+    not ILIKE: no enumeration-by-substring)."""
     auth.require_role("admin")
     if event_type is not None and event_type not in _AUDIT_EVENT_TYPES:
         raise HTTPException(status_code=422, detail="unknown event_type")
+    for name, val in (("event_subtype", event_subtype), ("actor", actor)):
+        if val is not None and not (1 <= len(val) <= 120):
+            raise HTTPException(status_code=422, detail=f"bad {name}")
     if not (1 <= limit <= 500) or offset < 0 or not (1 <= days <= 365):
         raise HTTPException(status_code=422, detail="bad pagination/window")
     from src.audit.log import _connect
@@ -370,10 +380,13 @@ def admin_audit_log(
                 WHERE ts >= now() - make_interval(days => %s)
                   AND (%s::text IS NULL OR client_id = %s)
                   AND (%s::text IS NULL OR event_type = %s)
+                  AND (%s::text IS NULL OR event_subtype = %s)
+                  AND (%s::text IS NULL OR actor_email = %s)
                 ORDER BY id DESC
                 LIMIT %s OFFSET %s
                 """,
                 (days, client_id, client_id, event_type, event_type,
+                 event_subtype, event_subtype, actor, actor,
                  limit, offset),
             )
             rows = [
@@ -389,6 +402,56 @@ def admin_audit_log(
                             detail="audit temporarily unavailable") from e
     return {"events": rows, "count": len(rows),
             "event_types": sorted(_AUDIT_EVENT_TYPES)}
+
+
+# ADM-v3-5 #390: the R7-2 daily chain-verify cron stamps its verdict here
+# (ops_settings KV, ADM-12 precedent — a marker is mutable state, an audit
+# row would break the HMAC chain). Verdict older than this = the cron
+# itself is broken, which the page must surface as loudly as corruption.
+_CHAIN_VERDICT_KEY = "audit_chain_last_verify"
+_CHAIN_STALE_HOURS = 26  # daily cron + 2h grace
+
+
+@router.get("/admin/audit/chain-status")
+def admin_audit_chain_status(
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Last verdict of the R7-2 daily HMAC chain-verify cron (stamped by
+    the workflow into ops_settings). Honest `unknown` until the first
+    stamp; `stale: true` when the verdict is older than the cron cadence
+    (a silent cron is as alarming as a broken chain). Fail-closed 503 —
+    an integrity signal must never render as a healthy default."""
+    auth.require_role("admin")
+    from src.audit.log import _connect
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT value, updated_at, "
+                "EXTRACT(EPOCH FROM (now() - updated_at)) / 3600 "
+                "FROM ops_settings WHERE key = %s",
+                (_CHAIN_VERDICT_KEY,),
+            )
+            row = cur.fetchone()
+    except Exception as e:    # noqa: BLE001 — 503, not a fake 'unknown'
+        logger.warning("chain-status read failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="chain-status temporarily unavailable") from e
+    if row is None:
+        return {"stamped": False, "stale": None, "verdict": None,
+                "stale_after_hours": _CHAIN_STALE_HOURS}
+    import json as _json
+    try:
+        verdict = _json.loads(row[0])
+    except ValueError:
+        verdict = {"raw": row[0]}
+    return {
+        "stamped": True,
+        "stamped_at": row[1].isoformat(),
+        "age_hours": round(float(row[2]), 1),
+        "stale": float(row[2]) > _CHAIN_STALE_HOURS,
+        "stale_after_hours": _CHAIN_STALE_HOURS,
+        "verdict": verdict,
+    }
 
 
 # ── ADM-12 (#280): «Безопасность» — admin sessions + key hygiene ─────────────

@@ -68,13 +68,31 @@ jobs:
           from src.audit import verify_chain
           import json
           r = verify_chain(limit=10000)
-          print(json.dumps({
+          verdict = {
               \"ok\":           r.ok,
               \"rows_checked\": r.rows_checked,
               \"first_bad_id\": r.first_bad_id,
               \"reason\":       r.reason,
               \"detail\":       r.detail,
-          }))
+          }
+          # ADM-v3-5 #390: stamp the verdict (BOTH outcomes) into
+          # ops_settings so the admin console shows the cron result —
+          # an ops marker, NOT an audit row (would break the HMAC chain).
+          # Best-effort: a stamping hiccup must not mask the verify result.
+          try:
+              from src.audit.log import _connect
+              with _connect() as conn, conn.cursor() as cur:
+                  cur.execute(
+                      \"INSERT INTO ops_settings (key, value, updated_at) \"
+                      \"VALUES (%s, %s, now()) ON CONFLICT (key) DO UPDATE \"
+                      \"SET value = EXCLUDED.value, updated_at = now()\",
+                      (\"audit_chain_last_verify\", json.dumps(verdict)),
+                  )
+                  conn.commit()
+          except Exception as e:
+              import sys
+              print(f\"verdict stamp failed: {e}\", file=sys.stderr)
+          print(json.dumps(verdict))
           "'
           )
           echo "::group::Verify result"
