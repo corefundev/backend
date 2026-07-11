@@ -19,17 +19,26 @@
 
 ## Плечи
 
-| плечо | модель | статика | market |
-|---|---|---|---|
-| `base` / `mimo` | MIMO/tweedie | fold-clean | нет |
-| `ensemble` | Ensemble | fold-clean | нет |
-| `market_on` | MIMO/tweedie | fold-clean | да |
-| `statics_off` | MIMO/tweedie | нет | нет |
-| `statics_leaky` | MIMO/tweedie | full-frame (до-AUD-6) | нет |
+| плечо | модель | статика | market | прочее |
+|---|---|---|---|---|
+| `base` / `mimo` | MIMO/tweedie | fold-clean | нет | |
+| `ensemble` | Ensemble | fold-clean | нет | |
+| `market_on` | MIMO/tweedie | fold-clean | full (абсолютные тоталы — снятый default, #380) | |
+| `market_share_only` | MIMO/tweedie | fold-clean | только доля SKU (стационарная) | возврат-кандидат |
+| `market_momentum` | MIMO/tweedie | fold-clean | доля + momentum (рынок/неделя назад) | возврат-кандидат |
+| `payday_off` | MIMO/tweedie | fold-clean | нет | скрывает days_to_payday + is_payday_window |
+| `statics_off` | MIMO/tweedie | нет | нет | |
+| `statics_leaky` | MIMO/tweedie | full-frame (до-AUD-6) | нет | |
 
-Вывод — JSON-строки: харнесс, по строке на плечо (метрики + декомпозиция
-WMAPE **по velocity-band и по шагу горизонта**), summary с дельтами
-против первого плеча (`delta < 0` = плечо лучше reference).
+Механика `exclude`: колонки остаются в фрейме, но прячутся от модели —
+так выключается фича, вшитая в build_features безусловно.
+
+Вывод — JSON-строки (flush после каждого плеча — прогресс виден в логе
+по мере готовности): харнесс **с отпечатком данных** (content-sha12 +
+размерности — сверять с реестром датасетов в журнале замеров!), по строке
+на плечо (метрики + декомпозиция WMAPE **по velocity-band и по шагу
+горизонта**), summary с дельтами против первого плеча (`delta < 0` =
+плечо лучше reference).
 
 ## Запуск на prod-данных
 
@@ -52,7 +61,7 @@ docker run -d --name bench --rm --memory=1200m --cpu-shares=256 --network "$NET"
   -e BENCH_CLIENT_ID=test \
   -e BENCH_DATA_PATH="s3://<processed-zone>/<client>/<upload>/data.parquet" \
   "$IMG" sleep 7200
-# 3. Прогон (MIMO-плечо ≈ 3.5 мин; ensemble — кратно числу голов)
+# 3. Прогон (1c-live: MIMO-плечо ≈ 7 мин, ensemble ≈ 21 мин)
 docker exec bench python scripts/bench_wf_ab.py --arms base,ensemble > /tmp/bench.json
 # 4. Уборка
 docker rm -f bench

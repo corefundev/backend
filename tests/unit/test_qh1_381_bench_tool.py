@@ -37,7 +37,13 @@ def _df(n_days=60):
         rows.append({"sku": "A", "date": d, "sales": 1000.0 if i >= 51 else 1.0})
         rows.append({"sku": "B", "date": d, "sales": 10.0})
         rows.append({"sku": "C", "date": d, "sales": 100.0})
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # суррогаты фич из build_features, нужные плечам: per-SKU lag_1 (share
+    # строится из него) + payday-пара (плечо payday_off их прячет)
+    df["lag_1"] = df.groupby("sku")["sales"].shift(1)
+    df["days_to_payday"] = 3.0
+    df["is_payday_window"] = 0
+    return df
 
 
 class _StubMIMO:
@@ -65,11 +71,13 @@ def _run(arm, captured=None):
 # ── реестр плеч ──────────────────────────────────────────────────────────
 
 def test_registry_covers_the_decision_surface():
-    assert {"base", "mimo", "ensemble", "market_on",
-            "statics_off", "statics_leaky"} <= set(bench.ARMS)
+    assert {"base", "mimo", "ensemble", "market_on", "market_share_only",
+            "market_momentum", "statics_off", "statics_leaky",
+            "payday_off"} <= set(bench.ARMS)
     for spec in bench.ARMS.values():
         assert spec["statics"] in ("fold_clean", "leaky", "off")
         assert spec["model"] in ("mimo", "ensemble")
+        assert (spec.get("market") or False) in (False, "full", "share", "momentum")
 
 
 def test_default_arms_are_fold_clean():
@@ -155,3 +163,53 @@ def test_unknown_arm_is_rejected():
 def test_missing_data_path_is_rejected():
     with pytest.raises(SystemExit):
         bench.main(["--arms", "base"])
+
+
+# ── v2: market-варианты, payday-исключение, отпечаток данных ────────────
+
+def _fit_cols(arm):
+    _, captured = _run(arm)
+    X, _ = captured["fits"][0]
+    return set(X.columns)
+
+
+def test_market_full_exposes_absolutes():
+    cols = _fit_cols("market_on")
+    assert {"market_total_lag_1", "market_total_lag_7"} <= cols
+
+
+def test_market_share_only_hides_absolutes_keeps_share():
+    cols = _fit_cols("market_share_only")
+    assert "sku_share_lag_1" in cols
+    assert not ({"market_total_lag_1", "market_total_lag_7"} & cols), (
+        "абсолютные (нестационарные, #380) уровни просочились в share-плечо"
+    )
+
+
+def test_market_momentum_is_stationary_no_false_zero():
+    out, captured = _run("market_momentum")
+    X, _ = captured["fits"][0]
+    assert "market_momentum_7" in X.columns
+    assert not ({"market_total_lag_1", "market_total_lag_7"} & set(X.columns))
+    # warmup: NaN остаётся NaN — никакого ложного 0.0 (урок sku_share)
+    assert X["market_momentum_7"].isna().any()
+    assert not (X["market_momentum_7"] == 0.0).any()
+
+
+def test_payday_off_hides_payday_pair():
+    base_cols = _fit_cols("base")
+    off_cols = _fit_cols("payday_off")
+    assert {"days_to_payday", "is_payday_window"} <= base_cols
+    assert not ({"days_to_payday", "is_payday_window"} & off_cols)
+    # прячем ровно пару — остальное совпадает
+    assert base_cols - off_cols == {"days_to_payday", "is_payday_window"}
+
+
+def test_fingerprint_is_content_addressed():
+    df1, df2 = _df(), _df()
+    fp1 = bench._fingerprint(df1, "sku", "date", "sales")
+    fp2 = bench._fingerprint(df2, "sku", "date", "sales")
+    assert fp1 == fp2 and len(fp1["content_sha12"]) == 12
+    assert fp1["rows"] == len(df1) and fp1["skus"] == 3
+    df2.loc[0, "sales"] += 1
+    assert bench._fingerprint(df2, "sku", "date", "sales")["content_sha12"] != fp1["content_sha12"]
