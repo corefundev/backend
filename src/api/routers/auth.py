@@ -1353,3 +1353,111 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
     # Drop the nonce cookie now that we're done with it.
     response.delete_cookie(COOKIE_NAME, path="/auth/oauth")
     return response
+
+
+# ═══ LEG-3 #431 (инкремент 2): повторное согласие ════════════════════════
+# Версия принятия клиента сравнивается с reconsent_required_since текущих
+# документов. Клиент БЕЗ записи согласия = «версия 0»: модалка приходит
+# только когда владелец явно пометил версию чекбоксом — предсказуемый
+# rollout, никто не блокируется до первого осознанного флага.
+# Status — fail-open (сбой БД не запирает кабинет, логируется);
+# сам re-consent — must_persist (согласие без следа ничтожно, #432).
+
+_RECONSENT_DOC_IDS = ("terms", "privacy", "consent", "pdn")
+
+
+def _latest_accepted_versions(client_id: str) -> dict:
+    """Последние принятые версии документов клиента из append-only
+    истории согласий. Пусто = записей нет (клиент старше учёта)."""
+    from src.audit.log import _connect
+    conn = _connect()
+    if conn is None:
+        raise RuntimeError("audit unavailable")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT metadata
+                FROM audit_log
+                WHERE event_type = 'signup' AND event_subtype = 'consent_accepted'
+                  AND (client_id = %s OR target_id = %s)
+                ORDER BY ts DESC LIMIT 1
+                """,
+                (client_id, client_id),
+            )
+            row = cur.fetchone()
+            meta = (row[0] or {}) if row else {}
+            return dict(meta.get("doc_versions") or {})
+    finally:
+        import contextlib
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+@router.get("/auth/consent-status")
+async def auth_consent_status(
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Нужно ли клиенту повторное согласие. Fail-open: при сбое БД
+    отвечаем required=false (кабинет не запирается), с громким логом."""
+    from src.storage.legal import get_legal_store
+    try:
+        accepted = _latest_accepted_versions(auth.client_id)
+        store = get_legal_store()
+        outdated = []
+        for doc_id in _RECONSENT_DOC_IDS:
+            doc = store.get(doc_id)
+            if doc is None or doc.reconsent_required_since is None:
+                continue
+            if int(accepted.get(doc_id, 0)) < int(doc.reconsent_required_since):
+                outdated.append({
+                    "doc_id": doc_id,
+                    "title": doc.title,
+                    "current_version": doc.version,
+                    "accepted_version": int(accepted.get(doc_id, 0)),
+                    "change_summary": doc.change_summary,
+                })
+        return {"required": bool(outdated), "docs": outdated}
+    except Exception as e:    # noqa: BLE001 — fail-open, залогировано
+        logger.error("consent-status check failed (fail-open): %s", e)
+        return {"required": False, "docs": []}
+
+
+class ReconsentRequest(BaseModel):
+    accepted: bool = False
+
+
+@router.post("/auth/re-consent")
+async def auth_re_consent(
+    req: ReconsentRequest,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Повторное согласие: НОВОЕ append-only событие с ТЕКУЩИМИ версиями
+    документов (история не переписывается). must_persist — сбой аудита
+    честно отклоняет запрос (#432)."""
+    if not req.accepted:
+        raise HTTPException(status_code=422, detail="Требуется явное согласие")
+    from src.storage.legal import get_legal_store
+    store = get_legal_store()
+    versions = {}
+    for doc_id in _RECONSENT_DOC_IDS:
+        doc = store.get(doc_id)
+        if doc is not None:
+            versions[doc_id] = doc.version
+    try:
+        record_event(
+            event_type=EVT_SIGNUP, event_subtype="consent_accepted",
+            client_id=auth.client_id, ip=client_ip(http_req),
+            user_agent=http_req.headers.get("user-agent"),
+            target_type="signup", target_id=auth.client_id,
+            metadata={"doc_versions": versions, "reconsent": True},
+            must_persist=True,
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.error("re-consent audit failed, refusing: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Не удалось зафиксировать согласие — попробуйте ещё раз",
+        ) from e
+    return {"ok": True, "doc_versions": versions}
