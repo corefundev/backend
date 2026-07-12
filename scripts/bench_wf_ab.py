@@ -102,6 +102,16 @@ ARMS: dict[str, dict] = {
                       "band_calibration": {"clip": (0.8, 1.25)}},
     "band_cal_wide": {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "band_calibration": {"clip": (0.65, 1.5)}},
+    # QW3-1b #316: category target-encoding ЛОКАЛЬНЫМ join-ом (карта
+    # sku->категория из BENCH_CATEGORY_PATH; adapt_1c --categories-out).
+    # Fold-clean: TE = smoothed mean спроса категории, посчитанный на
+    # ТРЕЙН-строках фолда (m = байесовское сглаживание к глобальному
+    # среднему). Пара m — dose-response. Ingestion-path строим только
+    # при вердикте >= ~1% (условие заморозки #316).
+    "cat_te":        {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "category_te": {"smoothing": 20}},
+    "cat_te_m100":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "category_te": {"smoothing": 100}},
     # QH-2 #407: HPO-пробы против mid-band недопрогноза (bias 0.86).
     # tweedie p→1 сильнее штрафует недооценку больших значений; 1.7 —
     # контрольная доза в другую сторону (default 1.5 = base).
@@ -262,7 +272,8 @@ class _BandCalibratedMIMO:
 
 def run_arm(arm_name: str, base_df, config: dict,
             model_factory: Optional[Callable[[], Any]] = None,
-            raw_df=None) -> dict:
+            raw_df=None,
+            category_map: Optional[dict] = None) -> dict:
     """Одно плечо на подготовленном фрейме (build_features уже сделан,
     static/market НЕ смержены — этим управляет спецификация плеча).
     Плечи с features_overrides пересобирают признаки из raw_df."""
@@ -314,6 +325,35 @@ def run_arm(arm_name: str, base_df, config: dict,
         if spec["statics"] == "fold_clean" else None
     )
 
+    # QW3-1b #316: fold-clean category TE поверх статик-hook'а. Статистика
+    # категории — ТОЛЬКО из трейн-строк фолда; неизвестная категория /
+    # SKU вне карты → глобальное среднее фолда (как unknown-SKU fallback
+    # в статиках).
+    extra_features: list = []
+    _cte = spec.get("category_te")
+    if _cte:
+        if not category_map:
+            raise ValueError(
+                f"arm {arm_name!r} needs a category map "
+                f"(BENCH_CATEGORY_PATH / category_map)")
+        _m = float(_cte.get("smoothing", 20))
+        _base_fn = fold_feature_fn
+
+        def fold_feature_fn(tr, te, _base=_base_fn, _sm=_m):    # noqa: F811
+            if _base is not None:
+                tr, te = _base(tr, te)
+            tr, te = tr.copy(), te.copy()
+            cat_tr = tr[sku_col].astype(str).map(category_map)
+            g_mean = float(tr[target_col].mean())
+            stats = tr.groupby(cat_tr)[target_col].agg(["sum", "count"])
+            te_map = (stats["sum"] + _sm * g_mean) / (stats["count"] + _sm)
+            tr["category_te"] = cat_tr.map(te_map).fillna(g_mean)
+            te["category_te"] = (te[sku_col].astype(str).map(category_map)
+                                 .map(te_map).fillna(g_mean))
+            return tr, te
+
+        extra_features.append("category_te")
+
     # B1 #319: recency-плечо весит строки фолда от ЕГО cutoff'а (train_df
     # max date) — тот же hook, что anomaly-веса в prod (#183); в остальных
     # плечах sample_weight_fn=None (харнесс: веса выключены).
@@ -349,7 +389,7 @@ def run_arm(arm_name: str, base_df, config: dict,
     excluded = set(spec.get("exclude", ())) | set(market_excluded)
     feature_cols = [c for c in get_feature_columns(df, config)
                     if (spec["statics"] != "off" or c not in STATIC_COLS)
-                    and c not in excluded]
+                    and c not in excluded] + extra_features
 
     t0 = time.time()
     res = walk_forward_validate(df, model_factory, feature_cols, config,
@@ -385,6 +425,8 @@ def main(argv: Optional[list] = None) -> int:
                         help=f"через запятую из: {', '.join(sorted(ARMS))}")
     parser.add_argument("--client-id", default=os.environ.get("BENCH_CLIENT_ID"))
     parser.add_argument("--data-path", default=os.environ.get("BENCH_DATA_PATH"))
+    parser.add_argument("--category-path",
+                        default=os.environ.get("BENCH_CATEGORY_PATH"))
     args = parser.parse_args(argv)
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
@@ -410,6 +452,11 @@ def main(argv: Optional[list] = None) -> int:
     config.setdefault("hpo", {})["enabled"] = False
 
     raw_df = load_data(args.data_path, config)
+    cat_map = None
+    if args.category_path:
+        import pandas as _pd
+        _c = _pd.read_csv(args.category_path, dtype=str)
+        cat_map = dict(zip(_c.iloc[:, 0], _c.iloc[:, 1]))
     df = build_features(raw_df, config)
     print(json.dumps({"harness": {
         "data": _fingerprint(df, config["data"]["sku_col"],
@@ -423,7 +470,7 @@ def main(argv: Optional[list] = None) -> int:
 
     results = []
     for arm in arms:
-        out = run_arm(arm, df, config, raw_df=raw_df)
+        out = run_arm(arm, df, config, raw_df=raw_df, category_map=cat_map)
         results.append(out)
         print(json.dumps(out, ensure_ascii=False), flush=True)
 
