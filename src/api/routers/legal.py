@@ -9,6 +9,8 @@ codebase beyond `get_current_client` (already in jwt_auth) and
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -25,6 +27,10 @@ class LegalDocUpdate(BaseModel):
     # covers a privacy policy / terms document.
     title:   str = Field(..., min_length=1, max_length=512)
     content: str = Field(..., min_length=1, max_length=1_000_000)
+    # LEG-3 #431: пометка «эта версия требует повторного согласия» +
+    # краткое резюме изменений (для будущей re-consent-модалки)
+    requires_reconsent: bool = False
+    change_summary: Optional[str] = Field(None, max_length=1000)
 
 
 @router.get("/legal/{doc_id}")
@@ -42,6 +48,8 @@ async def get_legal_doc(doc_id: str):
         "content":    doc.content,
         "version":    doc.version,
         "updated_at": doc.updated_at.isoformat(),
+        "reconsent_required_since": doc.reconsent_required_since,
+        "change_summary": doc.change_summary,
     }
 
 
@@ -65,10 +73,14 @@ async def update_legal_doc(
         title=title,
         content=content,
         updated_by=auth.client_id,
+        requires_reconsent=body.requires_reconsent,
+        change_summary=(body.change_summary or "").strip() or None,
     )
     return {
         "doc_id":     doc.doc_id,
         "title":      doc.title,
         "version":    doc.version,
         "updated_at": doc.updated_at.isoformat(),
+        "reconsent_required_since": doc.reconsent_required_since,
+        "change_summary": doc.change_summary,
     }
