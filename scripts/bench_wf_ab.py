@@ -102,6 +102,15 @@ ARMS: dict[str, dict] = {
                       "band_calibration": {"clip": (0.8, 1.25)}},
     "band_cal_wide": {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "band_calibration": {"clip": (0.65, 1.5)}},
+    # #384: band-роутинг MIMO↔ensemble. Гипотеза из живого замера:
+    # ансамбль выигрывает MASE/per-SKU (малые позиции), MIMO — headline
+    # WMAPE (fast = 83% массы). Роутим по fold-clean velocity_band
+    # (статик-фича фолда): band из route → ensemble, иначе калиброванный
+    # MIMO (как prod). Две дозы маршрута — dose-response.
+    "route_slow_ens":    {"model": "mimo", "statics": "fold_clean", "market": False,
+                          "band_route": (0,)},
+    "route_slowmid_ens": {"model": "mimo", "statics": "fold_clean", "market": False,
+                          "band_route": (0, 1)},
     # QW3-1b #316: category target-encoding ЛОКАЛЬНЫМ join-ом (карта
     # sku->категория из BENCH_CATEGORY_PATH; adapt_1c --categories-out).
     # Fold-clean: TE = smoothed mean спроса категории, посчитанный на
@@ -180,6 +189,45 @@ def decompose(combined, split_points, band_by_sku: dict, sku_col: str) -> dict:
         for step, g in df.groupby("horizon_step")
     }
     return {"by_band": by_band, "by_horizon_step": by_step}
+
+
+class _BandRoutedModel:
+    """#384: фиксированный band-роутинг между калиброванным MIMO (как
+    prod) и ансамблем. Band берётся из fold-clean статик-фичи
+    velocity_band ПРЯМО ИЗ СТРОКИ прогноза (никакого пересчёта на тесте
+    → утечки нет по построению). Строка без band'а → MIMO (fallback).
+    Фабрики инжектируются — тесты подставляют стабы (libomp-free)."""
+
+    is_mimo = True    # walk_forward: direct multi-step режим
+
+    def __init__(self, mimo_factory, ens_factory, route_bands,
+                 band_col: str = "velocity_band"):
+        self._mimo = mimo_factory()
+        self._ens = ens_factory()
+        self._route = {int(b) for b in route_bands}
+        self._band_col = band_col
+
+    def fit(self, X, y, groups=None, sample_weight=None, target_censor=None):
+        self._mimo.fit(X, y, groups=groups, sample_weight=sample_weight,
+                       target_censor=target_censor)
+        self._ens.fit(X, y, groups=groups, sample_weight=sample_weight,
+                      target_censor=target_censor)
+        return self
+
+    def compute_blend_weights(self, **kw):
+        # walk_forward зовёт hook по hasattr — проксируем ансамблю
+        if hasattr(self._ens, "compute_blend_weights"):
+            self._ens.compute_blend_weights(**kw)
+
+    def predict(self, X):
+        import numpy as np
+        cols = getattr(X, "columns", [])
+        band = None
+        if self._band_col in cols and len(X) > 0:
+            v = X[self._band_col].iloc[0]
+            band = int(v) if v == v else None    # NaN-safe
+        target = self._ens if band in self._route else self._mimo
+        return np.asarray(target.predict(X), dtype=float)
 
 
 class _BandCalibratedMIMO:
@@ -378,7 +426,20 @@ def run_arm(arm_name: str, base_df, config: dict,
             # override мог менять и их при необходимости
             arm_config["model"].update(spec.get("model_overrides", {}))
             _bc = spec.get("band_calibration")
-            if _bc:
+            _br = spec.get("band_route")
+            if _br:
+                # #384: MIMO (prod-конфиг, с калибровкой из config.yaml) +
+                # ансамбль (дети сами отключают калибровку — R14)
+                import copy as _copy
+                from src.models.ensemble import EnsembleForecaster
+                from src.models.mimo import MIMOForecaster
+                ens_config = _copy.deepcopy(arm_config)
+                ens_config["model"]["objective"] = "ensemble"
+                model_factory = lambda: _BandRoutedModel(            # noqa: E731
+                    lambda: MIMOForecaster(arm_config),
+                    lambda: EnsembleForecaster(ens_config),
+                    _br)
+            elif _bc:
                 # QH-5 #422: MIMO с fold-clean band-калибровкой
                 model_factory = lambda: _BandCalibratedMIMO(         # noqa: E731
                     arm_config, tuple(_bc["clip"]))
