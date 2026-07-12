@@ -26,7 +26,8 @@ import argparse
 import pandas as pd
 
 
-def adapt(in_path: str, out_path: str, min_obs: int = 60) -> None:
+def adapt(in_path: str, out_path: str, min_obs: int = 60,
+          categories_out: str | None = None) -> None:
     df = pd.read_csv(in_path)
     df["date"] = pd.to_datetime(df["date"])
     out = pd.DataFrame({
@@ -47,6 +48,16 @@ def adapt(in_path: str, out_path: str, min_obs: int = 60) -> None:
     out.to_csv(out_path, index=False)
     print(f"wrote {out_path}: {len(out)} rows, {out['sku'].nunique()} SKUs, "
           f"{out['date'].min().date()}..{out['date'].max().date()}")
+    if categories_out:
+        # #316: карта sku -> категория (колонка `item` = имя категории
+        # региональной серии) для bench-плеча cat_te — локальный join,
+        # ingestion-path не строим до вердикта.
+        cats = (df.assign(sku=df["item_id"].astype(str))
+                  .groupby("sku")["item"].first())
+        cats = cats[cats.index.isin(out["sku"].unique())]
+        cats.rename("category").to_csv(categories_out)
+        print(f"wrote {categories_out}: {len(cats)} SKUs, "
+              f"{cats.nunique()} categories")
 
 
 def main() -> None:
@@ -54,8 +65,9 @@ def main() -> None:
     p.add_argument("--in", dest="in_path", required=True)
     p.add_argument("--out", dest="out_path", required=True)
     p.add_argument("--min-obs", type=int, default=60)
+    p.add_argument("--categories-out", default=None)
     args = p.parse_args()
-    adapt(args.in_path, args.out_path, args.min_obs)
+    adapt(args.in_path, args.out_path, args.min_obs, args.categories_out)
 
 
 if __name__ == "__main__":
