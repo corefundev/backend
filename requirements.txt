@@ -169,3 +169,7 @@ python-json-logger==2.0.7
 # way to bump them.
 wheel==0.46.2
 jaraco.context==6.1.0
+
+# CMS foundation (NEWS-1 #341 / HC #332): Markdown render + strict sanitizer
+markdown-it-py==3.0.0
+nh3==0.2.18
