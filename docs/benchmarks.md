@@ -34,12 +34,17 @@
 | `tweedie_p11` / `p13` / `p17` | MIMO/tweedie | fold-clean | нет | tweedie_variance_power 1.1/1.3/1.7 (#407; default 1.5 = base) |
 | `leaves128` | MIMO/tweedie | fold-clean | нет | num_leaves 128 (#407) |
 | `lr003_est800` | MIMO/tweedie | fold-clean | нет | lr 0.03 + 800 деревьев (#407) |
+| `mem28` / `mem56` / `mem112` | MIMO/tweedie | fold-clean | нет | длинная память: lags/rolling до 28/56/112 дн, пересбор признаков из raw (#414) |
 
 Механика `exclude`: колонки остаются в фрейме, но прячутся от модели —
 так выключается фича, вшитая в build_features безусловно.
 
 Механика `model_overrides`: dict домердживается в model-конфиг плеча
 после type/objective — фиксированные HPO-пробы вместо Optuna (#407).
+
+Механика `features_overrides`: плечо пересобирает признаки из СЫРОГО
+фрейма со своим features-конфигом (#414) — warmup-дроп удлиняется честно,
+тестовые окна те же, дельты корректны.
 
 Механика `recency_half_life`: включает sample-веса `0.5 ** (age/half_life)`
 (floor 0.05) через тот же `sample_weight_fn`-hook, что prod-anomaly-веса;

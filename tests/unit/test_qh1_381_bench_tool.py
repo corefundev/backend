@@ -248,3 +248,43 @@ def test_model_overrides_reach_arm_config_not_base(monkeypatch):
     assert captured["tweedie_variance_power"] == 1.1
     assert captured["objective"] == "tweedie" and captured["type"] == "mimo"
     assert cfg["model"] == before, "исходный config не должен мутировать"
+
+
+# ── QH-3 #414: features_overrides (длинная память) ───────────────────────
+
+def test_memory_arms_registry_doses():
+    for name, max_lag in (("mem28", 28), ("mem56", 56), ("mem112", 112)):
+        fo = bench.ARMS[name]["features_overrides"]
+        assert max(fo["lags"]) == max_lag and max(fo["rolling_windows"]) == max_lag
+    assert "features_overrides" not in bench.ARMS["base"]
+
+
+def test_features_override_rebuilds_from_raw_only_for_that_arm():
+    """Плечо с override получает lag_28; base на общем фрейме (lag_28 нет);
+    исходный config не мутирует; без raw_df плечо честно падает."""
+    captured = {"fits": []}
+    cfg = _config()
+    cfg["features"] = {
+        "lags": [1, 7], "rolling_windows": [7], "calendar": False,
+        "price": False, "promo": False, "stock": False,
+        "weather": {"enabled": False}, "holidays": {"enabled": False},
+        "external_regressors_ru": {"enabled": False},
+        "market": {"enabled": False},
+    }
+    before_lags = list(cfg["features"]["lags"])
+    raw = _df().drop(columns=["lag_1", "days_to_payday", "is_payday_window"])
+
+    from src.features.engineering import build_features
+    base_frame = build_features(raw.copy(), cfg)
+    assert "lag_28" not in base_frame.columns
+
+    out, _ = (bench.run_arm("mem28", base_frame, cfg,
+                            model_factory=lambda: _StubMIMO(captured, 5),
+                            raw_df=raw), captured)
+    assert cfg["features"]["lags"] == before_lags   # не мутировал
+    fit_X, _ = captured["fits"][0]
+    assert any(c == "lag_28" for c in fit_X.columns), "признак длинной памяти не собрался"
+
+    with pytest.raises(ValueError, match="raw_df"):
+        bench.run_arm("mem28", base_frame, cfg,
+                      model_factory=lambda: _StubMIMO(captured, 5))
