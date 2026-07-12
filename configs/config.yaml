@@ -62,6 +62,14 @@ features:
 model:
   type: mimo                     # "lgbm" (single-step) or "mimo" (direct multi-step)
   horizon: 14
+  # QH-5 #422: per-band калибровка точечного прогноза (fold-clean probe на
+  # внутреннем хвосте трейна). SHIP 2026-07-12: MASE −2.64% / slow-band −5%
+  # на 1c-live при нейтральном WMAPE_g. Применяется ТОЛЬКО в MIMO; ensemble
+  # форсирует off у членов до отдельного замера (R14). Квантили/conformal
+  # НЕ калибруются (coverage откалиброван на сырых прогнозах).
+  band_calibration:
+    enabled: true
+    clip: [0.8, 1.25]
   # Loss objective. Plan-tier defaults override this (Free→mse, Start/Business→tweedie).
   # Accepted values: mse | mae | huber | tweedie | poisson
   # Tweedie is recommended for retail demand: handles intermittent zeros
