@@ -110,7 +110,58 @@ class LegalDocumentStore:
                  requires_reconsent, change_summary, requires_reconsent),
             )
             row = cur.fetchone()
+            # LEG-3 #431: снапшот НОВОГО состояния в той же транзакции —
+            # текст каждой версии восстановим (доказуемость акцепта)
+            cur.execute(
+                """
+                INSERT INTO legal_document_revisions
+                    (doc_id, version, title, content,
+                     requires_reconsent, change_summary, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (doc_id, version) DO NOTHING
+                """,
+                (doc_id, row["version"], title, content,
+                 requires_reconsent, change_summary, updated_by),
+            )
             return LegalDocument(**row)
+
+    def list_revisions(self, doc_id: str, limit: int = 100) -> list[dict]:
+        with self._conn() as conn, conn.cursor(
+                cursor_factory=self._extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT version, title, requires_reconsent, change_summary,
+                       created_at, created_by
+                FROM legal_document_revisions
+                WHERE doc_id = %s ORDER BY version DESC LIMIT %s
+                """,
+                (doc_id, limit),
+            )
+            out = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["created_at"] = d["created_at"].isoformat()
+                out.append(d)
+            return out
+
+    def get_revision(self, doc_id: str, version: int) -> Optional[dict]:
+        with self._conn() as conn, conn.cursor(
+                cursor_factory=self._extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT version, title, content, requires_reconsent,
+                       change_summary, created_at, created_by
+                FROM legal_document_revisions
+                WHERE doc_id = %s AND version = %s
+                """,
+                (doc_id, version),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            d = dict(r)
+            d["created_at"] = d["created_at"].isoformat()
+            return d
 
 
 _store: Optional[LegalDocumentStore] = None
