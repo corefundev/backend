@@ -282,6 +282,9 @@ class SignupRequest(BaseModel):
     email: str = Field(..., max_length=254)
     desired_client_id: str = Field(..., max_length=64)
     captcha_token: Optional[str] = Field(None, description="Cloudflare Turnstile token")
+    # LEG-2 #428: явное принятие условий — сервер требует и фиксирует факт
+    # согласия в аудите (с версиями документов на момент согласия)
+    accepted_terms: bool = False
 
 
 class LoginEmailRequest(BaseModel):
@@ -437,6 +440,32 @@ async def auth_signup(req: SignupRequest, http_req: Request):
             status_code=429, detail=str(e),
             headers={"Retry-After": str(e.retry_after_sec)},
         )
+
+    # 2b. LEG-2 #428: без явного согласия регистрация не принимается.
+    # Факт согласия пишем в аудит СРАЗУ (не на /verify): юридически
+    # значим момент проставления галочки; версии документов — на этот
+    # момент. Лог best-effort не бывает — согласие без следа бессмысленно,
+    # поэтому сбой аудита роняет запрос (fail-closed).
+    if not req.accepted_terms:
+        raise HTTPException(
+            status_code=422,
+            detail="Необходимо принять пользовательское соглашение и политику конфиденциальности",
+        )
+    from src.storage.legal import get_legal_store
+    _store = get_legal_store()
+    _doc_versions = {}
+    for _d in ("terms", "privacy", "consent"):
+        _doc = _store.get(_d)
+        if _doc is not None:
+            _doc_versions[_d] = _doc.version
+    record_event(
+        event_type=EVT_SIGNUP, event_subtype="consent_accepted",
+        client_id=None, ip=ip,
+        user_agent=http_req.headers.get("user-agent"),
+        target_type="signup", target_id=req.desired_client_id[:64],
+        metadata={"email": req.email[:254],
+                  "doc_versions": _doc_versions},
+    )
 
     # 3+4. Email shape + disposable
     email     = _validate_email_or_400(req.email)
