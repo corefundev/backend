@@ -160,7 +160,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         predict_requests_per_hour=5000,  # R2-10
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
-        default_objective="ensemble",  # 3-model blend, per-SKU best-of-three
+        default_objective="hybrid",    # #384: band-роутинг ансамбль↔MIMO (доминирует чистый ансамбль)
         price_label="",
     ),
     Plan.BUSINESS: PlanSpec(
@@ -177,7 +177,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=90,
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
-        default_objective="ensemble",  # 3-model blend; HPO tunes each child
+        default_objective="hybrid",    # #384: band-роутинг; HPO тюнит MIMO-прокси
         predict_requests_per_hour=UNLIMITED,  # R2-10: enterprise has its own SRE
         config_allowed_keys=None,  # all keys
         price_label="",

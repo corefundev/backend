@@ -76,7 +76,7 @@ def test_registry_covers_the_decision_surface():
             "payday_off"} <= set(bench.ARMS)
     for spec in bench.ARMS.values():
         assert spec["statics"] in ("fold_clean", "leaky", "off")
-        assert spec["model"] in ("mimo", "ensemble")
+        assert spec["model"] in ("mimo", "ensemble", "hybrid")
         assert (spec.get("market") or False) in (False, "full", "share", "momentum")
 
 
