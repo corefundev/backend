@@ -173,3 +173,58 @@ def test_preview_uses_shared_sanitizer(events):
             nw.NewsPreviewRequest(body_md="x" * (BODY_MD_MAX_BYTES + 1)),
             auth=_auth())
     assert ei.value.status_code == 422
+
+
+# ── NEWS-5 (#345): fan-out important-постов ──────────────────────────────
+
+def _fanout_spy(monkeypatch):
+    calls: list = []
+
+    class _Reg:
+        def create_broadcast(self, client_ids, **kw):
+            calls.append({"client_ids": client_ids, **kw})
+            return 2
+    monkeypatch.setattr("src.storage.notifications.get_notifications_registry",
+                        lambda: _Reg())
+    return calls
+
+
+def test_publish_important_fans_out_once_with_dedup(events, monkeypatch):
+    calls = _fanout_spy(monkeypatch)
+    post = _create(importance="important", summary="Кратко")
+    nw.admin_news_publish(post["id"], _http(), auth=_auth())
+    assert len(calls) == 1
+    c = calls[0]
+    assert c["client_ids"] is None                      # всем клиентам
+    assert c["dedup_key"] == f"news:{post['id']}"       # идемпотентность
+    assert c["type"] == "news_important" and c["body"] == "Кратко"
+    # повторный publish идемпотентен и не звонит второй раз
+    nw.admin_news_publish(post["id"], _http(), auth=_auth())
+    assert len(calls) == 1
+
+
+def test_publish_normal_is_silent(events, monkeypatch):
+    calls = _fanout_spy(monkeypatch)
+    post = _create()
+    nw.admin_news_publish(post["id"], _http(), auth=_auth())
+    assert calls == []
+
+
+def test_scheduled_important_does_not_ring_yet(events, monkeypatch):
+    """Отложенный пост ещё не live — звонок вёл бы на 404 (документировано
+    в #345: звонок в момент наступления publish_at = отдельное решение)."""
+    calls = _fanout_spy(monkeypatch)
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    post = _create(importance="important", publish_at=future)
+    nw.admin_news_publish(post["id"], _http(), auth=_auth())
+    assert calls == []
+
+
+def test_fanout_failure_never_fails_publish(events, monkeypatch):
+    def boom():
+        raise RuntimeError("notifications down")
+    monkeypatch.setattr("src.storage.notifications.get_notifications_registry",
+                        boom)
+    post = _create(importance="important")
+    out = nw.admin_news_publish(post["id"], _http(), auth=_auth())
+    assert out["status"] == "published"   # публикация состоялась (NC-1)

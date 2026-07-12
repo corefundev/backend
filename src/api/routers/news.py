@@ -98,6 +98,29 @@ def _audit(subtype: str, post_id: str, http_req: Request,
     )
 
 
+def _fanout_important(post: NewsPost) -> None:
+    """NEWS-5 (#345): important-пост ОДИН раз пингует колокольчик всех
+    клиентов (create_broadcast(None) + dedup news:{id} — повторная
+    публикация no-op per-client). Best-effort по NC-1: сбой уведомлений
+    не блокирует публикацию, но логируется громко.
+
+    Отложенный (scheduled) important-пост колокольчик НЕ дергает: пост
+    ещё не live, и ссылка вела бы на 404. Крона нет by design — если
+    отложенным important-постам понадобится звонок в момент наступления
+    publish_at, это отдельное решение (зафиксировано в #345)."""
+    try:
+        from src.storage.notifications import get_notifications_registry
+        n = get_notifications_registry().create_broadcast(
+            None, type="news_important", title=post.title,
+            body=post.summary or "Новая важная новость — откройте раздел «Новости».",
+            severity="info", dedup_key=f"news:{post.id}",
+        )
+        logger.info("NEWS-5: important fan-out post=%s -> %d client rows",
+                    post.id, n)
+    except Exception as e:    # noqa: BLE001 — best-effort, залогировано
+        logger.warning("NEWS-5 fan-out failed (publish unaffected): %s", e)
+
+
 def _to_admin_dict(p: NewsPost) -> dict:
     return {
         "id": p.id, "slug": p.slug, "title": p.title, "summary": p.summary,
@@ -275,8 +298,9 @@ def admin_news_publish(
            importance=updated.importance,
            scheduled=bool(updated.publish_at
                           and updated.publish_at > updated.published_at))
-    # NEWS-5 (#345): fan-out important-постов подключается здесь —
-    # best-effort, публикацию не блокирует.
+    # NEWS-5 (#345): important + уже live → однократный звонок клиентам
+    if updated.importance == "important" and updated.is_live():
+        _fanout_important(updated)
     return _to_admin_dict(updated)
 
 
