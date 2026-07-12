@@ -69,3 +69,30 @@ def test_consent_logged_with_doc_versions_before_email_checks(harness):
     assert e["metadata"]["email"] == "not-an-email"
     # версии только существующих документов; consent в сторе нет — нет и ключа
     assert e["metadata"]["doc_versions"] == {"terms": 3, "privacy": 7}
+
+
+def test_consent_audit_failure_refuses_signup(harness, monkeypatch):
+    """must_persist-контракт: сбой аудита = отказ регистрации (503),
+    а не тихая потеря согласия."""
+    client, captured = harness
+
+    def boom(**kw):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(auth_mod, "record_event", boom)
+    r = client.post("/auth/signup", json={
+        "email": "user@example.com", "desired_client_id": "acme",
+        "accepted_terms": True})
+    assert r.status_code == 503
+    assert "согласие" in r.json()["detail"].lower()
+
+
+def test_record_event_must_persist_raises_on_no_connection(monkeypatch):
+    import src.audit.log as alog
+    monkeypatch.setattr(alog, "_connect", lambda: None)
+    # default: молча возвращается (passive observer)
+    alog.record_event(event_type="signup", event_subtype="x")
+    # must_persist: поднимает
+    import pytest as _pt
+    with _pt.raises(RuntimeError):
+        alog.record_event(event_type="signup", event_subtype="x",
+                          must_persist=True)

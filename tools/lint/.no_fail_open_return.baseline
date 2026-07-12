@@ -59,10 +59,10 @@ src/storage/upload_pipeline.py:468  AUD-9 #361 — mid-flight-cancel unpublish g
 src/storage/sandbox.py:173  pre-R9 baseline (was :240); R11-#66 moved the site into spawn_and_wait — container remove is best-effort cleanup AFTER logs are read, failure logged [+10 DP-4 flags]
 src/storage/sandbox.py:357  pre-R9 baseline (was :228); R11-#66 refactor shifted — post-run persist error folds into stderr + ok=False, surfaced not swallowed [+31 DP-4 _stage_and_spawn extract]
 src/audit/log.py:262  R9-T4-004 — audit replica fallback; close as part of T6-006 audit HMAC fail-closed (+33 lines after R10 phantom-metric Counter insertion 2026-05-27) (was :257, #156 shift)
-src/audit/log.py:451  pre-R9 baseline; triage in R10 — list_for_client read fallback (+61 lines after R10 phantom-metric Counter) (was :446, #156 shift)
-src/audit/log.py:491  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter) (was :486, #156 shift)
-src/audit/log.py:571  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines R10 phantom-metric; +10 R13-3 no-gap, 2026-06-23) (was :566, #156 shift)
-src/api/routers/auth.py:517  (+18 AUD-10 #362 api-key audit events) pre-R9 baseline; triage in R10 — signup OAuth race retry (was :362, +63 after ARCH-2 #206 shared-guard helpers added above) (was :425, +38 ADM-7 H3 tripwire helper) (+5 ADM-10 token gate) (+2 AUD-5 #357 issuance gates)
+src/audit/log.py:463  pre-R9 baseline; triage in R10 — list_for_client read fallback (+61 lines after R10 phantom-metric Counter) (was :446, #156 shift) (+12 must_persist docstring/raise)
+src/audit/log.py:503  pre-R9 baseline; triage in R10 — recent_failed_logins read fallback (+61 lines after R10 phantom-metric Counter) (was :486, #156 shift) (+12 must_persist)
+src/audit/log.py:583  pre-R9 baseline; triage in R10 — verify_chain read fallback (+61 lines R10 phantom-metric; +10 R13-3 no-gap, 2026-06-23) (was :566, #156 shift) (+12 must_persist)
+src/api/routers/auth.py:528  (+18 AUD-10 #362 api-key audit events) pre-R9 baseline; triage in R10 — signup OAuth race retry (was :362, +63 after ARCH-2 #206 shared-guard helpers added above) (was :425, +38 ADM-7 H3 tripwire helper) (+5 ADM-10 token gate) (+2 AUD-5 #357 issuance gates) (+11 LEG-2 must_persist fail-closed block)
 src/api/routers/config.py:284  pre-R9 baseline; triage in R10 — config-reset write fallback (was :201, +70 lines #95; +13 R13-2 horizon-clamp wiring, 2026-06-22)
 src/api/routers/ops.py:151  pre-R9 baseline — /readyz dependency check is fail-CLOSED (sets ok=False → 503); broad except is correct here. (was :145, +5 CONTRACT-2 #208 probe-contract docstring) (+1 Optional import)
 src/api/routers/plans.py:54  pre-R9 baseline; triage in R10 — sku-count lookup fallback

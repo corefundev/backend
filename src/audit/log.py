@@ -277,10 +277,17 @@ def record_event(
     user_agent:    Optional[str] = None,
     success:       bool          = True,
     metadata:      Optional[dict] = None,
+    must_persist:  bool          = False,
 ) -> None:
     """
     Persist one audit event. Never raises — call from request handlers
     without a try/except wrapper.
+
+    must_persist=True (LEG-2 #430): инвертирует контракт для событий,
+    потеря которых юридически недопустима (факт согласия) — сбой
+    подключения/INSERT ПОДНИМАЕТСЯ, вызывающий отвечает отказом запроса
+    (согласие без следа ничтожно). Default False сохраняет прежнее
+    passive-observer поведение для всех существующих вызовов.
 
     Why never-raise: audit must be a passive observer. If Postgres is
     momentarily unavailable, we'd rather log to stdout (captured by
@@ -324,6 +331,9 @@ def record_event(
 
     conn = _connect()
     if conn is None:
+        if must_persist:
+            raise RuntimeError(
+                "audit unavailable — must_persist event cannot be recorded")
         return
     try:
         key = _audit_hmac_key()
@@ -404,6 +414,8 @@ def record_event(
             "audit: INSERT failed for event_type=%s — event lost from DB "
             "but captured in logs", event_type,
         )
+        if must_persist:
+            raise
     finally:
         try:
             conn.close()
