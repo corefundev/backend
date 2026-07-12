@@ -55,6 +55,8 @@ def test_overview_audits_the_view_h5(monkeypatch):
     assert out["recent_logins"] == [] and out["training_runs"] == []
     # H5: the view itself was audited even so
     assert events and events[0]["event_subtype"] == "client_view"
+    # LEG-2 #428: consent — enrichment; без БД он честно None, но ключ есть
+    assert "consent" in out and out["consent"] is None
 
 
 def test_activity_excludes_admin_sessions():

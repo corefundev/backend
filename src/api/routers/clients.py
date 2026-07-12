@@ -671,6 +671,31 @@ def admin_client_overview(
     except Exception as e:    # noqa: BLE001 — logins are enrichment, not the card
         logger.warning("overview logins skipped: %s", e)
 
+    # LEG-2 #428: факт согласия при регистрации (для блока 152-ФЗ).
+    # Клиенты, созданные до введения учёта, записи не имеют — FE честно
+    # показывает «записи нет». Enrichment: сбой не роняет карточку.
+    consent = None
+    try:
+        from src.audit.log import _connect as _c2
+        with _c2() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, metadata
+                FROM audit_log
+                WHERE event_type = 'signup' AND event_subtype = 'consent_accepted'
+                  AND target_id = %s
+                ORDER BY ts ASC LIMIT 1
+                """,
+                (client_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                _meta = row[1] or {}
+                consent = {"at": row[0].isoformat(),
+                           "doc_versions": _meta.get("doc_versions", {})}
+    except Exception as e:    # noqa: BLE001 — consent is enrichment, not the card
+        logger.warning("overview consent skipped: %s", e)
+
     runs: list = []
     try:
         from src.storage.training_runs import get_training_runs_registry, to_dict
@@ -692,5 +717,5 @@ def admin_client_overview(
     # deleted_at + этого окна; status=purged = «данные стёрты».
     client = {**_client_to_safe_dict(record),
               "pii_retention_days": _pii_retention_days()}
-    return {"client": client,
+    return {"client": client, "consent": consent,
             "recent_logins": logins, "training_runs": runs}
