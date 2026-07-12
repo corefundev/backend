@@ -668,6 +668,12 @@ def run_training_pipeline(
         final_model.fit(X, y, sample_weight=sample_weights_full,
                         target_censor=target_censor)
 
+    # #418: persist NaN-lag semantics with the model — serve keys its
+    # fill-vs-keep-NaN parity decision on this attribute (see
+    # inference_utils.direct_forecast), so legacy models stay untouched.
+    final_model.nan_tolerant_lags = bool(
+        config["features"].get("per_sku_lags", False))
+
     # (#231 KILL 2026-07-07: cold-start cluster fit удалён — результат
     # никогда не сохранялся/не грузился (CPU-waste), serve-дыры нет
     # (own-history фичи + ensemble default_weights + SeasonalNaive), окно

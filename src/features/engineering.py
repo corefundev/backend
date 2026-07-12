@@ -56,23 +56,37 @@ def build_features(
         eff_rw   = sorted(set(pin_rolling or []))
     else:
         # Train: auto-drop lags / rolling windows that exceed available
-        # history. Each SKU needs the lag's worth of past rows or the lag
-        # column is all-NaN for that SKU and the dropna() at the end wipes
-        # the SKU out. The shortest-history SKU is the binding constraint.
-        # Keep a 30-day safety margin so the model still has SOMETHING to
-        # fit on after warm-up rows are removed.
-        min_history = int(df.groupby(sku_col).size().min())
+        # history.
+        #
+        # Legacy semantics (per_sku_lags=False): the SHORTEST-history SKU is
+        # the binding constraint — a lag it can't support is dropped for the
+        # whole dataset, and warm-up dropna() trims by the max surviving lag.
+        # Systemic flaw (#414→#418): one late-added SKU strips long memory
+        # from the entire catalogue (1c-live: 10 of 346 SKUs capped lags at
+        # <32d while the median history is 640d).
+        #
+        # Per-SKU semantics (#418, features.per_sku_lags=True): lags are
+        # capped only by the LONGEST history (a lag no SKU can support is an
+        # all-NaN column — useless); short SKUs keep NaN in long-lag columns
+        # (LightGBM handles NaN natively) and warm-up dropna() trims by a
+        # short REQUIRED lag instead of the max one, so short SKUs are not
+        # wiped out. Serve is NaN-transparent already (pin_lags +
+        # drop_warmup=False, R12-#100).
+        per_sku = bool(cfg_f.get("per_sku_lags", False))
+        sizes = df.groupby(sku_col).size()
+        bound_history = int(sizes.max() if per_sku else sizes.min())
         safety = 30
         raw_lags = list(cfg_f["lags"])
-        eff_lags = [l for l in raw_lags if l < min_history - safety]
+        eff_lags = [lag for lag in raw_lags if lag < bound_history - safety]
         skipped_lags = sorted(set(raw_lags) - set(eff_lags))
         if skipped_lags:
+            bound_kind = "longest" if per_sku else "shortest"
             logger.info(
-                f"Skipping lags {skipped_lags} — shortest-SKU history {min_history}d "
-                f"can't support them safely"
+                f"Skipping lags {skipped_lags} — {bound_kind}-SKU history "
+                f"{bound_history}d can't support them safely"
             )
         raw_rw = list(cfg_f["rolling_windows"])
-        eff_rw = [w for w in raw_rw if w < min_history - safety]
+        eff_rw = [w for w in raw_rw if w < bound_history - safety]
         skipped_rw = sorted(set(raw_rw) - set(eff_rw))
         if skipped_rw:
             logger.info(f"Skipping rolling windows {skipped_rw} — history too short")
@@ -124,13 +138,21 @@ def build_features(
             logger.warning(f"RU regressor features failed: {e}")
 
     # ── Drop warm-up rows (TRAIN only) ────────────────────────
-    # The dropna trims rows whose max-lag is still NaN — correct at train
-    # (NaN target features would poison the fit) but WRONG at serve, where
-    # there's no target and dropping a short SKU's rows would leave it with
-    # nothing to forecast from. R12-#100: serve passes drop_warmup=False.
+    # Legacy: trim rows whose MAX-lag is still NaN (all surviving lags are
+    # then fully populated). Per-SKU (#418): trim only by a short REQUIRED
+    # lag — the smallest effective lag ≥7 (else the max one) — so each SKU
+    # loses just its first ~7 rows and short SKUs stay in the train set;
+    # their long-lag columns keep NaN, which LightGBM branches on natively.
+    # Either way WRONG at serve, where there's no target and dropping a
+    # short SKU's rows would leave it with nothing to forecast from.
+    # R12-#100: serve passes drop_warmup=False.
     if drop_warmup:
-        max_lag = max(eff_lags)
-        df = df.dropna(subset=[f"lag_{max_lag}"]).reset_index(drop=True)
+        if cfg_f.get("per_sku_lags", False):
+            required = [l for l in eff_lags if l >= 7]
+            warmup_lag = min(required) if required else max(eff_lags)
+        else:
+            warmup_lag = max(eff_lags)
+        df = df.dropna(subset=[f"lag_{warmup_lag}"]).reset_index(drop=True)
 
     logger.info(f"Features built: {df.shape[1]} columns, {len(df)} rows")
     return df

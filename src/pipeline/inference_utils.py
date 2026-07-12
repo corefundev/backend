@@ -395,11 +395,23 @@ def direct_forecast(
     # Last real feature vector. Mirror recursive_forecast's guard: missing
     # feature cols default present, NaN → 0 so predict never crashes / returns
     # NaN (audit M4). Keep sku_col so EnsembleForecaster can pick blend weights.
+    #
+    # #418 parity: models trained with per_sku_lags saw NaN in long
+    # lag/rolling columns and learned LightGBM's missing-branch for them —
+    # zero-filling those at serve would push short-history SKUs into the
+    # "zero sales" branch instead. Keyed on the model attribute so legacy
+    # models (never saw NaN at train) keep the old blanket fill.
     x_last = h.iloc[[-1]].copy()
     for c in feature_cols:
         if c not in x_last.columns:
             x_last[c] = 0.0
-    x_last[feature_cols] = x_last[feature_cols].fillna(0.0)
+    if getattr(model, "nan_tolerant_lags", False):
+        keep_nan = [c for c in feature_cols
+                    if c.startswith(("lag_", "rolling_"))]
+        fill = [c for c in feature_cols if c not in keep_nan]
+        x_last[fill] = x_last[fill].fillna(0.0)
+    else:
+        x_last[feature_cols] = x_last[feature_cols].fillna(0.0)
 
     preds = np.clip(np.asarray(model.predict_next(x_last), dtype=float).ravel(), 0, None)
 
