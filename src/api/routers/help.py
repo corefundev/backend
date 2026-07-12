@@ -25,7 +25,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from src.audit import EVT_ADMIN_ACTION, record_event
-from src.auth.jwt_auth import AuthContext, get_current_client
+from src.auth.jwt_auth import (
+    AuthContext, derive_session_hash, get_current_client,
+)
 from src.auth.signup_rate_limit import RateLimited, check_public_read, client_ip
 from src.cms import render_markdown
 from src.storage.backend import get_storage
@@ -565,3 +567,144 @@ def cms_media(
     ext = name.rsplit(".", 1)[-1]
     return Response(content=data, media_type=_MEDIA_CTYPE[ext],
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+# ═══ HC-5 (#336): поиск + аналитика запросов ═════════════════════════════
+# Публичный поиск: PG FTS (russian) ranked, published-only; сниппет несёт
+# сентинелы [[…]] вместо HTML (фронт сам рендерит <mark> — XSS исключён).
+# Каждый запрос логируется в help_search_log (query+results_count, без
+# PII) best-effort — сбой лога НЕ ломает поиск. Админ-инсайты: топ
+# запросов + zero-result (сигнал дыр в контенте). Typo-tolerance
+# (Meilisearch) — осознанно отложенный апгрейд, не строим сейчас.
+
+_SEARCH_LIMIT_PER_HOUR = 300
+_SEARCH_Q_MIN, _SEARCH_Q_MAX = 2, 200
+_SEARCH_RESULTS_LIMIT = 20
+
+
+def _log_search(query: str, results_count: int) -> None:
+    """Лог запроса — best-effort, поиск не падает из-за лога
+    (функция ничего не возвращает)."""
+    try:
+        get_help_registry().log_search(query, results_count)
+    except Exception as e:    # noqa: BLE001 — залогировано, не проглочено
+        logger.warning("help search log failed: %s", e)
+
+
+@router.get("/help/search")
+def help_search(
+    http_req: Request,
+    q: str,
+    locale: str = DEFAULT_LOCALE,
+):
+    """Поиск по опубликованным статьям. Результат: тизер + сниппет с
+    [[…]]-подсветкой. Нулевой результат тоже логируется — это сырьё
+    для zero-result-аналитики."""
+    try:
+        check_public_read(client_ip(http_req), prefix="help:search",
+                          limit=_SEARCH_LIMIT_PER_HOUR)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)}) from e
+    q = q.strip()
+    if not (_SEARCH_Q_MIN <= len(q) <= _SEARCH_Q_MAX):
+        raise HTTPException(
+            422, detail=f"q: от {_SEARCH_Q_MIN} до {_SEARCH_Q_MAX} символов")
+    pairs = get_help_registry().search_published(
+        q, locale=locale, limit=_SEARCH_RESULTS_LIMIT)
+    _log_search(q, len(pairs))
+    return {
+        "query": q,
+        "count": len(pairs),
+        "results": [{**_article_teaser(a), "snippet": s} for a, s in pairs],
+    }
+
+
+@router.get("/admin/help/search/insights")
+def help_search_insights(
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Аналитика поиска: топ запросов + запросы без результатов
+    (content-gap). Только чтение — аудит не пишем."""
+    auth.require_role("admin")
+    reg = get_help_registry()
+    return {"top": reg.top_queries(50),
+            "zero_results": reg.zero_result_queries(50)}
+
+
+# ═══ HC-6 (#337): фидбек «была ли статья полезна» + аналитика ════════════
+# Публичный голос: PII-free — voter_hash = HMAC(JWT-секрет, ip|ua|art_id),
+# сырой IP/UA НЕ сохраняются и не восстановимы без секрета; один голос
+# на сессию (UNIQUE в БД, повтор → recorded=false, не ошибка). Комментарий
+# опционален, PII не запрашиваем. Админ-дашборд: просмотры, доля
+# «полезно», низкорейтинговые статьи, комментарии (без voter_hash).
+
+_FEEDBACK_LIMIT_PER_HOUR = 60
+_FEEDBACK_COMMENT_MAX = 1000
+
+
+class HelpFeedbackRequest(BaseModel):
+    helpful: bool
+    comment: Optional[str] = Field(None, max_length=_FEEDBACK_COMMENT_MAX)
+
+
+@router.post("/help/articles/{slug}/feedback")
+def help_article_feedback(
+    slug: str,
+    req: HelpFeedbackRequest,
+    http_req: Request,
+    locale: str = DEFAULT_LOCALE,
+):
+    """Голос по опубликованной статье (не-published = единый 404 —
+    черновики не раскрываются и через фидбек)."""
+    try:
+        check_public_read(client_ip(http_req), prefix="help:feedback",
+                          limit=_FEEDBACK_LIMIT_PER_HOUR)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)}) from e
+    art = get_help_registry().get_article_by_slug(slug, locale=locale)
+    if art is None or art.status != PUBLISHED:
+        raise HTTPException(404, detail="article not found")
+    vh = derive_session_hash(
+        client_ip(http_req), http_req.headers.get("user-agent", ""), art.id)
+    comment = (req.comment or "").strip() or None
+    recorded = get_help_registry().add_feedback(
+        art.id, req.helpful, comment, vh)
+    return {"recorded": recorded}
+
+
+@router.get("/admin/help/analytics")
+def help_analytics(
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Дашборд контента: на статью — просмотры, голоса, доля «полезно»
+    (None при нуле голосов — честнее, чем фиктивные 0%); последние
+    комментарии, обогащённые slug/title. Только чтение — без аудита."""
+    auth.require_role("admin")
+    reg = get_help_registry()
+    arts = reg.list_articles_admin(limit=500)
+    summary = reg.feedback_summary()
+    by_id = {a.id: a for a in arts}
+    rows = []
+    for a in arts:
+        fb = summary.get(a.id, {"helpful": 0, "total": 0})
+        ratio = (round(fb["helpful"] / fb["total"], 2)
+                 if fb["total"] else None)
+        rows.append({
+            "id": a.id, "slug": a.slug, "title": a.title,
+            "status": a.status, "view_count": a.view_count,
+            "helpful": fb["helpful"], "total": fb["total"],
+            "helpful_ratio": ratio,
+        })
+    comments = []
+    for c in reg.list_feedback_comments(50):
+        a = by_id.get(c["article_id"])
+        comments.append({**c,
+                         "slug": a.slug if a else None,
+                         "title": a.title if a else None})
+    return {"articles": rows, "comments": comments}
