@@ -96,3 +96,100 @@ def test_record_event_must_persist_raises_on_no_connection(monkeypatch):
     with _pt.raises(RuntimeError):
         alog.record_event(event_type="signup", event_subtype="x",
                           must_persist=True)
+
+
+# ═══ LEG-3 #431 (инкремент 2): enforcement ═══════════════════════════════
+
+class _DocStub:
+    def __init__(self, docs):
+        self._d = docs
+
+    def get(self, doc_id):
+        return self._d.get(doc_id)
+
+
+def _doc(version, since=None, title="T", summary=None):
+    return SimpleNamespace(version=version, reconsent_required_since=since,
+                           title=title, change_summary=summary)
+
+
+def _auth_client(client_id="acme"):
+    return SimpleNamespace(client_id=client_id, roles=["forecast"],
+                           auth_method="jwt", jti="j" * 32,
+                           require_role=lambda r: None)
+
+
+@pytest.fixture()
+def enforce(monkeypatch):
+    import src.storage.legal as legal_mod
+    docs = {"terms": _doc(5, since=4, summary="новые цели"),
+            "privacy": _doc(2, since=None)}
+    monkeypatch.setattr(legal_mod, "get_legal_store", lambda: _DocStub(docs))
+    app = FastAPI()
+    app.include_router(auth_mod.router)
+    client = TestClient(app)
+    app.dependency_overrides[auth_mod.get_current_client] = _auth_client
+    return client, docs
+
+
+def test_consent_status_requires_when_accepted_below_since(enforce, monkeypatch):
+    client, _ = enforce
+    monkeypatch.setattr(auth_mod, "_latest_accepted_versions",
+                        lambda cid: {"terms": 3, "privacy": 2})
+    r = client.get("/auth/consent-status")
+    body = r.json()
+    assert body["required"] is True
+    assert body["docs"][0]["doc_id"] == "terms"
+    assert body["docs"][0]["accepted_version"] == 3
+    assert body["docs"][0]["change_summary"] == "новые цели"
+
+
+def test_consent_status_ok_when_accepted_at_or_above_since(enforce, monkeypatch):
+    client, _ = enforce
+    monkeypatch.setattr(auth_mod, "_latest_accepted_versions",
+                        lambda cid: {"terms": 4})
+    r = client.get("/auth/consent-status")
+    assert r.json() == {"required": False, "docs": []}
+
+
+def test_consent_status_legacy_client_prompted_only_when_flagged(enforce, monkeypatch):
+    client, docs = enforce
+    monkeypatch.setattr(auth_mod, "_latest_accepted_versions", lambda cid: {})
+    # флаг стоит (terms since=4) → legacy-клиент (версия 0) получает запрос
+    assert client.get("/auth/consent-status").json()["required"] is True
+    # снимаем флаг → никого не трогаем
+    docs["terms"] = _doc(5, since=None)
+    assert client.get("/auth/consent-status").json()["required"] is False
+
+
+def test_consent_status_fail_open_on_db_error(enforce, monkeypatch):
+    client, _ = enforce
+
+    def boom(cid):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(auth_mod, "_latest_accepted_versions", boom)
+    assert client.get("/auth/consent-status").json() == {"required": False, "docs": []}
+
+
+def test_re_consent_records_current_versions_append_only(enforce, monkeypatch):
+    client, _ = enforce
+    captured = []
+    monkeypatch.setattr(auth_mod, "record_event",
+                        lambda **kw: captured.append(kw))
+    r = client.post("/auth/re-consent", json={"accepted": True})
+    assert r.status_code == 200
+    assert r.json()["doc_versions"] == {"terms": 5, "privacy": 2}
+    assert captured[0]["metadata"]["reconsent"] is True
+    assert captured[0]["must_persist"] is True
+    # без явного accepted — 422
+    assert client.post("/auth/re-consent", json={}).status_code == 422
+
+
+def test_re_consent_fail_closed_on_audit_failure(enforce, monkeypatch):
+    client, _ = enforce
+
+    def boom(**kw):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(auth_mod, "record_event", boom)
+    r = client.post("/auth/re-consent", json={"accepted": True})
+    assert r.status_code == 503
