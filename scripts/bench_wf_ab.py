@@ -94,6 +94,14 @@ ARMS: dict[str, dict] = {
     "psl_default":   {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "features_overrides": {
                           "per_sku_lags": True}},
+    # QH-5 #422: пост-hoc мультипликативная калибровка по velocity-band
+    # (mid недо- 0.86 / slow пере- 1.18). Fold-clean: факторы оцениваются
+    # на ВНУТРЕННЕМ хвосте трейн-фолда (последние H строк каждого SKU),
+    # тест-фолд их не видит. Пара клипов — dose-response.
+    "band_cal":      {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "band_calibration": {"clip": (0.8, 1.25)}},
+    "band_cal_wide": {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "band_calibration": {"clip": (0.65, 1.5)}},
     # QH-2 #407: HPO-пробы против mid-band недопрогноза (bias 0.86).
     # tweedie p→1 сильнее штрафует недооценку больших значений; 1.7 —
     # контрольная доза в другую сторону (default 1.5 = base).
@@ -162,6 +170,94 @@ def decompose(combined, split_points, band_by_sku: dict, sku_col: str) -> dict:
         for step, g in df.groupby("horizon_step")
     }
     return {"by_band": by_band, "by_horizon_step": by_step}
+
+
+class _BandCalibratedMIMO:
+    """QH-5 #422: MIMO + пост-hoc мультипликативная калибровка по
+    velocity-band. Fold-clean по построению:
+      1) внутренний фит на «голове» трейна (без последних H строк каждого
+         SKU); band'ы — тершили среднего спроса ПО ГОЛОВЕ (та же логика,
+         что velocity_band в static_features);
+      2) факторы = clip(Σactual/Σpred) по band'у на внутреннем хвосте
+         (участвуют SKU с головой ≥ 2H строк);
+      3) финальный фит — на всём трейне; predict() умножает вектор
+         прогноза на фактор band'а SKU.
+    Тест-фолд не участвует в оценке факторов нигде."""
+
+    is_mimo = True    # walk_forward: direct multi-step режим
+
+    def __init__(self, config: dict, clip: tuple):
+        from src.models.mimo import MIMOForecaster
+        self._mk = lambda: MIMOForecaster(config)   # noqa: E731
+        self._inner = self._mk()
+        self._clip = clip
+        self._h = int(config["model"]["horizon"])
+        self._sku_col = config["data"]["sku_col"]
+        self.factors: dict = {}
+        self._band_by_sku: dict = {}
+
+    def fit(self, X, y, groups=None, sample_weight=None, target_censor=None):
+        import numpy as np
+        import pandas as pd
+        g = pd.Series(groups).reset_index(drop=True)
+        Xr = X.reset_index(drop=True)
+        yr = pd.Series(y).reset_index(drop=True)
+        sw = pd.Series(sample_weight).reset_index(drop=True) if sample_weight is not None else None
+        tc = pd.Series(target_censor).reset_index(drop=True) if target_censor is not None else None
+
+        fwd = g.groupby(g).cumcount()
+        cnt = g.map(g.value_counts())
+        tail = (cnt - fwd) <= self._h
+        head = ~tail
+
+        probe = self._mk()
+        probe.fit(Xr[head], yr[head], groups=g[head],
+                  sample_weight=None if sw is None else sw[head].to_numpy(),
+                  target_censor=None if tc is None else tc[head])
+
+        mean_by_sku = yr[head].groupby(g[head]).mean()
+        t1, t2 = np.quantile(mean_by_sku.to_numpy(), [1 / 3, 2 / 3])
+        self._band_by_sku = {s: int(np.digitize(v, [t1, t2]))
+                             for s, v in mean_by_sku.items()}
+
+        head_counts = g[head].value_counts()
+        eligible = set(head_counts[head_counts >= 2 * self._h].index)
+        sums_p = {0: 0.0, 1: 0.0, 2: 0.0}
+        sums_a = {0: 0.0, 1: 0.0, 2: 0.0}
+        head_idx_by_sku = {s: i for s, i in g[head].groupby(g[head]).groups.items()}
+        tail_idx_by_sku = {s: i for s, i in g[tail].groupby(g[tail]).groups.items()}
+        for sku in eligible:
+            try:
+                raw = probe.predict(Xr.loc[[head_idx_by_sku[sku][-1]]])
+            except Exception:    # noqa: BLE001 — SKU пропускается, стенд не падает
+                continue
+            preds = np.clip(np.asarray(raw, dtype=float)[0], 0, None)
+            actual = yr.loc[tail_idx_by_sku.get(sku, [])].to_numpy()[: len(preds)]
+            k = min(len(preds), len(actual))
+            if k == 0:
+                continue
+            b = self._band_by_sku.get(sku, 1)
+            sums_p[b] += float(preds[:k].sum())
+            sums_a[b] += float(actual[:k].sum())
+        lo, hi = self._clip
+        self.factors = {b: float(np.clip(sums_a[b] / sums_p[b], lo, hi))
+                        for b in sums_p if sums_p[b] > 0}
+
+        self._inner = self._mk()
+        self._inner.fit(Xr, yr, groups=g,
+                        sample_weight=None if sw is None else sw.to_numpy(),
+                        target_censor=tc)
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        raw = np.asarray(self._inner.predict(X), dtype=float)
+        cols = getattr(X, "columns", [])
+        if self._sku_col in cols and len(X) > 0:
+            sku = X[self._sku_col].iloc[0]
+            f = self.factors.get(self._band_by_sku.get(sku, -1), 1.0)
+            return raw * f
+        return raw
 
 
 def run_arm(arm_name: str, base_df, config: dict,
@@ -241,8 +337,14 @@ def run_arm(arm_name: str, base_df, config: dict,
             # #407: фиксированные HPO-пробы — ПОСЛЕ type/objective, чтобы
             # override мог менять и их при необходимости
             arm_config["model"].update(spec.get("model_overrides", {}))
-            from src.models.mimo import MIMOForecaster
-            model_factory = lambda: MIMOForecaster(arm_config)      # noqa: E731
+            _bc = spec.get("band_calibration")
+            if _bc:
+                # QH-5 #422: MIMO с fold-clean band-калибровкой
+                model_factory = lambda: _BandCalibratedMIMO(         # noqa: E731
+                    arm_config, tuple(_bc["clip"]))
+            else:
+                from src.models.mimo import MIMOForecaster
+                model_factory = lambda: MIMOForecaster(arm_config)   # noqa: E731
 
     excluded = set(spec.get("exclude", ())) | set(market_excluded)
     feature_cols = [c for c in get_feature_columns(df, config)
