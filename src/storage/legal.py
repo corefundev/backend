@@ -20,6 +20,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# LEG-3 #431: документы, участвующие в контуре повторного согласия
+RECONSENT_DOC_IDS = ("terms", "privacy", "consent", "pdn")
+
 
 @dataclass
 class LegalDocument:
