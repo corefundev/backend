@@ -458,14 +458,25 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         _doc = _store.get(_d)
         if _doc is not None:
             _doc_versions[_d] = _doc.version
-    record_event(
-        event_type=EVT_SIGNUP, event_subtype="consent_accepted",
-        client_id=None, ip=ip,
-        user_agent=http_req.headers.get("user-agent"),
-        target_type="signup", target_id=req.desired_client_id[:64],
-        metadata={"email": req.email[:254],
-                  "doc_versions": _doc_versions},
-    )
+    try:
+        record_event(
+            event_type=EVT_SIGNUP, event_subtype="consent_accepted",
+            client_id=None, ip=ip,
+            user_agent=http_req.headers.get("user-agent"),
+            target_type="signup", target_id=req.desired_client_id[:64],
+            metadata={"email": req.email[:254],
+                      "doc_versions": _doc_versions},
+            must_persist=True,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # согласие без следа ничтожно — честный отказ вместо тихой потери
+        logger.error("consent audit failed, refusing signup: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Не удалось зафиксировать согласие — попробуйте ещё раз",
+        ) from e
 
     # 3+4. Email shape + disposable
     email     = _validate_email_or_400(req.email)
