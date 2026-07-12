@@ -255,6 +255,21 @@ def _hour_bucket_check(
         )
 
 
+def check_public_read(ip: Optional[str], *, prefix: str, limit: int,
+                      redis=_USE_DEFAULT) -> None:
+    """NEWS-3 #343: лимит публичных read-endpoint'ов (лента новостей и
+    будущий Help Center) — per-/24 subnet, hour-bucket. Fail-open при
+    недоступном Redis (публичное ЧТЕНИЕ не должно падать из-за кеша) —
+    та же семантика, что у остальных лимитов этого модуля."""
+    if not ip:
+        return
+    _hour_bucket_check(
+        prefix, subnet(ip), limit,
+        "Слишком много запросов. Попробуйте через {ttl_min} мин.",
+        redis=redis,
+    )
+
+
 def check_signup_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/signup (R2-4).
 
