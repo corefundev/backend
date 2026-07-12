@@ -218,7 +218,8 @@ def walk_forward_validate(
 
     combined   = pd.concat(all_results, ignore_index=True)
     per_sku    = compute_metrics_per_sku(combined, sku_col)
-    aggregated = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col)
+    aggregated = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col,
+                                   date_col=date_col)
     logger.info(
         f"Walk-forward ({mode_label}) | "
         f"WMAPE_global={aggregated.get('wmape_global', float('nan')):.3f} · "
