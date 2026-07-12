@@ -278,9 +278,9 @@ def test_features_override_rebuilds_from_raw_only_for_that_arm():
     base_frame = build_features(raw.copy(), cfg)
     assert "lag_28" not in base_frame.columns
 
-    out, _ = (bench.run_arm("mem28", base_frame, cfg,
-                            model_factory=lambda: _StubMIMO(captured, 5),
-                            raw_df=raw), captured)
+    bench.run_arm("mem28", base_frame, cfg,
+                  model_factory=lambda: _StubMIMO(captured, 5),
+                  raw_df=raw)
     assert cfg["features"]["lags"] == before_lags   # не мутировал
     fit_X, _ = captured["fits"][0]
     assert any(c == "lag_28" for c in fit_X.columns), "признак длинной памяти не собрался"
