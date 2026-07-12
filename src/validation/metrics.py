@@ -4,8 +4,12 @@ MASE, WMAPE, SMAPE — per-SKU and aggregated.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # Weekly seasonality — matches the deployed SeasonalNaiveModel(seasonality=7)
@@ -141,6 +145,7 @@ def aggregate_metrics(
     pred_col:   str = "predicted",
     train_col:  str = "train_values",
     sku_col:    str = "sku",
+    date_col:   str = "date",
 ) -> dict:
     """
     Aggregate per-SKU metrics into headline numbers.
@@ -189,6 +194,13 @@ def aggregate_metrics(
         y_pred = raw_df[pred_col].to_numpy(dtype=float)
         agg["wmape_global"] = float(wmape(y_true, y_pred))
         agg["smape_global"] = float(smape(y_true, y_pred))
+
+        # QH-6 #433: точность на агрегатах — из ТЕХ ЖЕ прогнозов, без
+        # пере-прогнозов (helper — None-returning, сбой не трогает
+        # headline-метрики: агрегаты — enrichment).
+        if date_col in raw_df.columns:
+            _fill_aggregate_accuracy(agg, raw_df, actual_col, pred_col,
+                                     sku_col, date_col)
         # MASE needs a baseline naive error per SKU; pool one global
         # naive_mae from each SKU's training values (deduped per SKU
         # so we don't repeat the same series for every test row).
@@ -235,3 +247,32 @@ def aggregate_metrics(
             agg["mase_global"] = float("nan")
             agg["mase_seasonal_global"] = float("nan")
     return agg
+
+
+def _fill_aggregate_accuracy(agg: dict, raw_df: pd.DataFrame,
+                             actual_col: str, pred_col: str,
+                             sku_col: str, date_col: str) -> None:
+    """QH-6 #433: WMAPE на агрегатах — SKU×неделя, SKU×месяц, портфель
+    в день. Суммы прогноза/факта: дневной шум взаимно гасится — число
+    сопоставимо с тем, как индустрия рапортует «90–98%». Fold в
+    группировке (если есть) — суммы не переливаются между фолдами
+    (дисциплина MASE L-A7). Best-effort: сбой логируется, headline-
+    метрики не затронуты (функция ничего не возвращает)."""
+    try:
+        d = raw_df.copy()
+        dt = pd.to_datetime(d[date_col])
+        d["_w"] = dt.dt.to_period("W").astype(str)
+        d["_m"] = dt.dt.to_period("M").astype(str)
+        fold = ["fold"] if "fold" in d.columns else []
+
+        def agg_wmape(keys: list) -> float:
+            g = d.groupby(keys, observed=True).agg(
+                a=(actual_col, "sum"), p=(pred_col, "sum"))
+            return float(wmape(g["a"].to_numpy(dtype=float),
+                               g["p"].to_numpy(dtype=float)))
+
+        agg["wmape_weekly_sku"] = agg_wmape(fold + [sku_col, "_w"])
+        agg["wmape_monthly_sku"] = agg_wmape(fold + [sku_col, "_m"])
+        agg["wmape_daily_portfolio"] = agg_wmape(fold + [date_col])
+    except Exception:    # noqa: BLE001 — залогировано, не проглочено
+        logger.warning("aggregate accuracy metrics failed", exc_info=True)
