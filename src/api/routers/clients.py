@@ -677,22 +677,43 @@ def admin_client_overview(
     consent = None
     try:
         from src.audit.log import _connect as _c2
+        from src.storage.legal import RECONSENT_DOC_IDS, get_legal_store
         with _c2() as conn, conn.cursor() as cur:
+            # первое согласие (дата) + ПОСЛЕДНЕЕ (актуальные версии —
+            # re-consent их двигает, LEG-3 #431)
             cur.execute(
                 """
-                SELECT ts, metadata
+                SELECT min(ts), max(ts),
+                       (SELECT metadata FROM audit_log
+                         WHERE event_type = 'signup'
+                           AND event_subtype = 'consent_accepted'
+                           AND (target_id = %s OR client_id = %s)
+                         ORDER BY ts DESC LIMIT 1)
                 FROM audit_log
                 WHERE event_type = 'signup' AND event_subtype = 'consent_accepted'
-                  AND target_id = %s
-                ORDER BY ts ASC LIMIT 1
+                  AND (target_id = %s OR client_id = %s)
                 """,
-                (client_id,),
+                (client_id, client_id, client_id, client_id),
             )
             row = cur.fetchone()
-            if row:
-                _meta = row[1] or {}
+            if row and row[0] is not None:
+                _meta = row[2] or {}
+                accepted = dict(_meta.get("doc_versions") or {})
+                # рассинхрон: принятая версия < reconsent-порога документа
+                outdated = []
+                store = get_legal_store()
+                for _did in RECONSENT_DOC_IDS:
+                    _doc = store.get(_did)
+                    if _doc is None or _doc.reconsent_required_since is None:
+                        continue
+                    if int(accepted.get(_did, 0)) < int(_doc.reconsent_required_since):
+                        outdated.append({"doc_id": _did,
+                                         "accepted_version": int(accepted.get(_did, 0)),
+                                         "current_version": _doc.version})
                 consent = {"at": row[0].isoformat(),
-                           "doc_versions": _meta.get("doc_versions", {})}
+                           "last_at": row[1].isoformat(),
+                           "doc_versions": accepted,
+                           "outdated": outdated}
     except Exception as e:    # noqa: BLE001 — consent is enrichment, not the card
         logger.warning("overview consent skipped: %s", e)
 

@@ -1363,7 +1363,7 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
 # Status — fail-open (сбой БД не запирает кабинет, логируется);
 # сам re-consent — must_persist (согласие без следа ничтожно, #432).
 
-_RECONSENT_DOC_IDS = ("terms", "privacy", "consent", "pdn")
+from src.storage.legal import RECONSENT_DOC_IDS as _RECONSENT_DOC_IDS  # noqa: E402
 
 
 def _latest_accepted_versions(client_id: str) -> dict:
