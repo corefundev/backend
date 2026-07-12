@@ -44,6 +44,9 @@ from typing import Any, Callable, Optional
 # вшитая в build_features безусловно, напр. payday).
 # recency_half_life: дни; включает recency-decay sample-веса (#319) в этом
 # плече через sample_weight_fn (в остальных плечах весов нет).
+# model_overrides: dict, домердживается в arm_config["model"] ПОСЛЕ
+# выставления type/objective — фиксированные HPO-пробы (#407): дешевле и
+# интерпретируемее Optuna, дозы видны явно.
 ARMS: dict[str, dict] = {
     "base":          {"model": "mimo",     "statics": "fold_clean", "market": False},
     "mimo":          {"model": "mimo",     "statics": "fold_clean", "market": False},
@@ -62,6 +65,20 @@ ARMS: dict[str, dict] = {
                       "recency_half_life": 180},
     "recency_hl90":  {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "recency_half_life": 90},
+    # QH-2 #407: HPO-пробы против mid-band недопрогноза (bias 0.86).
+    # tweedie p→1 сильнее штрафует недооценку больших значений; 1.7 —
+    # контрольная доза в другую сторону (default 1.5 = base).
+    "tweedie_p11":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "model_overrides": {"tweedie_variance_power": 1.1}},
+    "tweedie_p13":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "model_overrides": {"tweedie_variance_power": 1.3}},
+    "tweedie_p17":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "model_overrides": {"tweedie_variance_power": 1.7}},
+    "leaves128":     {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "model_overrides": {"num_leaves": 128}},
+    "lr003_est800":  {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "model_overrides": {"learning_rate": 0.03,
+                                          "n_estimators": 800}},
 }
 
 # Абсолютные market-колонки — нестационарная часть (#380): плечи
@@ -181,6 +198,9 @@ def run_arm(arm_name: str, base_df, config: dict,
         else:
             arm_config["model"]["type"] = "mimo"
             arm_config["model"]["objective"] = "tweedie"
+            # #407: фиксированные HPO-пробы — ПОСЛЕ type/objective, чтобы
+            # override мог менять и их при необходимости
+            arm_config["model"].update(spec.get("model_overrides", {}))
             from src.models.mimo import MIMOForecaster
             model_factory = lambda: MIMOForecaster(arm_config)      # noqa: E731
 
