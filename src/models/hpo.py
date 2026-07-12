@@ -94,7 +94,7 @@ def run_hpo(
         # ensemble is requested. Tweedie behaves most like the
         # blended model on retail demand; tuning on it gives the
         # closest sane proxy for the full ensemble.
-        primary_obj = "tweedie" if config["model"].get("objective") == "ensemble" else config["model"].get("objective", "mse")
+        primary_obj = "tweedie" if config["model"].get("objective") in ("ensemble", "hybrid") else config["model"].get("objective", "mse")
         trial_config["model"]["objective"] = primary_obj
 
         try:

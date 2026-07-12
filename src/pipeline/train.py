@@ -561,7 +561,12 @@ def run_training_pipeline(
     # interface. Annotate with the broad Callable type so reassignment
     # across branches doesn't trip mypy.
     val_factory: Callable[[], Any]
-    if objective_cfg == "ensemble":
+    if objective_cfg == "hybrid":
+        # #384 SHIP: band-роутинг ансамбль↔MIMO (платный default)
+        from src.models.hybrid import HybridForecaster
+        val_factory = lambda: HybridForecaster(config)
+        val_label = "hybrid"
+    elif objective_cfg == "ensemble":
         from src.models.ensemble import EnsembleForecaster
         val_factory = lambda: EnsembleForecaster(config)
         val_label = "ensemble"
@@ -610,11 +615,47 @@ def run_training_pipeline(
     model_type = config["model"].get("type", "lgbm")
     objective  = str(config.get("model", {}).get("objective", "")).lower()
     is_ensemble = objective == "ensemble"
+    is_hybrid   = objective == "hybrid"
 
     # Same shape as val_factory above — three classes can land here,
     # so use a single broad annotation rather than an if-else union.
     final_model: Any
-    if is_ensemble:
+    if is_hybrid:
+        # #384 SHIP: гибрид фитит калиброванный MIMO + ансамбль; бленд-веса
+        # ансамблевой стороны — той же clean-holdout дисциплиной (#152),
+        # прокси-методы гибрида ведут к ансамблю.
+        from src.models.hybrid import HybridForecaster as _Hybrid
+        final_model = _Hybrid(config)
+        blend_lookback = int(
+            config.get("model", {}).get("ensemble_lookback_days", 28)
+        )
+        clean_weights = False
+        if bool(config.get("model", {}).get("blend_clean_holdout", True)):
+            clean_weights = final_model.compute_blend_weights_clean(
+                df_full=df, X=X, y=y,
+                sku_col=sku_col,
+                date_col=config["data"]["date_col"],
+                target_col=target_col,
+                groups=df[sku_col],
+                sample_weight=sample_weights_full,
+                target_censor=target_censor,
+                lookback_days=blend_lookback,
+            )
+        final_model.fit(X, y, groups=df[sku_col], sample_weight=sample_weights_full,
+                        target_censor=target_censor)
+        _fit_quantiles_with_conformal(final_model, df, X, y, config, agg,
+                                      target_censor=target_censor)
+        if not clean_weights:
+            final_model.compute_blend_weights(
+                df_full=df,
+                sku_col=sku_col,
+                date_col=config["data"]["date_col"],
+                target_col=target_col,
+                lookback_days=blend_lookback,
+            )
+        agg["blend_weights_clean"] = float(clean_weights)
+        logger.info("  Hybrid (band-routed ensemble+MIMO) + quantiles fitted")
+    elif is_ensemble:
         # 3 MIMO children with different objectives, blended per SKU.
         # Adds ~3× training time and memory for a meaningful per-SKU
         # accuracy gain on mixed catalogs. EnsembleForecaster was
@@ -683,7 +724,10 @@ def run_training_pipeline(
     # SHAP explainer is constructed here only for forward-compat with
     # the /explain endpoint on the roadmap. Drop it once that endpoint
     # actually uses it; until then the import smoke-tests the wiring.
-    if is_ensemble:
+    if is_hybrid:
+        lgbm_inner = (final_model.mimo.models_[0]
+                      if final_model.mimo.models_ else None)
+    elif is_ensemble:
         primary = final_model.models_[final_model.primary_objective]
         lgbm_inner = primary.models_[0] if primary.models_ else None
     elif model_type == "lgbm":

@@ -193,8 +193,8 @@ def test_train_pipeline_routes_quantiles_through_conformal_helper():
     # def line + the two branch call sites (ensemble + mimo); the exact call
     # now wraps with the #228 target_censor kwarg, so match the stable prefix.
     # 3 = def line + the two branch call sites (substring includes the def)
-    assert src.count("_fit_quantiles_with_conformal(final_model, df, X, y, config, agg,") == 3, (
-        "both final-fit branches (ensemble + mimo) must calibrate via the helper"
+    assert src.count("_fit_quantiles_with_conformal(final_model, df, X, y, config, agg,") == 4, (
+        "all final-fit branches (hybrid + ensemble + mimo) must calibrate via the helper"
     )
     assert "def _fit_quantiles_with_conformal(final_model, df, X, y, config, agg," in src
     # direct fit_quantiles calls exist ONLY inside the helper: the

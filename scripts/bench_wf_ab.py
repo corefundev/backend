@@ -111,6 +111,9 @@ ARMS: dict[str, dict] = {
                           "band_route": (0,)},
     "route_slowmid_ens": {"model": "mimo", "statics": "fold_clean", "market": False,
                           "band_route": (0, 1)},
+    # Продуктовый HybridForecaster (equivalence-плечо: обязано ≈ повторить
+    # route_slowmid_ens — тот же роутинг, но боевым классом)
+    "hybrid_prod":       {"model": "hybrid", "statics": "fold_clean", "market": False},
     # QW3-1b #316: category target-encoding ЛОКАЛЬНЫМ join-ом (карта
     # sku->категория из BENCH_CATEGORY_PATH; adapt_1c --categories-out).
     # Fold-clean: TE = smoothed mean спроса категории, посчитанный на
@@ -415,7 +418,11 @@ def run_arm(arm_name: str, base_df, config: dict,
 
     if model_factory is None:
         arm_config = {**config, "model": {**config["model"]}}
-        if spec["model"] == "ensemble":
+        if spec["model"] == "hybrid":
+            arm_config["model"]["objective"] = "hybrid"
+            from src.models.hybrid import HybridForecaster
+            model_factory = lambda: HybridForecaster(arm_config)    # noqa: E731
+        elif spec["model"] == "ensemble":
             arm_config["model"]["objective"] = "ensemble"
             from src.models.ensemble import EnsembleForecaster
             model_factory = lambda: EnsembleForecaster(arm_config)  # noqa: E731
