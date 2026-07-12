@@ -69,20 +69,31 @@ ARMS: dict[str, dict] = {
                       "recency_half_life": 180},
     "recency_hl90":  {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "recency_half_life": 90},
-    # QH-3 #414: длинная память — dose-response 28/56/112 дней (боевой
-    # конфиг видит только 14; история 924 дня лежит неиспользованной).
+    # QH-3 #414 → QH-4 #418: длинная память, dose-response 28/56/112.
+    # per_sku_lags снимает глобальный min-history кап — без него стенд
+    # молча резал 56/112 и все три плеча были бит-в-бит идентичны
+    # (журнал #414). Warmup при флаге — по короткому обязательному лагу,
+    # короткие SKU остаются в трейне с NaN в длинных лагах.
     "mem28":         {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "features_overrides": {
+                          "per_sku_lags": True,
                           "lags": [1, 7, 14, 28],
                           "rolling_windows": [7, 14, 28]}},
     "mem56":         {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "features_overrides": {
+                          "per_sku_lags": True,
                           "lags": [1, 7, 14, 28, 56],
                           "rolling_windows": [7, 14, 28, 56]}},
     "mem112":        {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "features_overrides": {
+                          "per_sku_lags": True,
                           "lags": [1, 7, 14, 28, 56, 112],
                           "rolling_windows": [7, 14, 28, 56, 112]}},
+    # Кандидат на флип дефолта (#418): lag-список НЕ трогаем — ровно тот
+    # конфиг, что получит prod при включении флага (config.yaml до 365).
+    "psl_default":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "per_sku_lags": True}},
     # QH-2 #407: HPO-пробы против mid-band недопрогноза (bias 0.86).
     # tweedie p→1 сильнее штрафует недооценку больших значений; 1.7 —
     # контрольная доза в другую сторону (default 1.5 = base).
