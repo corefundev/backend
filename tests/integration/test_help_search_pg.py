@@ -49,7 +49,8 @@ def _mk(reg, slug, title, body, status="published"):
     cat = HelpCategory(id=new_help_id(), slug=cat_slug, title="Тест")
     reg.create_category(cat)
     art = HelpArticle(id=new_help_id(), slug=slug, category_id=cat.id,
-                      title=title, body_md=body, body_html="", status=status)
+                      title=title, body_md=body, body_html="",
+                      author_admin_id="hc5pg-tests", status=status)
     reg.create_article(art)
     return art
 
