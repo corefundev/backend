@@ -213,3 +213,38 @@ def test_fingerprint_is_content_addressed():
     assert fp1["rows"] == len(df1) and fp1["skus"] == 3
     df2.loc[0, "sales"] += 1
     assert bench._fingerprint(df2, "sku", "date", "sales")["content_sha12"] != fp1["content_sha12"]
+
+
+# ── QH-2 #407: HPO-плечи (model_overrides) ───────────────────────────────
+
+def test_hpo_arms_registry_doses():
+    """Дозы явные: tweedie 1.1/1.3/1.7 (обе стороны от default 1.5),
+    ёмкость и темп обучения; base без overrides."""
+    assert bench.ARMS["tweedie_p11"]["model_overrides"] == {"tweedie_variance_power": 1.1}
+    assert bench.ARMS["tweedie_p13"]["model_overrides"] == {"tweedie_variance_power": 1.3}
+    assert bench.ARMS["tweedie_p17"]["model_overrides"] == {"tweedie_variance_power": 1.7}
+    assert bench.ARMS["leaves128"]["model_overrides"] == {"num_leaves": 128}
+    assert bench.ARMS["lr003_est800"]["model_overrides"] == {
+        "learning_rate": 0.03, "n_estimators": 800}
+    assert "model_overrides" not in bench.ARMS["base"]
+
+
+def test_model_overrides_reach_arm_config_not_base(monkeypatch):
+    """Override попадает в model-конфиг плеча ПОСЛЕ type/objective и не
+    мутирует исходный config (плечи независимы). model_factory не передаём —
+    прогоняем реальную сборку arm_config с фейковым MIMOForecaster."""
+    import src.models.mimo as mimo_mod
+    captured: dict = {}
+
+    class _FakeMIMO(_StubMIMO):
+        def __init__(self, cfg):
+            captured.update(cfg["model"])
+            super().__init__({"fits": []}, cfg["model"]["horizon"])
+
+    monkeypatch.setattr(mimo_mod, "MIMOForecaster", _FakeMIMO)
+    cfg = _config()
+    before = dict(cfg["model"])
+    bench.run_arm("tweedie_p11", _df(), cfg)
+    assert captured["tweedie_variance_power"] == 1.1
+    assert captured["objective"] == "tweedie" and captured["type"] == "mimo"
+    assert cfg["model"] == before, "исходный config не должен мутировать"
