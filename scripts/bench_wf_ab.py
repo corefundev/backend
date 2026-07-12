@@ -47,6 +47,10 @@ from typing import Any, Callable, Optional
 # model_overrides: dict, домердживается в arm_config["model"] ПОСЛЕ
 # выставления type/objective — фиксированные HPO-пробы (#407): дешевле и
 # интерпретируемее Optuna, дозы видны явно.
+# features_overrides: dict, домердживается в config["features"] ЭТОГО
+# плеча; признаки пересобираются из СЫРОГО фрейма (#414 длинная память).
+# Warmup-дроп удлиняется честно (как в prod); тестовые окна — те же
+# последние даты, поэтому дельты корректны.
 ARMS: dict[str, dict] = {
     "base":          {"model": "mimo",     "statics": "fold_clean", "market": False},
     "mimo":          {"model": "mimo",     "statics": "fold_clean", "market": False},
@@ -65,6 +69,20 @@ ARMS: dict[str, dict] = {
                       "recency_half_life": 180},
     "recency_hl90":  {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "recency_half_life": 90},
+    # QH-3 #414: длинная память — dose-response 28/56/112 дней (боевой
+    # конфиг видит только 14; история 924 дня лежит неиспользованной).
+    "mem28":         {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "lags": [1, 7, 14, 28],
+                          "rolling_windows": [7, 14, 28]}},
+    "mem56":         {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "lags": [1, 7, 14, 28, 56],
+                          "rolling_windows": [7, 14, 28, 56]}},
+    "mem112":        {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "lags": [1, 7, 14, 28, 56, 112],
+                          "rolling_windows": [7, 14, 28, 56, 112]}},
     # QH-2 #407: HPO-пробы против mid-band недопрогноза (bias 0.86).
     # tweedie p→1 сильнее штрафует недооценку больших значений; 1.7 —
     # контрольная доза в другую сторону (default 1.5 = base).
@@ -136,10 +154,12 @@ def decompose(combined, split_points, band_by_sku: dict, sku_col: str) -> dict:
 
 
 def run_arm(arm_name: str, base_df, config: dict,
-            model_factory: Optional[Callable[[], Any]] = None) -> dict:
+            model_factory: Optional[Callable[[], Any]] = None,
+            raw_df=None) -> dict:
     """Одно плечо на подготовленном фрейме (build_features уже сделан,
-    static/market НЕ смержены — этим управляет спецификация плеча)."""
-    from src.features.engineering import get_feature_columns
+    static/market НЕ смержены — этим управляет спецификация плеча).
+    Плечи с features_overrides пересобирают признаки из raw_df."""
+    from src.features.engineering import build_features, get_feature_columns
     from src.features.market import compute_market_tail, merge_market_features
     from src.features.static_features import (
         STATIC_COLS, compute_static_map, fold_static_recompute,
@@ -151,7 +171,16 @@ def run_arm(arm_name: str, base_df, config: dict,
     sku_col, date_col, target_col = (config["data"]["sku_col"],
                                      config["data"]["date_col"],
                                      config["data"]["target_col"])
-    df = base_df.copy()
+    feat_overrides = spec.get("features_overrides")
+    if feat_overrides:
+        if raw_df is None:
+            raise ValueError(
+                f"arm {arm_name!r} needs raw_df (features_overrides rebuild)")
+        config = {**config,
+                  "features": {**config.get("features", {}), **feat_overrides}}
+        df = build_features(raw_df.copy(), config)
+    else:
+        df = base_df.copy()
 
     if spec["statics"] != "off":
         smap = compute_static_map(df, sku_col, target_col)
@@ -267,8 +296,8 @@ def main(argv: Optional[list] = None) -> int:
     # Харнесс-константы: см. докстринг модуля.
     config.setdefault("hpo", {})["enabled"] = False
 
-    df = load_data(args.data_path, config)
-    df = build_features(df, config)
+    raw_df = load_data(args.data_path, config)
+    df = build_features(raw_df, config)
     print(json.dumps({"harness": {
         "data": _fingerprint(df, config["data"]["sku_col"],
                              config["data"]["date_col"],
@@ -281,7 +310,7 @@ def main(argv: Optional[list] = None) -> int:
 
     results = []
     for arm in arms:
-        out = run_arm(arm, df, config)
+        out = run_arm(arm, df, config, raw_df=raw_df)
         results.append(out)
         print(json.dumps(out, ensure_ascii=False), flush=True)
 
