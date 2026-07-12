@@ -146,6 +146,13 @@ class MIMOForecaster:
             f"MIMO: fitted {self.horizon} direct models on {len(X)} rows "
             f"(objective={params['objective']}, per_sku_shift={groups is not None})"
         )
+
+        # QH-5 #422: per-band калибровка (fold-clean probe). Только при
+        # groups (нужны границы SKU); best-effort — сбой не роняет фит.
+        bc_cfg = (self.config.get("model") or {}).get("band_calibration") or {}
+        if bc_cfg.get("enabled") and groups is not None:
+            self._fit_band_calibration(X, y, groups, sample_weight, target_censor)
+
         return self
 
     def fit_quantiles(
@@ -188,6 +195,89 @@ class MIMOForecaster:
             logger.info(f"MIMO: fitted quantile q={q} ({self.horizon} models)")
         return self
 
+    # ── QH-5 #422: per-band мультипликативная калибровка точечного прогноза ──
+    # Ship-решение 2026-07-12 (журнал замеров): MASE −2.64% / mean −2.97% /
+    # slow-band −5% на 1c-live при нейтральном WMAPE_g. Скоуп СТРОГО как
+    # измерено: только predict()/predict_next(); квантили и conformal НЕ
+    # калибруются (coverage откалиброван на сырых — их масштабирование =
+    # отдельный замер по cost-метрике). Ensemble-члены — калибровка
+    # ЗАПРЕЩЕНА до отдельного замера (R14: платная метрика).
+
+    def _fit_band_calibration(self, X, y, groups, sample_weight,
+                              target_censor) -> None:
+        """Fold-clean оценка факторов (алгоритм = плечо band_cal стенда):
+        probe-фит на «голове» (без последних H строк каждого SKU), band'ы
+        по тершилям среднего спроса головы, фактор = clip(Σфакт/Σпрогноз)
+        по band'у на внутреннем хвосте. Best-effort: любой сбой — модель
+        остаётся без факторов (=1.0), обучение не падает."""
+        try:
+            import copy as _copy
+            bc = (self.config.get("model") or {}).get("band_calibration") or {}
+            lo, hi = bc.get("clip", [0.8, 1.25])
+            g = pd.Series(groups).reset_index(drop=True)
+            Xr = X.reset_index(drop=True)
+            yr = pd.Series(y).reset_index(drop=True)
+            sw = (pd.Series(sample_weight).reset_index(drop=True)
+                  if sample_weight is not None else None)
+            tc = (pd.Series(target_censor).reset_index(drop=True)
+                  if target_censor is not None else None)
+
+            fwd = g.groupby(g).cumcount()
+            cnt = g.map(g.value_counts())
+            tail = (cnt - fwd) <= self.horizon
+            head = ~tail
+
+            cfg = _copy.deepcopy(self.config)
+            cfg["model"]["band_calibration"] = {"enabled": False}
+            probe = MIMOForecaster(cfg)
+            probe.fit(Xr[head], yr[head], groups=g[head],
+                      sample_weight=None if sw is None else sw[head].to_numpy(),
+                      target_censor=None if tc is None else tc[head])
+
+            mean_by_sku = yr[head].groupby(g[head]).mean()
+            t1, t2 = np.quantile(mean_by_sku.to_numpy(), [1 / 3, 2 / 3])
+            band_by_sku = {str(s): int(np.digitize(v, [t1, t2]))
+                           for s, v in mean_by_sku.items()}
+
+            head_counts = g[head].value_counts()
+            eligible = set(head_counts[head_counts >= 2 * self.horizon].index)
+            head_groups = g[head].groupby(g[head]).groups
+            tail_groups = g[tail].groupby(g[tail]).groups
+            sums_p = {0: 0.0, 1: 0.0, 2: 0.0}
+            sums_a = {0: 0.0, 1: 0.0, 2: 0.0}
+            for sku in eligible:
+                try:
+                    raw = probe.predict(Xr.loc[[head_groups[sku][-1]]])
+                except Exception:    # noqa: BLE001 — SKU пропускается
+                    continue
+                preds = np.clip(np.asarray(raw, dtype=float)[0], 0, None)
+                actual = yr.loc[tail_groups.get(sku, [])].to_numpy()[: len(preds)]
+                k = min(len(preds), len(actual))
+                if k == 0:
+                    continue
+                b = band_by_sku.get(str(sku), 1)
+                sums_p[b] += float(preds[:k].sum())
+                sums_a[b] += float(actual[:k].sum())
+            factors = {b: float(np.clip(sums_a[b] / sums_p[b], lo, hi))
+                       for b in sums_p if sums_p[b] > 0}
+            self.band_cal_ = {"factors": factors, "band_of_sku": band_by_sku,
+                              "clip": [float(lo), float(hi)]}
+            logger.info(f"Band calibration fitted: factors={factors}")
+        except Exception as e:    # noqa: BLE001 — залогировано, не проглочено
+            logger.warning(f"Band calibration failed (model stays uncalibrated): {e}")
+
+    def _band_factor_vec(self, X: pd.DataFrame) -> np.ndarray:
+        """Per-row фактор band'а SKU; 1.0 для legacy-моделей (нет атрибута),
+        неизвестных SKU и фреймов без sku-колонки — serve-parity с probe."""
+        bc = getattr(self, "band_cal_", None)
+        if not bc or not bc.get("factors"):
+            return np.ones(len(X))
+        sku_col = self.config.get("data", {}).get("sku_col", "sku")
+        if sku_col not in X.columns:
+            return np.ones(len(X))
+        bands = X[sku_col].astype(str).map(bc["band_of_sku"])
+        return bands.map(bc["factors"]).fillna(1.0).to_numpy(dtype=float)
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
         Predict all H steps for each row in X.
@@ -199,6 +289,8 @@ class MIMOForecaster:
             [np.clip(m.predict(X[self.feature_cols]), 0, None) for m in self.models_],
             axis=1,
         )
+        # QH-5 #422: точечный прогноз × фактор band'а (квантили не трогаем)
+        preds = preds * self._band_factor_vec(X)[:, None]
         return preds  # shape (N, H)
 
     def predict_next(self, X_last: pd.DataFrame) -> np.ndarray:
