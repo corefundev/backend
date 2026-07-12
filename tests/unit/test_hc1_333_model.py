@@ -105,7 +105,9 @@ def test_search_published_only_and_zero_log():
     _art(cat.id, slug="draft", title="Черновик про CSV")
     reg.update_article(pub.id, status="published")
     hits = reg.search_published("csv")
-    assert [a.id for a in hits] == [pub.id]          # draft не ищется
+    # HC-5: пары (статья, сниппет с [[…]]-сентинелами)
+    assert [a.id for a, _ in hits] == [pub.id]       # draft не ищется
+    assert all("[[" in s for _, s in hits)
     reg.log_search("csv", len(hits))
     reg.log_search("экспорт в 1С", 0)
     reg.log_search("экспорт в 1С", 0)

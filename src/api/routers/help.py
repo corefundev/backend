@@ -565,3 +565,68 @@ def cms_media(
     ext = name.rsplit(".", 1)[-1]
     return Response(content=data, media_type=_MEDIA_CTYPE[ext],
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+# ═══ HC-5 (#336): поиск + аналитика запросов ═════════════════════════════
+# Публичный поиск: PG FTS (russian) ranked, published-only; сниппет несёт
+# сентинелы [[…]] вместо HTML (фронт сам рендерит <mark> — XSS исключён).
+# Каждый запрос логируется в help_search_log (query+results_count, без
+# PII) best-effort — сбой лога НЕ ломает поиск. Админ-инсайты: топ
+# запросов + zero-result (сигнал дыр в контенте). Typo-tolerance
+# (Meilisearch) — осознанно отложенный апгрейд, не строим сейчас.
+
+_SEARCH_LIMIT_PER_HOUR = 300
+_SEARCH_Q_MIN, _SEARCH_Q_MAX = 2, 200
+_SEARCH_RESULTS_LIMIT = 20
+
+
+def _log_search(query: str, results_count: int) -> None:
+    """Лог запроса — best-effort, поиск не падает из-за лога
+    (функция ничего не возвращает)."""
+    try:
+        get_help_registry().log_search(query, results_count)
+    except Exception as e:    # noqa: BLE001 — залогировано, не проглочено
+        logger.warning("help search log failed: %s", e)
+
+
+@router.get("/help/search")
+def help_search(
+    http_req: Request,
+    q: str,
+    locale: str = DEFAULT_LOCALE,
+):
+    """Поиск по опубликованным статьям. Результат: тизер + сниппет с
+    [[…]]-подсветкой. Нулевой результат тоже логируется — это сырьё
+    для zero-result-аналитики."""
+    try:
+        check_public_read(client_ip(http_req), prefix="help:search",
+                          limit=_SEARCH_LIMIT_PER_HOUR)
+    except RateLimited as e:
+        raise HTTPException(
+            status_code=429, detail=str(e),
+            headers={"Retry-After": str(e.retry_after_sec or 60)}) from e
+    q = q.strip()
+    if not (_SEARCH_Q_MIN <= len(q) <= _SEARCH_Q_MAX):
+        raise HTTPException(
+            422, detail=f"q: от {_SEARCH_Q_MIN} до {_SEARCH_Q_MAX} символов")
+    pairs = get_help_registry().search_published(
+        q, locale=locale, limit=_SEARCH_RESULTS_LIMIT)
+    _log_search(q, len(pairs))
+    return {
+        "query": q,
+        "count": len(pairs),
+        "results": [{**_article_teaser(a), "snippet": s} for a, s in pairs],
+    }
+
+
+@router.get("/admin/help/search/insights")
+def help_search_insights(
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Аналитика поиска: топ запросов + запросы без результатов
+    (content-gap). Только чтение — аудит не пишем."""
+    auth.require_role("admin")
+    reg = get_help_registry()
+    return {"top": reg.top_queries(50),
+            "zero_results": reg.zero_result_queries(50)}
