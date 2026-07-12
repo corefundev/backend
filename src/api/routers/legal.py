@@ -84,3 +84,27 @@ async def update_legal_doc(
         "reconsent_required_since": doc.reconsent_required_since,
         "change_summary": doc.change_summary,
     }
+
+
+@router.get("/admin/legal/{doc_id}/revisions")
+async def list_legal_revisions(
+    doc_id: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """LEG-3 #431: история версий документа (метаданные, без текстов)."""
+    auth.require_role("admin")
+    return {"revisions": get_legal_store().list_revisions(doc_id)}
+
+
+@router.get("/admin/legal/{doc_id}/revisions/{version}")
+async def get_legal_revision(
+    doc_id: str,
+    version: int,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Полный текст конкретной версии — доказуемость принятого."""
+    auth.require_role("admin")
+    rev = get_legal_store().get_revision(doc_id, version)
+    if rev is None:
+        raise HTTPException(404, "revision not found")
+    return rev

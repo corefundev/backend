@@ -31,6 +31,7 @@ def store():
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute("DELETE FROM legal_documents WHERE doc_id = %s", (doc_id,))
+        cur.execute("DELETE FROM legal_document_revisions WHERE doc_id = %s", (doc_id,))
     conn.close()
 
 
@@ -58,3 +59,19 @@ def test_first_version_with_flag(store):
     st, doc_id = store
     d1 = st.upsert(doc_id, "T", "v1", requires_reconsent=True)
     assert d1.version == 1 and d1.reconsent_required_since == 1
+
+
+def test_every_save_snapshots_revision_text(store):
+    """#431: каждая версия восстановима — текст v1 доступен после v2."""
+    st, doc_id = store
+    st.upsert(doc_id, "T", "текст первой версии")
+    st.upsert(doc_id, "T", "текст второй версии", requires_reconsent=True,
+              change_summary="правки")
+    revs = st.list_revisions(doc_id)
+    assert [r["version"] for r in revs] == [2, 1]
+    assert revs[0]["requires_reconsent"] is True
+    v1 = st.get_revision(doc_id, 1)
+    assert v1["content"] == "текст первой версии"
+    v2 = st.get_revision(doc_id, 2)
+    assert v2["content"] == "текст второй версии"
+    assert st.get_revision(doc_id, 99) is None
