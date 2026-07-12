@@ -5,9 +5,11 @@
 # migrations/ later (like 008_audit_log.sql), they don't auto-apply
 # until someone explicitly re-runs the migrate service.
 #
-# This workflow does that: scp the migrations dir + scripts/migrate.py,
-# then `docker compose run --rm migrate` so a fresh container runs
-# scripts/migrate.py against the live DB.
+# This workflow does that: push the migrations dir + scripts/migrate.py
+# to the host, then run migrate.py in a THROWAWAY container from the
+# current api image with those files mounted over (#413: the host keeps
+# no src/ anymore — CD ships prebuilt GHCR images, so building on the
+# host is impossible).
 #
 # Idempotent — migrate.py uses _db_migrations to track applied files,
 # so re-running is a no-op when nothing's pending.
@@ -56,7 +58,7 @@ jobs:
           tar czf - migrations scripts/migrate.py \
               | ssh -q "${VPS_USER}@${VPS_HOST}" "cd /srv/backend && tar xzf - && ls migrations/ | tail -10"
 
-      - name: Run migrate service
+      - name: Run migrate.py in a throwaway container (current api image)
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -65,23 +67,29 @@ jobs:
           ssh -q "${VPS_USER}@${VPS_HOST}" bash -s <<'EOF'
           set -e
           cd /srv/backend
-          COMPOSE_ARGS="--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml"
+          # #413: хост давно НЕ хранит src/ (CD = готовые GHCR-образы) —
+          # `compose build migrate` на хосте мёртв. Вместо сборки гоняем
+          # НАСТОЯЩИЙ scripts/migrate.py (advisory lock, _db_migrations,
+          # потранзакционно) в одноразовом контейнере из ТЕКУЩЕГО
+          # api-образа, с host-свежими migrations/ и migrate.py поверх
+          # (сценарий «миграция без деплоя»). Env+mounts берём у живого
+          # api — Lockbox-бутстрап внутри migrate.py получает всё сам.
+          PG=$(docker ps --format '{{.Names}}' | grep -E 'postgres' | head -1)
 
           echo "── current state of _db_migrations ──"
-          PG=$(docker compose $COMPOSE_ARGS ps -q postgres)
           docker exec "$PG" psql -U sku -d sku_forecasting -c \
               "SELECT filename, applied_at FROM _db_migrations ORDER BY applied_at;"
 
+          IMG=$(docker inspect docker-api-1 --format '{{.Config.Image}}')
+          NET=$(docker inspect docker-api-1 --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
           echo
-          echo "── rebuilding migrate image (picks up new SQL files) ──"
-          # migrate (and api, worker) bake migrations/ + code into the
-          # image via Dockerfile COPY. Rebuilding ensures the new
-          # migration files are visible to scripts/migrate.py at runtime.
-          docker compose $COMPOSE_ARGS build migrate
-
-          echo
-          echo "── running migrate (idempotent) ──"
-          docker compose $COMPOSE_ARGS run --rm migrate
+          echo "── running migrate.py (image: $IMG, idempotent) ──"
+          docker run --rm --network "$NET" \
+            $(docker inspect docker-api-1 --format '{{range .Config.Env}}-e {{.}} {{end}}') \
+            $(docker inspect docker-api-1 --format '{{range .Mounts}}-v {{.Source}}:{{.Destination}}:ro {{end}}') \
+            -v /srv/backend/migrations:/app/migrations:ro \
+            -v /srv/backend/scripts/migrate.py:/app/scripts/migrate.py:ro \
+            "$IMG" python scripts/migrate.py
 
           echo
           echo "── post-migrate _db_migrations ──"
