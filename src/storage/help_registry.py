@@ -115,10 +115,14 @@ class HelpRegistry:
     def list_revisions(self, article_id: str,
                        limit: int = 50) -> list[HelpRevision]: ...
 
-    # фидбек (True = голос записан, False = уже голосовал)
+    # фидбек (True = голос записан, False = уже голосовал).
+    # feedback_summary/list_feedback_comments (HC-6) НИКОГДА не отдают
+    # voter_hash — он не покидает слой хранения.
     def add_feedback(self, article_id: str, helpful: bool,
                      comment: Optional[str], voter_hash: str) -> bool: ...
     def feedback_stats(self, article_id: str) -> dict: ...
+    def feedback_summary(self) -> dict: ...
+    def list_feedback_comments(self, limit: int = 100) -> list[dict]: ...
 
     # поиск (HC-5). search_published отдаёт пары (статья, сниппет);
     # совпадения в сниппете помечены сентинелами [[…]] — сервер НЕ
@@ -324,6 +328,26 @@ class PostgresHelpRegistry(HelpRegistry):
                 (article_id,))
             helpful, total = cur.fetchone()
         return {"helpful": int(helpful or 0), "total": int(total or 0)}
+
+    def feedback_summary(self) -> dict:
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT article_id, count(*) FILTER (WHERE helpful), count(*) "
+                "FROM help_article_feedback GROUP BY article_id")
+            return {aid: {"helpful": int(h), "total": int(t)}
+                    for aid, h, t in cur.fetchall()}
+
+    def list_feedback_comments(self, limit: int = 100) -> list[dict]:
+        # voter_hash сознательно НЕ выбирается
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT article_id, helpful, comment, created_at "
+                "FROM help_article_feedback "
+                "WHERE comment IS NOT NULL AND comment <> '' "
+                "ORDER BY created_at DESC LIMIT %s", (limit,))
+            return [{"article_id": aid, "helpful": bool(h), "comment": c,
+                     "created_at": ca.isoformat()}
+                    for aid, h, c, ca in cur.fetchall()]
 
     # поиск (HC-5): русская морфология, published-only, ranked;
     # сниппет строит ts_headline с сентинелами [[…]] (не HTML)
@@ -540,6 +564,23 @@ class LocalFileHelpRegistry(HelpRegistry):
                 if f["article_id"] == article_id]
         return {"helpful": sum(1 for f in rows if f["helpful"]),
                 "total": len(rows)}
+
+    def feedback_summary(self) -> dict:
+        agg: dict = {}
+        for f in self._load()["feedback"]:
+            z = agg.setdefault(f["article_id"], {"helpful": 0, "total": 0})
+            z["total"] += 1
+            if f["helpful"]:
+                z["helpful"] += 1
+        return agg
+
+    def list_feedback_comments(self, limit: int = 100) -> list[dict]:
+        # voter_hash сознательно НЕ отдаётся
+        rows = [f for f in self._load()["feedback"] if f.get("comment")]
+        rows.sort(key=lambda f: f["created_at"], reverse=True)
+        return [{"article_id": f["article_id"], "helpful": f["helpful"],
+                 "comment": f["comment"], "created_at": f["created_at"]}
+                for f in rows[:limit]]
 
     # поиск: наивный substring + сниппет-окно вокруг первого совпадения
     # (сентинелы [[…]] — паритет контракта с PG ts_headline)

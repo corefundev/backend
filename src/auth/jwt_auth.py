@@ -18,6 +18,7 @@ Env vars (REQUIRED in production — no insecure fallbacks):
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import os
@@ -145,6 +146,17 @@ _api_key_h = APIKeyHeader(name="x-api-key", auto_error=False)
 # same secret (e.g., compromised dev → prod). Decode verifies both.
 JWT_ISSUER   = os.environ.get("JWT_ISSUER",   "sku-forecasting-api")
 JWT_AUDIENCE = os.environ.get("JWT_AUDIENCE", "sku-forecasting-api")
+
+
+def derive_session_hash(*parts: str) -> str:
+    """PII-free стабильный hash «сессии» для анонимных фич (HC-6 голос
+    «полезна ли статья»): HMAC-SHA256 на JWT-секрете. Голый sha256(IP|UA)
+    перебирается оффлайн (IPv4-пространство мало́) и де-факто хранит IP;
+    с ключом восстановление исходных частей без секрета невозможно.
+    Сырые части НИКОГДА не сохраняются."""
+    return hmac.new(_get_jwt_secret().encode("utf-8"),
+                    "|".join(parts).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
 
 
 def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
