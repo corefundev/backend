@@ -36,7 +36,7 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 110  # 105 после LEG-3/#431; +5 AUTH-1 #445:
+_EXPECTED_ROUTE_COUNT = 111  # 105 после LEG-3/#431; +5 AUTH-1 #445; +1 AUTH-2 #446 /auth/refresh:
 # /auth/login/password, /auth/password/reset-request, /auth/password/reset(+peek),
 # /auth/password/change. Подтверждение почты — КОДОМ через существующий
 # /auth/signup/verify (решение владельца: ссылки только для сброса).
