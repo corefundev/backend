@@ -271,7 +271,9 @@ from src.api._origins import parse_frontend_origins  # R11-L14 — shared helper
 app.add_middleware(
     CORSMiddleware,
     allow_origins=parse_frontend_origins(),
-    allow_credentials=False,                       # JWT in header, no cookies
+    # AUTH-2 #446: refresh-кука требует credentials; origins — явный
+    # список (parse_frontend_origins), wildcard здесь невозможен.
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "x-api-key", "X-Request-ID"],
     expose_headers=["Retry-After", "X-Request-ID"],

@@ -38,7 +38,7 @@ import os
 import re as _re
 from typing import Optional, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1030,6 +1030,32 @@ def _captcha_after_fails_or_400(canonical: str, req_token: Optional[str]) -> Non
         _verify_captcha_or_400(req_token)
 
 
+def _refresh_cookie_kwargs() -> dict:
+    """Кросс-сайтовая пара FE(skusystem.ru)↔API(api.testcore.ru) требует
+    SameSite=None+Secure; после переезда на общий домен (MIGR-1 #424,
+    api.<домен>) вернём Lax через env. Path=/auth — кука ходит только на
+    auth-эндпоинты, не на каждый API-запрос."""
+    return {
+        "httponly": True,
+        "secure": os.environ.get("REFRESH_COOKIE_SECURE", "1") not in ("0", "false"),
+        "samesite": os.environ.get("REFRESH_COOKIE_SAMESITE", "none"),
+        "path": "/auth",
+    }
+
+
+def _set_refresh_cookie(response, token: str) -> None:
+    from src.auth.refresh_tokens import REFRESH_COOKIE_NAME, refresh_ttl
+    response.set_cookie(
+        REFRESH_COOKIE_NAME, token,
+        max_age=int(refresh_ttl().total_seconds()),
+        **_refresh_cookie_kwargs())
+
+
+def _clear_refresh_cookie(response) -> None:
+    from src.auth.refresh_tokens import REFRESH_COOKIE_NAME
+    response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
+
+
 class LoginPasswordRequest(BaseModel):
     email:    str = Field(..., max_length=254)
     password: str = Field(..., min_length=1, max_length=128)
@@ -1055,7 +1081,8 @@ class PasswordChangeRequest(BaseModel):
 
 
 @router.post("/auth/login/password", response_model=LoginVerifyResponse)
-def auth_login_password(req: LoginPasswordRequest, http_req: Request):
+def auth_login_password(req: LoginPasswordRequest, http_req: Request,
+                        response: Response):
     """Вход email+пароль. Sync def → threadpool (#184: bcrypt не в
     event-loop). Один generic-ответ на все неудачи (нет аккаунта /
     неверный пароль / OAuth-без-пароля / suspended) + bcrypt-заглушка —
@@ -1117,7 +1144,48 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request):
         metadata={"method": "password"},
     )
     token = create_access_token(client_id=rec.client_id, roles=["forecast"])
+    # AUTH-2 #446: remember-me — httpOnly refresh-кука новой семьёй
+    from src.auth.refresh_tokens import get_refresh_store
+    _set_refresh_cookie(response, get_refresh_store().issue(rec.client_id))
     return LoginVerifyResponse(client_id=rec.client_id, access_token=token)
+
+
+@router.post("/auth/refresh", response_model=LoginVerifyResponse)
+def auth_refresh(http_req: Request, response: Response):
+    """AUTH-2 #446 — remember-me: обмен httpOnly refresh-куки на свежий
+    access-JWT с РОТАЦИЕЙ (кука заменяется новой той же семьи).
+    Предъявление уже потраченного токена = сигнал кражи → вся семья
+    отзывается, кука чистится, 401 (пользователь входит паролем)."""
+    from src.auth.refresh_tokens import REFRESH_COOKIE_NAME, get_refresh_store
+
+    raw = http_req.cookies.get(REFRESH_COOKIE_NAME)
+    if not raw:
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите снова")
+
+    store = get_refresh_store()
+    res = store.rotate(raw)
+    if res.status != "ok":
+        _clear_refresh_cookie(response)
+        if res.status == "reuse":
+            record_event(
+                event_type=EVT_LOGIN, event_subtype="refresh_reuse_detected",
+                client_id=res.client_id, ip=client_ip(http_req),
+                user_agent=http_req.headers.get("user-agent"), success=False,
+            )
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите снова")
+
+    rec = get_registry().get(res.client_id)
+    if rec is None or rec.suspended_at is not None or rec.deleted_at is not None:
+        if res.new_token:
+            fam = store.family_of(res.new_token)
+            if fam:
+                store.revoke_family(fam)
+        _clear_refresh_cookie(response)
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите снова")
+
+    _set_refresh_cookie(response, res.new_token)
+    token = create_access_token(client_id=res.client_id, roles=["forecast"])
+    return LoginVerifyResponse(client_id=res.client_id, access_token=token)
 
 
 @router.post("/auth/password/reset-request", response_model=SignupAcceptedResponse)
@@ -1235,6 +1303,8 @@ def auth_password_reset(req: ResetConfirmRequest, http_req: Request):
         password_set_at=_dt.now(_tz.utc).isoformat(),
     )
     revoke_client_sessions(record.client_id)
+    from src.auth.refresh_tokens import get_refresh_store
+    get_refresh_store().revoke_client(record.client_id)
     PASSWORD_RESET_COUNT.labels(stage="confirm").inc()
     return {"status": "password_reset"}
 
@@ -1289,11 +1359,14 @@ def auth_password_change(
         password_set_at=_dt.now(_tz.utc).isoformat(),
     )
     revoke_client_sessions(auth.client_id)
+    from src.auth.refresh_tokens import get_refresh_store
+    get_refresh_store().revoke_client(auth.client_id)
     return {"status": "password_changed"}
 
 
 @router.post("/auth/logout", status_code=204)
-async def auth_logout(auth: AuthContext = Depends(get_current_client)):
+async def auth_logout(http_req: Request, response: Response,
+                      auth: AuthContext = Depends(get_current_client)):
     """
     Revoke the current JWT. Future requests bearing this token will
     receive 401, even though the token's natural `exp` may still be
@@ -1315,6 +1388,15 @@ async def auth_logout(auth: AuthContext = Depends(get_current_client)):
     if jti:
         revoke_token(jti)
         logger.info("revoked jti=%s for client=%s", jti, auth.client_id)
+    # AUTH-2 #446: remember-me семья умирает вместе с сессией
+    from src.auth.refresh_tokens import REFRESH_COOKIE_NAME, get_refresh_store
+    raw = http_req.cookies.get(REFRESH_COOKIE_NAME)
+    if raw:
+        store = get_refresh_store()
+        fam = store.family_of(raw)
+        if fam:
+            store.revoke_family(fam)
+    _clear_refresh_cookie(response)
 
 
 # ══════════════════════════════════════════════════════════════════
