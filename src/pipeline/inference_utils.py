@@ -188,6 +188,32 @@ def recursive_forecast(
     except Exception as e:    # noqa: BLE001 — best-effort; carry on failure
         logger.debug("holiday recompute unavailable (sku=%s): %s", sku, e)
 
+    # QH-7 #440 — event-ramp features share the holiday contract: pure
+    # functions of the forecast date, recomputed per step via the SAME
+    # function training used (no-skew). Only when the model serves them.
+    ramp_by_step: dict[int, dict] = {}
+    recomputed_ramp_cols: set[str] = set()
+    try:
+        from src.features.holidays_features import (
+            EVENT_RAMP_FEATURE_COLS, compute_event_ramp_features,
+        )
+        present_r = [c for c in EVENT_RAMP_FEATURE_COLS if c in h.columns]
+        ramp_cfg = (config or {}).get("features", {}).get("event_ramp", {}) or {}
+        if config is not None and present_r and ramp_cfg.get("enabled", False):
+            fdates = [last_date + pd.Timedelta(days=s) for s in range(1, horizon + 1)]
+            ramp_df = compute_event_ramp_features(
+                fdates,
+                which=str(ramp_cfg.get("set", "full")),
+                ny_window=int(ramp_cfg.get("ny_window", 21)),
+                gift_window=int(ramp_cfg.get("gift_window", 10)),
+            )
+            recomputed_ramp_cols = set(present_r) & set(ramp_df.columns)
+            for s in range(1, horizon + 1):
+                ramp_by_step[s] = {
+                    c: ramp_df.iloc[s - 1][c] for c in recomputed_ramp_cols}
+    except Exception as e:    # noqa: BLE001 — best-effort; carry on failure
+        logger.debug("event-ramp recompute unavailable (sku=%s): %s", sku, e)
+
     # Carry-forward columns that the model uses but the user can't
     # provide for future dates (price, promo, stock, weather, …) —
     # we use the last observed value as the "default future".
@@ -207,6 +233,7 @@ def recursive_forecast(
         and not c.startswith("lag_")
         and not c.startswith("rolling_")
         and c not in recomputed_holiday_cols   # R12-#91 — recomputed, not carried
+        and c not in recomputed_ramp_cols      # QH-7 #440 — same contract
         and c not in {
             "dayofweek", "is_weekend", "weekofyear", "month", "quarter",
             "dayofmonth", "dayofyear", "year",
@@ -249,6 +276,8 @@ def recursive_forecast(
         # ── Holiday features for the FORECAST date (R12-#91) ──────
         # Recomputed (not carried) so future holidays are visible.
         for c, v in holiday_by_step.get(step, {}).items():
+            new_row[c] = v
+        for c, v in ramp_by_step.get(step, {}).items():
             new_row[c] = v
 
         # ── Lag features: lag_k = target value k rows back ────────

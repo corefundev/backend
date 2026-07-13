@@ -101,6 +101,78 @@ def compute_holiday_features(
     return out
 
 
+# ── QH-7 #440: event-ramp windows (RU retail) ────────────────────────────
+# Named continuous ramps for the few events that actually move RU retail,
+# instead of the generic days_to_holiday (which jumps to WHATEVER holiday is
+# next and blurs New Year with a random day off). Deterministic functions of
+# the date — same no-skew contract as compute_holiday_features above.
+
+EVENT_RAMP_FEATURE_COLS = (
+    "ny_ramp",          # rise 0→1 over the ny_window days before Jan 1
+    "dead_january",     # post-vacation slump: Jan 9–31
+    "feb23_ramp",       # gift window before Feb 23
+    "mar8_ramp",        # gift window before Mar 8
+    "may1_ramp",        # May-holidays window before May 1
+)
+EVENT_RAMP_NY_COLS = ("ny_ramp", "dead_january")
+
+
+def _ramp_to(dt: pd.Series, month: int, day: int, window: int) -> np.ndarray:
+    """Linear ramp toward the next (month, day): 0 outside the window,
+    (window−d)/window inside, 1 on the day itself."""
+    year = dt.dt.year
+    this_year = pd.to_datetime(pd.DataFrame(
+        {"year": year, "month": month, "day": day}))
+    next_year = pd.to_datetime(pd.DataFrame(
+        {"year": year + 1, "month": month, "day": day}))
+    nxt = this_year.where(this_year >= dt, next_year)
+    d = (nxt - dt).dt.days.to_numpy()
+    return np.clip((window - d) / window, 0.0, 1.0)
+
+
+def compute_event_ramp_features(
+    dates,
+    which: str = "full",
+    ny_window: int = 21,
+    gift_window: int = 10,
+) -> pd.DataFrame:
+    """Pure event-ramp features for arbitrary dates (training AND serve —
+    the single source, like compute_holiday_features)."""
+    dt = pd.to_datetime(pd.Series(list(dates))).dt.normalize().reset_index(drop=True)
+    out = pd.DataFrame(index=dt.index)
+    out["ny_ramp"]      = _ramp_to(dt, 1, 1, ny_window)
+    out["dead_january"] = ((dt.dt.month == 1) & (dt.dt.day >= 9)).astype(int)
+    if which == "full":
+        out["feb23_ramp"] = _ramp_to(dt, 2, 23, gift_window)
+        out["mar8_ramp"]  = _ramp_to(dt, 3, 8, gift_window)
+        out["may1_ramp"]  = _ramp_to(dt, 5, 1, gift_window)
+    return out
+
+
+def build_event_ramp_features(
+    df: pd.DataFrame,
+    config: dict,
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """Add event-ramp features. Default OFF (features.event_ramp.enabled);
+    ship only via the measured bench verdict (#440)."""
+    cfg = config.get("features", {}).get("event_ramp", {}) or {}
+    if not cfg.get("enabled", False):
+        return df
+    feats = compute_event_ramp_features(
+        pd.to_datetime(df[date_col]),
+        which=str(cfg.get("set", "full")),
+        ny_window=int(cfg.get("ny_window", 21)),
+        gift_window=int(cfg.get("gift_window", 10)),
+    )
+    df = df.copy()
+    for col in feats.columns:
+        df[col] = feats[col].to_numpy()
+    logger.info(f"Event-ramp: added {len(feats.columns)} features "
+                f"(set={cfg.get('set', 'full')})")
+    return df
+
+
 def build_holiday_features(
     df: pd.DataFrame,
     config: dict,

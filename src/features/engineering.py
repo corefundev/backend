@@ -129,6 +129,14 @@ def build_features(
         except Exception as e:
             logger.warning(f"Holiday features failed: {e}")
 
+    # Event-ramp windows (QH-7 #440) — default OFF, ship via bench verdict
+    if cfg_f.get("event_ramp", {}).get("enabled", False):
+        try:
+            from src.features.holidays_features import build_event_ramp_features
+            df = build_event_ramp_features(df, config, date_col)
+        except Exception as e:
+            logger.warning(f"Event-ramp features failed: {e}")
+
     # RU external regressors (CNY/USD/EUR/BYN/KZT — ЦБ РФ daily fix)
     if cfg_f.get("external_regressors_ru", {}).get("enabled", False):
         try:

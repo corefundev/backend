@@ -36,6 +36,16 @@ features:
     enabled: true
     country: RU                  # RU, US, DE, CN, etc.
 
+  # Event-ramp windows (QH-7 #440): named continuous ramps for the events
+  # that move RU retail (pre-NY build-up, dead January, Feb 23 / Mar 8 gift
+  # windows, May 1). Default OFF — flips only on a measured bench verdict
+  # (scripts/bench_wf_ab.py arms event_ramp_ny / event_ramp_full).
+  event_ramp:
+    enabled: false
+    set: full                    # full | ny (NY ramp + dead January only)
+    ny_window: 21                # days of pre-New-Year ramp
+    gift_window: 10              # days of pre-Feb23/Mar8/May1 ramp
+
   # Russian-market external regressors (CNY/USD/EUR/BYN/KZT daily FX,
   # fetched from ЦБ РФ XML_dynamic endpoint and cached on disk).
   # Default OFF so existing client trainings don't shift underfoot;
