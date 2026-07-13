@@ -540,11 +540,6 @@ async def auth_signup(req: SignupRequest, http_req: Request):
             )
         except Exception as e:    # noqa: BLE001
             logger.warning("signup audit event failed: %s", e)
-        if req.password is not None:
-            from src.auth.otp_store import LINK_TTL_MINUTES_DEFAULT
-            return SignupAcceptedResponse(
-                status="confirm_link_sent", email=email,
-                expires_in_minutes=LINK_TTL_MINUTES_DEFAULT)
         return SignupAcceptedResponse(email=email, expires_in_minutes=ttl_min)
 
     if registry.get(client_id) is not None:
@@ -555,48 +550,21 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         logger.info("signup: duplicate client_id=%s", client_id)
         raise HTTPException(status_code=409, detail="Workspace identifier already taken; choose another")
 
-    # 7. AUTH-1 #445 — password flow: confirm LINK + stash (password
-    # hash, cid, display email bound to the link row id). Token is spent
-    # only by POST /auth/confirm (scanner-safe: GET burns nothing).
+    # 7. AUTH-1 #445 — парольный флоу: пароль хешируется СРАЗУ (плейнтекст
+    # не живёт нигде) и стешится рядом с cid/display; подтверждение почты —
+    # тем же 6-значным кодом (решение владельца: модалка №2 вводит
+    # «одноразовый пароль из письма»; ссылки — только для сброса).
     if req.password is not None:
         from starlette.concurrency import run_in_threadpool
 
-        from src.auth.email_sender import (
-            EmailDeliveryError, get_email_sender, render_link_email,
-        )
-        from src.auth.link_tokens import issue_link_token
-        from src.auth.otp_store import (
-            LINK_TTL_MINUTES_DEFAULT, PURPOSE_CONFIRM, get_otp_store,
-        )
+        from src.auth.otp_store import PURPOSE_SIGNUP as _PS
+        from src.auth.otp_store import get_otp_store as _gos
         from src.auth.passwords import hash_password
 
         pwd_hash = await run_in_threadpool(hash_password, req.password)
-        token = await run_in_threadpool(
-            issue_link_token, canonical, PURPOSE_CONFIRM,
-            LINK_TTL_MINUTES_DEFAULT)
-        link_id = token.split(".", 1)[0]
-        _store2 = get_otp_store()
-        _store2.create(email=canonical, purpose=f"{PURPOSE_CONFIRM}:cid:{link_id}",
-                       code_hash=client_id, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
-        _store2.create(email=canonical, purpose=f"{PURPOSE_CONFIRM}:display:{link_id}",
-                       code_hash=email, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
-        _store2.create(email=canonical, purpose=f"{PURPOSE_CONFIRM}:pwd:{link_id}",
-                       code_hash=pwd_hash, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
-        url = _frontend_link("/auth/confirm", token)
-        subject, body, html = render_link_email(
-            purpose="confirm", url=url, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
-        try:
-            get_email_sender().send(to=email, subject=subject, body=body, html=html)
-        except EmailDeliveryError as e:
-            logger.error("signup confirm-link email failed for email_hash=%s: %s",
-                         _email_hash(email), e)
-            raise HTTPException(status_code=503,
-                                detail="Could not send email; try again")
-        return SignupAcceptedResponse(
-            status="confirm_link_sent", email=email,
-            expires_in_minutes=LINK_TTL_MINUTES_DEFAULT)
+        _gos().create(email=canonical, purpose=f"{_PS}:pwd", code_hash=pwd_hash)
 
-    # 7-legacy. OTP + email (снос — AUTH-4 #448)
+    # 7b. OTP + email (единый для обоих флоу; легаси-часть — снос в AUTH-4)
     from src.auth.otp import generate_otp, hash_otp
     from src.auth.otp_store import get_otp_store
     from src.auth.email_sender import get_email_sender, render_otp_email, EmailDeliveryError
@@ -631,8 +599,10 @@ class SignupVerifyResponse(BaseModel):
     client_id:   str
     plan:        str
     model_name:  str
-    api_key:     str
-    access_token: str
+    # AUTH-1 #445: в парольном флоу оба None — ни api-key-окна (ключи
+    # переедут в кабинет), ни авто-сессии (пользователь входит паролем).
+    api_key:     Optional[str] = None
+    access_token: Optional[str] = None
     token_type:   str = "bearer"
     warning:      str = "Сохраните api_key — он показан один раз."
 
@@ -752,18 +722,37 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     from src.auth.api_keys import generate_api_key, hash_api_key
     from datetime import datetime as _dt, timezone as _tz
 
-    api_key = generate_api_key()
+    # AUTH-1 #445 — парольный флоу: хеш пароля ждёт в стеше с шага signup.
+    pwd_record = store.find_active(canonical, f"{PURPOSE_SIGNUP}:pwd")
+
+    now_iso = _dt.now(_tz.utc).isoformat()
     storage = ClientStorage(desired_cid)
-    record_ = ClientRecord(
-        client_id=desired_cid,
-        config={},
-        storage_path=storage.path(""),
-        plan=Plan.FREE.value,
-        api_key_hash=hash_api_key(api_key),
-        email=display_email,
-        email_canonical=canonical,
-        email_verified_at=_dt.now(_tz.utc).isoformat(),
-    )
+    if pwd_record is not None:
+        api_key = None    # ключи — в кабинете, отдельный трек (владелец)
+        record_ = ClientRecord(
+            client_id=desired_cid,
+            config={},
+            storage_path=storage.path(""),
+            plan=Plan.FREE.value,
+            api_key_hash=None,
+            password_hash=pwd_record.code_hash,
+            password_set_at=now_iso,
+            email=display_email,
+            email_canonical=canonical,
+            email_verified_at=now_iso,
+        )
+    else:
+        api_key = generate_api_key()
+        record_ = ClientRecord(
+            client_id=desired_cid,
+            config={},
+            storage_path=storage.path(""),
+            plan=Plan.FREE.value,
+            api_key_hash=hash_api_key(api_key),
+            email=display_email,
+            email_canonical=canonical,
+            email_verified_at=now_iso,
+        )
     # Postgres UNIQUE indexes are the actual source of truth for
     # uniqueness — the pre-checks above are best-effort. A concurrent
     # signup with the same email_canonical or client_id will surface
@@ -780,6 +769,8 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     store.mark_used(cid_record.id)
     if display_record:
         store.mark_used(display_record.id)
+    if pwd_record:
+        store.mark_used(pwd_record.id)
 
     # Bump the daily success counter for this /24 subnet.
     try:
@@ -794,8 +785,18 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         event_type=EVT_SIGNUP,
         client_id=desired_cid, actor_email=canonical,
         ip=ip, user_agent=http_req.headers.get("user-agent"),
-        metadata={"plan": Plan.FREE.value, "method": "email_otp"},
+        metadata={"plan": Plan.FREE.value,
+                  "method": "email_password" if pwd_record else "email_otp"},
     )
+
+    if pwd_record is not None:
+        # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
+        return SignupVerifyResponse(
+            client_id=desired_cid,
+            plan=Plan.FREE.value,
+            model_name=get_plan_spec(Plan.FREE).model_display_name,
+            warning="Почта подтверждена — войдите с вашим паролем.",
+        )
 
     token = create_access_token(client_id=desired_cid, roles=["forecast"])
     return SignupVerifyResponse(
@@ -1035,16 +1036,6 @@ class LoginPasswordRequest(BaseModel):
     captcha_token: Optional[str] = None
 
 
-class ConfirmEmailRequest(BaseModel):
-    token: str = Field(..., min_length=1, max_length=256)
-
-
-class ConfirmEmailResponse(BaseModel):
-    status:    str = "email_confirmed"
-    client_id: str
-    email:     str
-
-
 class ResetRequestRequest(BaseModel):
     email: str = Field(..., max_length=254)
     captcha_token: Optional[str] = None
@@ -1061,91 +1052,6 @@ class PasswordChangeRequest(BaseModel):
     # уже доказано JWT.
     current_password: Optional[str] = Field(None, max_length=128)
     new_password:     str = Field(..., min_length=1, max_length=128)
-
-
-@router.post("/auth/confirm", response_model=ConfirmEmailResponse)
-async def auth_confirm_email(req: ConfirmEmailRequest, http_req: Request):
-    """Тратит confirm-ссылку (POST с лендинга — сканеры, префетчащие
-    GET, токен не сжигают) и создаёт аккаунт. JWT НЕ выдаёт: дальше
-    пользователь вводит пароль на странице входа (решение владельца)."""
-    from starlette.concurrency import run_in_threadpool
-
-    from src.auth.link_tokens import verify_and_claim_link_token
-    from src.auth.otp_store import PURPOSE_CONFIRM, get_otp_store
-
-    _assert_otp_verify_rate_ok(http_req)
-    ip = client_ip(http_req) or "0.0.0.0"
-    try:
-        assert_signup_allowed(ip)
-    except RateLimited as e:
-        raise HTTPException(status_code=429, detail=str(e),
-                            headers={"Retry-After": str(e.retry_after_sec)})
-
-    row = await run_in_threadpool(
-        verify_and_claim_link_token, req.token, PURPOSE_CONFIRM)
-    if row is None:
-        raise HTTPException(status_code=401,
-                            detail="Ссылка недействительна или устарела")
-
-    canonical = row.email
-    store = get_otp_store()
-    cid_row = store.find_active(canonical, f"{PURPOSE_CONFIRM}:cid:{row.id}")
-    dsp_row = store.find_active(canonical, f"{PURPOSE_CONFIRM}:display:{row.id}")
-    pwd_row = store.find_active(canonical, f"{PURPOSE_CONFIRM}:pwd:{row.id}")
-    if cid_row is None or pwd_row is None:
-        raise HTTPException(status_code=401,
-                            detail="Ссылка недействительна или устарела")
-
-    desired_cid   = cid_row.code_hash
-    display_email = dsp_row.code_hash if dsp_row else canonical
-
-    registry = get_registry()
-    if registry.get_by_email(canonical) is not None or registry.get(desired_cid) is not None:
-        raise HTTPException(status_code=409,
-                            detail="Email or client_id already in use")
-
-    from datetime import datetime as _dt, timezone as _tz
-
-    from src.clients.registry import ClientAlreadyExists
-
-    now_iso = _dt.now(_tz.utc).isoformat()
-    storage = ClientStorage(desired_cid)
-    record_ = ClientRecord(
-        client_id=desired_cid,
-        config={},
-        storage_path=storage.path(""),
-        plan=Plan.FREE.value,
-        # api_key НЕ генерируем: окна «сохраните ключ» больше нет —
-        # ключи появятся в кабинете отдельным треком (решение владельца).
-        api_key_hash=None,
-        password_hash=pwd_row.code_hash,
-        password_set_at=now_iso,
-        email=display_email,
-        email_canonical=canonical,
-        email_verified_at=now_iso,
-    )
-    try:
-        registry.register(record_)
-    except ClientAlreadyExists:
-        raise HTTPException(status_code=409,
-                            detail="Email or client_id already in use")
-
-    store.mark_used(cid_row.id)
-    store.mark_used(pwd_row.id)
-    if dsp_row:
-        store.mark_used(dsp_row.id)
-
-    try:
-        record_signup_success(ip)
-    except RateLimited:
-        logger.warning("confirm: post-create rate-limit hit for ip=%s", ip)
-
-    record_event(
-        event_type=EVT_SIGNUP, client_id=desired_cid, actor_email=canonical,
-        ip=ip, user_agent=http_req.headers.get("user-agent"),
-        metadata={"plan": Plan.FREE.value, "method": "email_password"},
-    )
-    return ConfirmEmailResponse(client_id=desired_cid, email=display_email)
 
 
 @router.post("/auth/login/password", response_model=LoginVerifyResponse)
@@ -1249,7 +1155,7 @@ async def auth_password_reset_request(req: ResetRequestRequest, http_req: Reques
             issue_link_token, canonical, PURPOSE_RESET, LINK_TTL_MINUTES_DEFAULT)
         url = _frontend_link("/auth/reset", token)
         subject, body, html = render_link_email(
-            purpose="reset", url=url, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
+            url=url, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
         try:
             get_email_sender().send(to=record.email or email,
                                     subject=subject, body=body, html=html)

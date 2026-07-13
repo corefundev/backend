@@ -1,8 +1,9 @@
 """AUTH-1 #445 — классическая парольная аутентификация.
 
-Флоу (решения владельца 2026-07-14): регистрация email/пароль/повтор →
-письмо со ССЫЛКОЙ → POST /auth/confirm (лендинг тратит токен, сканеры
-GET-ом не сжигают) → пользователь входит паролем. Сброс — ссылкой.
+Флоу (решения владельца 2026-07-14): модалка регистрации email/пароль/
+повтор → письмо с 6-значным КОДОМ → модалка №2 вводит код
+(/auth/signup/verify) → пользователь входит паролем. Сброс — ССЫЛКОЙ
+(лендинг тратит токен POST-ом, сканеры GET-ом не сжигают).
 Generic-ошибки без enumeration; ревокация сессий при смене пароля.
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from src.auth.link_tokens import (
     peek_link_token,
     verify_and_claim_link_token,
 )
-from src.auth.otp_store import PURPOSE_CONFIRM, PURPOSE_RESET
+from src.auth.otp_store import PURPOSE_RESET, PURPOSE_SIGNUP
 from src.auth.passwords import (
     hash_password,
     validate_password_policy,
@@ -61,23 +62,23 @@ def link_store(tmp_path, monkeypatch):
 
 
 def test_link_token_roundtrip_single_use(link_store):
-    token = issue_link_token("user@example.com", PURPOSE_CONFIRM)
+    token = issue_link_token("user@example.com", PURPOSE_RESET)
     # peek не тратит (GET-лендинг / сканер)
-    assert peek_link_token(token, PURPOSE_CONFIRM) is not None
-    assert peek_link_token(token, PURPOSE_CONFIRM) is not None
+    assert peek_link_token(token, PURPOSE_RESET) is not None
+    assert peek_link_token(token, PURPOSE_RESET) is not None
     # не тот purpose — недействителен
-    assert verify_and_claim_link_token(token, PURPOSE_RESET) is None
+    assert verify_and_claim_link_token(token, PURPOSE_SIGNUP) is None
     # трата — один раз
-    row = verify_and_claim_link_token(token, PURPOSE_CONFIRM)
+    row = verify_and_claim_link_token(token, PURPOSE_RESET)
     assert row is not None and row.email == "user@example.com"
-    assert verify_and_claim_link_token(token, PURPOSE_CONFIRM) is None
-    assert peek_link_token(token, PURPOSE_CONFIRM) is None
+    assert verify_and_claim_link_token(token, PURPOSE_RESET) is None
+    assert peek_link_token(token, PURPOSE_RESET) is None
 
 
 def test_link_token_garbage_rejected(link_store):
     for bad in ("", "nodot", "1.", ".secret", "999999.aaaa", "x.y", "1..",
                 "1." + "a" * 200):
-        assert verify_and_claim_link_token(bad, PURPOSE_CONFIRM) is None
+        assert verify_and_claim_link_token(bad, PURPOSE_RESET) is None
 
 
 # ── endpoint flow (file registry + file OTP store + captured email) ─────
@@ -133,6 +134,12 @@ def _extract_token(mail_body: str) -> str:
     return unquote(m.group(1))
 
 
+def _extract_code(mail_body: str) -> str:
+    m = re.search(r"\b(\d{6})\b", mail_body)
+    assert m, f"no 6-digit code in mail: {mail_body[:200]}"
+    return m.group(1)
+
+
 def _signup_and_confirm(client, email="ivan@example.com",
                         cid="ivan-shop", pwd=GOOD_PWD) -> str:
     r = client.post("/auth/signup", json={
@@ -140,12 +147,15 @@ def _signup_and_confirm(client, email="ivan@example.com",
         "accepted_terms": True, "password": pwd,
     })
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "confirm_link_sent"
-    token = _extract_token(client.sent_mail[-1]["body"])
-    r2 = client.post("/auth/confirm", json={"token": token})
+    assert r.json()["status"] == "otp_sent"    # модалка №2: код из письма
+    code = _extract_code(client.sent_mail[-1]["body"])
+    r2 = client.post("/auth/signup/verify", json={"email": email, "code": code})
     assert r2.status_code == 200, r2.text
-    assert r2.json() == {"status": "email_confirmed",
-                         "client_id": cid, "email": email}
+    body = r2.json()
+    assert body["client_id"] == cid
+    # парольный флоу: ни api-key-окна, ни авто-сессии — дальше вход паролем
+    assert body["api_key"] is None
+    assert body["access_token"] is None
     return cid
 
 
@@ -160,9 +170,10 @@ def test_signup_password_policy_enforced(app_client):
 def test_full_flow_signup_confirm_login(app_client):
     cid = _signup_and_confirm(app_client)
 
-    # ссылка одноразовая
-    token = _extract_token(app_client.sent_mail[-1]["body"])
-    assert app_client.post("/auth/confirm", json={"token": token}).status_code == 401
+    # код одноразовый
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    assert app_client.post("/auth/signup/verify", json={
+        "email": "ivan@example.com", "code": code}).status_code == 401
 
     # вход: верный пароль
     r = app_client.post("/auth/login/password", json={

@@ -279,24 +279,16 @@ def reset_for_tests() -> None:
 
 # ── OTP message templates ───────────────────────────────────────────────
 
-def render_link_email(*, purpose: str, url: str, ttl_minutes: int) -> tuple[str, str, str]:
-    """AUTH-1 #445 — one-time-link mails (confirm / reset). Same
-    multipart contract as render_otp_email: text and HTML must carry
-    the same information (anti-phishing signal parity)."""
-    if purpose == "confirm":
-        subject = "Подтвердите почту — SKU Forecasting"
-        intro   = ("Вы зарегистрировались в SKU Forecasting. "
-                   "Нажмите кнопку, чтобы подтвердить адрес почты:")
-        button  = "Подтвердить почту"
-        note    = ("Проигнорируйте это письмо, если вы не "
-                   "регистрировались в SKU Forecasting.")
-    else:  # reset
-        subject = "Сброс пароля — SKU Forecasting"
-        intro   = ("Вы запросили сброс пароля. Нажмите кнопку и задайте "
-                   "новый пароль:")
-        button  = "Задать новый пароль"
-        note    = ("Если вы не запрашивали сброс, проигнорируйте письмо — "
-                   "пароль останется прежним.")
+def render_link_email(*, url: str, ttl_minutes: int) -> tuple[str, str, str]:
+    """AUTH-1 #445 — one-time RESET link mail (email confirmation is
+    code-based — render_otp_email). Same multipart contract: text and
+    HTML must carry the same information (anti-phishing parity)."""
+    subject = "Сброс пароля — SKU Forecasting"
+    intro   = ("Вы запросили сброс пароля. Нажмите кнопку и задайте "
+               "новый пароль:")
+    button  = "Задать новый пароль"
+    note    = ("Если вы не запрашивали сброс, проигнорируйте письмо — "
+               "пароль останется прежним.")
 
     text_body = (
         f"{intro}\n\n"

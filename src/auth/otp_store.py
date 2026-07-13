@@ -55,10 +55,10 @@ logger = logging.getLogger(__name__)
 
 PURPOSE_SIGNUP: str = "signup"
 PURPOSE_LOGIN:  str = "login"
-# AUTH-1 #445 — one-time LINK purposes (token = "<id>.<secret>", bcrypt of
+# AUTH-1 #445 — one-time reset LINK (token = "<id>.<secret>", bcrypt of
 # secret in code_hash). Links live longer than 6-digit codes (email travel
-# time), hence the per-call ttl_minutes override on create().
-PURPOSE_CONFIRM: str = "confirm"
+# time), hence the per-call ttl_minutes override on create(). Email
+# CONFIRMATION stays code-based (owner decision) — links are reset-only.
 PURPOSE_RESET:   str = "reset"
 LINK_TTL_MINUTES_DEFAULT: int = 60
 

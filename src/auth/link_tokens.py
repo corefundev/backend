@@ -1,6 +1,6 @@
 """
 src/auth/link_tokens.py — AUTH-1 (#445): one-time e-mail links
-(confirm-registration / reset-password).
+(reset-password; email confirmation is code-based by owner decision).
 
 Token format: "<row_id>.<secret>" where secret = token_urlsafe(32)
 (256 bits). The id prefix addresses the sku_otp_codes row directly (no
