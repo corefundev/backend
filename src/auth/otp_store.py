@@ -55,6 +55,12 @@ logger = logging.getLogger(__name__)
 
 PURPOSE_SIGNUP: str = "signup"
 PURPOSE_LOGIN:  str = "login"
+# AUTH-1 #445 — one-time reset LINK (token = "<id>.<secret>", bcrypt of
+# secret in code_hash). Links live longer than 6-digit codes (email travel
+# time), hence the per-call ttl_minutes override on create(). Email
+# CONFIRMATION stays code-based (owner decision) — links are reset-only.
+PURPOSE_RESET:   str = "reset"
+LINK_TTL_MINUTES_DEFAULT: int = 60
 
 OTP_TTL_MINUTES_DEFAULT: int = 10
 OTP_MAX_ATTEMPTS_DEFAULT: int = 5
@@ -96,8 +102,10 @@ class OtpCode:
 # ── Abstract interface ──────────────────────────────────────────────────
 
 class OtpStore:
-    def create(self, email: str, purpose: str, code_hash: str) -> OtpCode: ...
+    def create(self, email: str, purpose: str, code_hash: str,
+               ttl_minutes: Optional[int] = None) -> OtpCode: ...
     def find_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
+    def find_by_id(self, otp_id: int) -> Optional[OtpCode]: ...
     def claim_active(self, email: str, purpose: str) -> Optional[OtpCode]: ...
     def claim_by_id(self, otp_id: int) -> bool: ...
     def mark_used(self, otp_id: int) -> None: ...
@@ -123,8 +131,10 @@ class PostgresOtpStore(OtpStore):
     def _conn(self):
         return self._psycopg2.connect(self._url)
 
-    def create(self, email: str, purpose: str, code_hash: str) -> OtpCode:
-        expires_at = datetime.now(timezone.utc) + otp_ttl()
+    def create(self, email: str, purpose: str, code_hash: str,
+               ttl_minutes: Optional[int] = None) -> OtpCode:
+        ttl = timedelta(minutes=ttl_minutes) if ttl_minutes else otp_ttl()
+        expires_at = datetime.now(timezone.utc) + ttl
         sql = """
         INSERT INTO sku_otp_codes (email, purpose, code_hash, expires_at)
         VALUES (LOWER(%s), %s, %s, %s)
@@ -151,6 +161,17 @@ class PostgresOtpStore(OtpStore):
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(sql, (email, purpose))
+                row = cur.fetchone()
+        return None if row is None else self._row(dict(row))
+
+    def find_by_id(self, otp_id: int) -> Optional[OtpCode]:
+        """AUTH-1 #445 — direct row lookup for link tokens ("<id>.<secret>"):
+        the id prefix addresses the row, the bcrypt check on code_hash and
+        the claim_by_id() single-use stamp happen at the caller."""
+        sql = "SELECT * FROM sku_otp_codes WHERE id = %s"
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(sql, (otp_id,))
                 row = cur.fetchone()
         return None if row is None else self._row(dict(row))
 
@@ -341,19 +362,21 @@ class LocalFileOtpStore(OtpStore):
     # out the same next_id to two threads (each loads, both increment,
     # last writer wins, IDs collide). Lock is re-entrant.
 
-    def create(self, email: str, purpose: str, code_hash: str) -> OtpCode:
+    def create(self, email: str, purpose: str, code_hash: str,
+               ttl_minutes: Optional[int] = None) -> OtpCode:
         with self._lock:
             data = self._load()
             otp_id = data["next_id"]
             data["next_id"] += 1
             now = datetime.now(timezone.utc)
+            ttl = timedelta(minutes=ttl_minutes) if ttl_minutes else otp_ttl()
             rec = OtpCode(
                 id=otp_id,
                 email=email.lower(),
                 purpose=purpose,
                 code_hash=code_hash,
                 attempts=0,
-                expires_at=(now + otp_ttl()).isoformat(),
+                expires_at=(now + ttl).isoformat(),
                 used_at=None,
                 created_at=now.isoformat(),
             )
@@ -371,6 +394,14 @@ class LocalFileOtpStore(OtpStore):
             ]
             candidates = [c for c in candidates if c.is_active()]
             return max(candidates, key=lambda c: c.created_at) if candidates else None
+
+    def find_by_id(self, otp_id: int) -> Optional[OtpCode]:
+        with self._lock:
+            data = self._load()
+            for r in data["rows"]:
+                if r["id"] == otp_id:
+                    return OtpCode(**r)
+            return None
 
     def mark_used(self, otp_id: int) -> None:
         with self._lock:

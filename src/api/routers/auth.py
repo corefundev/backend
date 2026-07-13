@@ -46,6 +46,7 @@ from src.api._helpers import email_hash as _email_hash
 from src.audit import (
     EVT_LOGIN,
     EVT_OAUTH_CALLBACK,
+    EVT_PASSWORD_CHANGE,
     EVT_OTP_SEND,
     EVT_OTP_VERIFY,
     EVT_SIGNUP,
@@ -285,6 +286,10 @@ class SignupRequest(BaseModel):
     # LEG-2 #428: явное принятие условий — сервер требует и фиксирует факт
     # согласия в аудите (с версиями документов на момент согласия)
     accepted_terms: bool = False
+    # AUTH-1 #445: классическая регистрация. password присутствует →
+    # link-флоу (письмо со ссылкой подтверждения, пароль в стеше);
+    # отсутствует → легаси OTP-флоу (текущий FE; снос — AUTH-4 #448).
+    password: Optional[str] = Field(None, min_length=1, max_length=128)
 
 
 class LoginEmailRequest(BaseModel):
@@ -488,6 +493,14 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         )
     client_id = _validate_client_id_or_400(req.desired_client_id)
 
+    # AUTH-1 #445 — password policy, independent of account existence
+    # (runs for every password-flow request → no enumeration signal).
+    if req.password is not None:
+        from src.auth.passwords import validate_password_policy
+        _reason = validate_password_policy(req.password)
+        if _reason is not None:
+            raise HTTPException(status_code=422, detail=_reason)
+
     # 5. Canonicalize for uniqueness check
     try:
         canonical = canonical_email(email)
@@ -537,7 +550,21 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         logger.info("signup: duplicate client_id=%s", client_id)
         raise HTTPException(status_code=409, detail="Workspace identifier already taken; choose another")
 
-    # 7. OTP + email
+    # 7. AUTH-1 #445 — парольный флоу: пароль хешируется СРАЗУ (плейнтекст
+    # не живёт нигде) и стешится рядом с cid/display; подтверждение почты —
+    # тем же 6-значным кодом (решение владельца: модалка №2 вводит
+    # «одноразовый пароль из письма»; ссылки — только для сброса).
+    if req.password is not None:
+        from starlette.concurrency import run_in_threadpool
+
+        from src.auth.otp_store import PURPOSE_SIGNUP as _PS
+        from src.auth.otp_store import get_otp_store as _gos
+        from src.auth.passwords import hash_password
+
+        pwd_hash = await run_in_threadpool(hash_password, req.password)
+        _gos().create(email=canonical, purpose=f"{_PS}:pwd", code_hash=pwd_hash)
+
+    # 7b. OTP + email (единый для обоих флоу; легаси-часть — снос в AUTH-4)
     from src.auth.otp import generate_otp, hash_otp
     from src.auth.otp_store import get_otp_store
     from src.auth.email_sender import get_email_sender, render_otp_email, EmailDeliveryError
@@ -572,8 +599,10 @@ class SignupVerifyResponse(BaseModel):
     client_id:   str
     plan:        str
     model_name:  str
-    api_key:     str
-    access_token: str
+    # AUTH-1 #445: в парольном флоу оба None — ни api-key-окна (ключи
+    # переедут в кабинет), ни авто-сессии (пользователь входит паролем).
+    api_key:     Optional[str] = None
+    access_token: Optional[str] = None
     token_type:   str = "bearer"
     warning:      str = "Сохраните api_key — он показан один раз."
 
@@ -693,18 +722,37 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     from src.auth.api_keys import generate_api_key, hash_api_key
     from datetime import datetime as _dt, timezone as _tz
 
-    api_key = generate_api_key()
+    # AUTH-1 #445 — парольный флоу: хеш пароля ждёт в стеше с шага signup.
+    pwd_record = store.find_active(canonical, f"{PURPOSE_SIGNUP}:pwd")
+
+    now_iso = _dt.now(_tz.utc).isoformat()
     storage = ClientStorage(desired_cid)
-    record_ = ClientRecord(
-        client_id=desired_cid,
-        config={},
-        storage_path=storage.path(""),
-        plan=Plan.FREE.value,
-        api_key_hash=hash_api_key(api_key),
-        email=display_email,
-        email_canonical=canonical,
-        email_verified_at=_dt.now(_tz.utc).isoformat(),
-    )
+    if pwd_record is not None:
+        api_key = None    # ключи — в кабинете, отдельный трек (владелец)
+        record_ = ClientRecord(
+            client_id=desired_cid,
+            config={},
+            storage_path=storage.path(""),
+            plan=Plan.FREE.value,
+            api_key_hash=None,
+            password_hash=pwd_record.code_hash,
+            password_set_at=now_iso,
+            email=display_email,
+            email_canonical=canonical,
+            email_verified_at=now_iso,
+        )
+    else:
+        api_key = generate_api_key()
+        record_ = ClientRecord(
+            client_id=desired_cid,
+            config={},
+            storage_path=storage.path(""),
+            plan=Plan.FREE.value,
+            api_key_hash=hash_api_key(api_key),
+            email=display_email,
+            email_canonical=canonical,
+            email_verified_at=now_iso,
+        )
     # Postgres UNIQUE indexes are the actual source of truth for
     # uniqueness — the pre-checks above are best-effort. A concurrent
     # signup with the same email_canonical or client_id will surface
@@ -721,6 +769,8 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     store.mark_used(cid_record.id)
     if display_record:
         store.mark_used(display_record.id)
+    if pwd_record:
+        store.mark_used(pwd_record.id)
 
     # Bump the daily success counter for this /24 subnet.
     try:
@@ -735,8 +785,18 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         event_type=EVT_SIGNUP,
         client_id=desired_cid, actor_email=canonical,
         ip=ip, user_agent=http_req.headers.get("user-agent"),
-        metadata={"plan": Plan.FREE.value, "method": "email_otp"},
+        metadata={"plan": Plan.FREE.value,
+                  "method": "email_password" if pwd_record else "email_otp"},
     )
+
+    if pwd_record is not None:
+        # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
+        return SignupVerifyResponse(
+            client_id=desired_cid,
+            plan=Plan.FREE.value,
+            model_name=get_plan_spec(Plan.FREE).model_display_name,
+            warning="Почта подтверждена — войдите с вашим паролем.",
+        )
 
     token = create_access_token(client_id=desired_cid, roles=["forecast"])
     return SignupVerifyResponse(
@@ -941,6 +1001,295 @@ async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
         client_id=client.client_id,
         access_token=token,
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# AUTH-1 #445 — классическая парольная аутентификация
+# ══════════════════════════════════════════════════════════════════
+
+def _frontend_link(path: str, token: str) -> str:
+    """Абсолютная ссылка на FE-лендинг (confirm/reset). Origin — из
+    FRONTEND_OAUTH_RETURN_URL, уже провалидированного против
+    FRONTEND_ORIGINS (_frontend_return_url — open-redirect защита)."""
+    from urllib.parse import quote, urlparse
+    parsed = urlparse(_frontend_return_url())
+    return f"{parsed.scheme}://{parsed.netloc}{path}?token={quote(token)}"
+
+
+def _captcha_after_fails_or_400(canonical: str, req_token: Optional[str]) -> None:
+    """Капча ПОСЛЕ N неудач (решение владельца: N=2) — чистый вход для
+    честных пользователей, стена для перебора. Счётчик — тот же
+    audit-log-окно, что и lockout (общее на пароль и OTP: пути не
+    складываются в два бюджета)."""
+    after = int(os.environ.get("LOGIN_CAPTCHA_AFTER_FAILS", "2"))
+    if after <= 0:
+        _verify_captcha_or_400(req_token)
+        return
+    if recent_failed_logins(canonical, window_minutes=int(
+            os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))) >= after:
+        _verify_captcha_or_400(req_token)
+
+
+class LoginPasswordRequest(BaseModel):
+    email:    str = Field(..., max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
+    captcha_token: Optional[str] = None
+
+
+class ResetRequestRequest(BaseModel):
+    email: str = Field(..., max_length=254)
+    captcha_token: Optional[str] = None
+
+
+class ResetConfirmRequest(BaseModel):
+    token:        str = Field(..., min_length=1, max_length=256)
+    new_password: str = Field(..., min_length=1, max_length=128)
+
+
+class PasswordChangeRequest(BaseModel):
+    # current_password не нужен, когда пароля ещё нет (легаси-форс
+    # AUTH-4 / OAuth-аккаунт задаёт первый пароль) — владение сессией
+    # уже доказано JWT.
+    current_password: Optional[str] = Field(None, max_length=128)
+    new_password:     str = Field(..., min_length=1, max_length=128)
+
+
+@router.post("/auth/login/password", response_model=LoginVerifyResponse)
+def auth_login_password(req: LoginPasswordRequest, http_req: Request):
+    """Вход email+пароль. Sync def → threadpool (#184: bcrypt не в
+    event-loop). Один generic-ответ на все неудачи (нет аккаунта /
+    неверный пароль / OAuth-без-пароля / suspended) + bcrypt-заглушка —
+    ни enumeration, ни timing-oracle."""
+    from src.api.metrics import LOGIN_PASSWORD_COUNT
+    from src.auth.email_normalize import canonical_email as _canon
+    from src.auth.passwords import verify_password
+
+    try:
+        check_login_attempt(client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_sec or 60)})
+
+    email = _validate_email_or_400(req.email)
+    try:
+        canonical = _canon(email)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid email format")
+
+    _captcha_after_fails_or_400(canonical, req.captcha_token)
+    try:
+        _assert_not_locked_out(
+            canonical, http_req,
+            event_type=EVT_LOGIN, event_subtype="locked_out_password",
+            attempt_label="login attempts")
+    except HTTPException:
+        LOGIN_PASSWORD_COUNT.labels(outcome="locked").inc()
+        raise
+
+    # `rec`, не `record` — тест-пин R3-8 ищет ПЕРВОЕ вхождение литерала
+    # create_access_token(client_id=record..., этот эндпоинт стоит выше
+    # oauth_callback в файле и не должен его перехватывать.
+    rec = get_registry().get_by_email(canonical)
+    usable = (rec is not None
+              and rec.email_verified_at is not None
+              and rec.suspended_at is None
+              and rec.deleted_at is None)
+    ok = verify_password(
+        req.password, rec.password_hash if usable and rec else None)
+
+    _ip = client_ip(http_req)
+    _ua = http_req.headers.get("user-agent")
+    if not ok:
+        LOGIN_PASSWORD_COUNT.labels(outcome="fail").inc()
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="failure",
+            actor_email=canonical, client_id=rec.client_id if rec else None,
+            ip=_ip, user_agent=_ua, success=False,
+            metadata={"method": "password"},
+        )
+        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+
+    LOGIN_PASSWORD_COUNT.labels(outcome="ok").inc()
+    record_event(
+        event_type=EVT_LOGIN, event_subtype="success",
+        actor_email=canonical, client_id=rec.client_id,
+        ip=_ip, user_agent=_ua,
+        metadata={"method": "password"},
+    )
+    token = create_access_token(client_id=rec.client_id, roles=["forecast"])
+    return LoginVerifyResponse(client_id=rec.client_id, access_token=token)
+
+
+@router.post("/auth/password/reset-request", response_model=SignupAcceptedResponse)
+async def auth_password_reset_request(req: ResetRequestRequest, http_req: Request):
+    """Всегда 202 (enumeration-guard). Капча ВСЕГДА (email-спам дороже
+    UX-трения на редком флоу). Письмо уходит только существующему
+    verified-аккаунту."""
+    from starlette.concurrency import run_in_threadpool
+
+    from src.api.metrics import PASSWORD_RESET_COUNT
+    from src.auth.email_normalize import canonical_email as _canon
+    from src.auth.email_sender import (
+        EmailDeliveryError, get_email_sender, render_link_email,
+    )
+    from src.auth.link_tokens import issue_link_token
+    from src.auth.otp_store import LINK_TTL_MINUTES_DEFAULT, PURPOSE_RESET
+
+    try:
+        check_login_attempt(client_ip(http_req))
+    except RateLimited as e:
+        raise HTTPException(status_code=429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_sec or 60)})
+    _verify_captcha_or_400(req.captcha_token)
+
+    email = _validate_email_or_400(req.email)
+    try:
+        canonical = _canon(email)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid email format")
+
+    record = get_registry().get_by_email(canonical)
+    if (record is not None and record.email_verified_at is not None
+            and record.suspended_at is None and record.deleted_at is None):
+        token = await run_in_threadpool(
+            issue_link_token, canonical, PURPOSE_RESET, LINK_TTL_MINUTES_DEFAULT)
+        url = _frontend_link("/auth/reset", token)
+        subject, body, html = render_link_email(
+            url=url, ttl_minutes=LINK_TTL_MINUTES_DEFAULT)
+        try:
+            get_email_sender().send(to=record.email or email,
+                                    subject=subject, body=body, html=html)
+        except EmailDeliveryError as e:
+            # 202 всё равно — селективный 503 = enumeration.
+            logger.error("reset email failed for email_hash=%s: %s",
+                         _email_hash(email), e)
+
+    PASSWORD_RESET_COUNT.labels(stage="request").inc()
+    record_event(
+        event_type=EVT_PASSWORD_CHANGE, event_subtype="reset_link_requested",
+        actor_email=canonical,
+        client_id=record.client_id if record else None,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        success=record is not None,
+    )
+    return SignupAcceptedResponse(status="reset_link_sent", email=email,
+                                  expires_in_minutes=LINK_TTL_MINUTES_DEFAULT)
+
+
+class ResetPeekRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=256)
+
+
+@router.post("/auth/password/reset/peek")
+def auth_password_reset_peek(req: ResetPeekRequest, http_req: Request):
+    """Предпроверка reset-ссылки для лендинга: показать форму нового
+    пароля или «ссылка устарела» ДО ввода. НЕ тратит токен (сканеры и
+    предзагрузчики ничего не сжигают; сжигает только POST /reset).
+    POST, а не GET — токен не должен попадать в access-логи query-строкой."""
+    from src.auth.link_tokens import peek_link_token
+    from src.auth.otp_store import PURPOSE_RESET
+
+    _assert_otp_verify_rate_ok(http_req)
+    return {"valid": peek_link_token(req.token, PURPOSE_RESET) is not None}
+
+
+@router.post("/auth/password/reset")
+def auth_password_reset(req: ResetConfirmRequest, http_req: Request):
+    """Тратит reset-ссылку (POST с формы нового пароля) и ставит пароль.
+    Все живые сессии клиента отзываются (revocation watermark)."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from src.api.metrics import PASSWORD_RESET_COUNT
+    from src.auth.jwt_auth import revoke_client_sessions
+    from src.auth.link_tokens import verify_and_claim_link_token
+    from src.auth.otp_store import PURPOSE_RESET
+    from src.auth.passwords import hash_password, validate_password_policy
+
+    _assert_otp_verify_rate_ok(http_req)
+    reason = validate_password_policy(req.new_password)
+    if reason is not None:
+        raise HTTPException(status_code=422, detail=reason)
+
+    row = verify_and_claim_link_token(req.token, PURPOSE_RESET)
+    if row is None:
+        raise HTTPException(status_code=401,
+                            detail="Ссылка недействительна или устарела")
+
+    registry = get_registry()
+    record = registry.get_by_email(row.email)
+    if record is None or record.deleted_at is not None:
+        raise HTTPException(status_code=401,
+                            detail="Ссылка недействительна или устарела")
+
+    # Согласие/аудит: смена учётных данных — must_persist (без следа
+    # операции не бывает), ДО применения.
+    record_event(
+        event_type=EVT_PASSWORD_CHANGE, event_subtype="reset",
+        actor_email=row.email, client_id=record.client_id,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        must_persist=True,
+    )
+    registry.update(
+        record.client_id,
+        password_hash=hash_password(req.new_password),
+        password_set_at=_dt.now(_tz.utc).isoformat(),
+    )
+    revoke_client_sessions(record.client_id)
+    PASSWORD_RESET_COUNT.labels(stage="confirm").inc()
+    return {"status": "password_reset"}
+
+
+@router.post("/auth/password/change")
+def auth_password_change(
+    req: PasswordChangeRequest,
+    http_req: Request,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """Смена пароля из кабинета. Если пароль уже есть — требуется
+    текущий; если нет (легаси-форс AUTH-4 / OAuth задаёт первый) —
+    достаточно живой сессии. Остальные сессии отзываются."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from src.auth.jwt_auth import revoke_client_sessions
+    from src.auth.passwords import (
+        hash_password, validate_password_policy, verify_password,
+    )
+
+    reason = validate_password_policy(req.new_password)
+    if reason is not None:
+        raise HTTPException(status_code=422, detail=reason)
+
+    registry = get_registry()
+    record = registry.get(auth.client_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    if record.password_hash is not None:
+        if not req.current_password or not verify_password(
+                req.current_password, record.password_hash):
+            record_event(
+                event_type=EVT_PASSWORD_CHANGE, event_subtype="failure",
+                client_id=auth.client_id, ip=client_ip(http_req),
+                user_agent=http_req.headers.get("user-agent"), success=False,
+                metadata={"reason": "wrong_current_password"},
+            )
+            raise HTTPException(status_code=401,
+                                detail="Неверный текущий пароль")
+
+    record_event(
+        event_type=EVT_PASSWORD_CHANGE,
+        event_subtype="change" if record.password_hash else "initial_set",
+        client_id=auth.client_id, actor_email=record.email_canonical,
+        ip=client_ip(http_req), user_agent=http_req.headers.get("user-agent"),
+        must_persist=True,
+    )
+    registry.update(
+        auth.client_id,
+        password_hash=hash_password(req.new_password),
+        password_set_at=_dt.now(_tz.utc).isoformat(),
+    )
+    revoke_client_sessions(auth.client_id)
+    return {"status": "password_changed"}
 
 
 @router.post("/auth/logout", status_code=204)

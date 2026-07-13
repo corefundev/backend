@@ -35,3 +35,17 @@ FALLBACK_COUNT = Counter(
     "Fallback (vs primary) model selections in /predict",
     ["client_id"],
 )
+
+# AUTH-1 #445 — password-auth observability (alert on fail bursts =
+# credential stuffing / spraying; captcha-after-2-fails is per-target,
+# the fleet-wide picture lives here).
+LOGIN_PASSWORD_COUNT = Counter(
+    "login_password_total",
+    "Password-login attempts by outcome",
+    ["outcome"],   # ok | fail | locked
+)
+PASSWORD_RESET_COUNT = Counter(
+    "password_reset_total",
+    "Password-reset flow events",
+    ["stage"],     # request | confirm
+)
