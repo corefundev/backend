@@ -1176,6 +1176,23 @@ async def auth_password_reset_request(req: ResetRequestRequest, http_req: Reques
                                   expires_in_minutes=LINK_TTL_MINUTES_DEFAULT)
 
 
+class ResetPeekRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=256)
+
+
+@router.post("/auth/password/reset/peek")
+def auth_password_reset_peek(req: ResetPeekRequest, http_req: Request):
+    """Предпроверка reset-ссылки для лендинга: показать форму нового
+    пароля или «ссылка устарела» ДО ввода. НЕ тратит токен (сканеры и
+    предзагрузчики ничего не сжигают; сжигает только POST /reset).
+    POST, а не GET — токен не должен попадать в access-логи query-строкой."""
+    from src.auth.link_tokens import peek_link_token
+    from src.auth.otp_store import PURPOSE_RESET
+
+    _assert_otp_verify_rate_ok(http_req)
+    return {"valid": peek_link_token(req.token, PURPOSE_RESET) is not None}
+
+
 @router.post("/auth/password/reset")
 def auth_password_reset(req: ResetConfirmRequest, http_req: Request):
     """Тратит reset-ссылку (POST с формы нового пароля) и ставит пароль.

@@ -244,6 +244,26 @@ def test_reset_flow(app_client, monkeypatch):
         "token": token, "new_password": NEW_PWD}).status_code == 401
 
 
+def test_reset_peek_endpoint(app_client, monkeypatch):
+    """Лендинг сброса: peek валидирует, НЕ тратя токен."""
+    _signup_and_confirm(app_client)
+    import src.auth.jwt_auth as jwt_mod
+    monkeypatch.setattr(jwt_mod, "revoke_client_sessions",
+                        lambda cid, **kw: None)
+    app_client.post("/auth/password/reset-request",
+                    json={"email": "ivan@example.com"})
+    token = _extract_token(app_client.sent_mail[-1]["body"])
+    assert app_client.post("/auth/password/reset/peek",
+                           json={"token": token}).json() == {"valid": True}
+    # peek не потратил — reset работает; после reset peek = False
+    assert app_client.post("/auth/password/reset", json={
+        "token": token, "new_password": NEW_PWD}).status_code == 200
+    assert app_client.post("/auth/password/reset/peek",
+                           json={"token": token}).json() == {"valid": False}
+    assert app_client.post("/auth/password/reset/peek",
+                           json={"token": "мусор"}).json() == {"valid": False}
+
+
 def test_legacy_otp_signup_still_works(app_client):
     """Без password — легаси OTP-флоу нетронут (FE переключается в
     AUTH-3; снос — AUTH-4)."""
