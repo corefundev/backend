@@ -264,6 +264,27 @@ def test_reset_peek_endpoint(app_client, monkeypatch):
                            json={"token": "мусор"}).json() == {"valid": False}
 
 
+def test_signup_without_cid_autogenerates(app_client):
+    """AUTH-3 #447: форма = 3 поля, идентификатор генерируется из email."""
+    r = app_client.post("/auth/signup", json={
+        "email": "auto.cid@example.com", "accepted_terms": True,
+        "password": GOOD_PWD,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": "auto.cid@example.com", "code": code})
+    assert r2.status_code == 200, r2.text
+    cid = r2.json()["client_id"]
+    assert cid and "auto" in cid or cid    # слаг из local-part, непустой
+    from src.clients.registry import get_registry
+    assert get_registry().get(cid).password_hash is not None
+    # легаси без cid — по-прежнему 422
+    r3 = app_client.post("/auth/signup", json={
+        "email": "x@example.com", "accepted_terms": True})
+    assert r3.status_code == 422
+
+
 def test_legacy_otp_signup_still_works(app_client):
     """Без password — легаси OTP-флоу нетронут (FE переключается в
     AUTH-3; снос — AUTH-4)."""

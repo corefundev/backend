@@ -281,7 +281,10 @@ _CLIENT_ID_RE = _re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}[a-z0-9]$")
 
 class SignupRequest(BaseModel):
     email: str = Field(..., max_length=254)
-    desired_client_id: str = Field(..., max_length=64)
+    # AUTH-3 #447: в парольном флоу идентификатор НЕ спрашиваем у
+    # пользователя (форма = email/пароль/повтор) — генерируем из email,
+    # как OAuth-путь. Легаси-OTP-флоу по-прежнему требует его явно.
+    desired_client_id: Optional[str] = Field(None, max_length=64)
     captcha_token: Optional[str] = Field(None, description="Cloudflare Turnstile token")
     # LEG-2 #428: явное принятие условий — сервер требует и фиксирует факт
     # согласия в аудите (с версиями документов на момент согласия)
@@ -468,7 +471,8 @@ async def auth_signup(req: SignupRequest, http_req: Request):
             event_type=EVT_SIGNUP, event_subtype="consent_accepted",
             client_id=None, ip=ip,
             user_agent=http_req.headers.get("user-agent"),
-            target_type="signup", target_id=req.desired_client_id[:64],
+            target_type="signup",
+            target_id=(req.desired_client_id or "auto")[:64],
             metadata={"email": req.email[:254],
                       "doc_versions": _doc_versions},
             must_persist=True,
@@ -491,7 +495,14 @@ async def auth_signup(req: SignupRequest, http_req: Request):
             detail="Disposable / temporary email addresses are not accepted. "
                    "Use your real corporate or personal email.",
         )
-    client_id = _validate_client_id_or_400(req.desired_client_id)
+    if req.desired_client_id:
+        client_id = _validate_client_id_or_400(req.desired_client_id)
+    elif req.password is None:
+        # легаси-OTP-флоу без идентификатора не живёт (снос — AUTH-4)
+        raise HTTPException(status_code=422,
+                            detail="desired_client_id is required")
+    else:
+        client_id = None    # сгенерим из email ниже, когда будет registry
 
     # AUTH-1 #445 — password policy, independent of account existence
     # (runs for every password-flow request → no enumeration signal).
@@ -508,6 +519,9 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         raise HTTPException(status_code=422, detail="Invalid email format")
 
     registry = get_registry()
+    if client_id is None:
+        # та же генерация, что у OAuth-пути: слаг из email + уникальность
+        client_id = _generate_unique_client_id(email, registry)
 
     from src.auth.otp_store import otp_ttl, PURPOSE_SIGNUP
     ttl_min = int(otp_ttl().total_seconds() / 60)
