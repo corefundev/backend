@@ -35,8 +35,9 @@ src/pipeline/task_queue.py:230  pre-R9 baseline; triage in R10 — _run_pipeline
 src/pipeline/train.py:314  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :311, +4 #268) (was :315, #231 kill -1 import)
 src/pipeline/train.py:352  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :349, +4 #268) (was :353, #231 kill -1 import)
 src/pipeline/train.py:249  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
+src/pipeline/inference_utils.py:214  QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes
 src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
-src/pipeline/inference_utils.py:341  pre-R9 baseline (was :331, +10 L-A4 #186 doc-comment); triage in R10 — recursive forecast fallback
+src/pipeline/inference_utils.py:370  pre-R9 baseline (was :341, +29 QH-7 #440 event-ramp recompute block); triage in R10 — recursive forecast fallback
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
 src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
@@ -44,6 +45,7 @@ src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstra
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
+src/features/engineering.py:145  QH-7 #440 — event-ramp optional feature step (same warn-and-continue class as weather/holidays below); training completes without the feature
 src/features/engineering.py:121  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +14 #418 per-sku-lags block)
 src/features/engineering.py:129  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +14 #418 per-sku-lags block)
 src/features/engineering.py:137  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block)
@@ -74,9 +76,9 @@ src/api/routers/training.py:327  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:356  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope) (was :352, +4 DP-4b prep-gate msg)
 src/api/routers/training.py:369  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope) (was :365, +4 DP-4b prep-gate msg)
 src/data/anomaly_detection.py:78  pre-R9 baseline; triage in R10 — anomaly detection optional
-src/pipeline/inference_utils.py:426  R11-#59 (was :404, +10 L-A4 #186 doc-comment) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:489  R11-#59 (was :460, +10 L-A4 #186 doc-comment) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply)
-src/pipeline/inference_utils.py:501  QW2-1 #224 — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback) (was :482, +5 #229 choke merge; +2 #307 static apply)
+src/pipeline/inference_utils.py:455  R11-#59 (was :426, +29 QH-7 #440 event-ramp recompute block) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
+src/pipeline/inference_utils.py:518  R11-#59 (was :489, +29 QH-7 #440 event-ramp recompute block) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply)
+src/pipeline/inference_utils.py:530  QW2-1 #224 (was :501, +29 QH-7 #440 event-ramp recompute block) — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback) (was :482, +5 #229 choke merge; +2 #307 static apply)
 
 src/pipeline/reconcile_runs.py:100  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:103  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)

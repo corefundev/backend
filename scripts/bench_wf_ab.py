@@ -114,6 +114,16 @@ ARMS: dict[str, dict] = {
     # Продуктовый HybridForecaster (equivalence-плечо: обязано ≈ повторить
     # route_slowmid_ens — тот же роутинг, но боевым классом)
     "hybrid_prod":       {"model": "hybrid", "statics": "fold_clean", "market": False},
+    # QH-7 #440: event-ramp окна (пред-НГ ramp, мёртвый январь, 23фев/8мар,
+    # 1мая). Именные разгоны вместо generic days_to_holiday (тот прыгает к
+    # ЛЮБОМУ ближайшему празднику и размывает НГ). Две дозы — dose-response:
+    # если full ≈ ny, сигнал несёт только НГ-пара.
+    "event_ramp_ny":   {"model": "mimo",   "statics": "fold_clean", "market": False,
+                        "features_overrides": {
+                            "event_ramp": {"enabled": True, "set": "ny"}}},
+    "event_ramp_full": {"model": "mimo",   "statics": "fold_clean", "market": False,
+                        "features_overrides": {
+                            "event_ramp": {"enabled": True, "set": "full"}}},
     # QW3-1b #316: category target-encoding ЛОКАЛЬНЫМ join-ом (карта
     # sku->категория из BENCH_CATEGORY_PATH; adapt_1c --categories-out).
     # Fold-clean: TE = smoothed mean спроса категории, посчитанный на
