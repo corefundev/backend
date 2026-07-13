@@ -121,10 +121,10 @@ def _ramp_to(dt: pd.Series, month: int, day: int, window: int) -> np.ndarray:
     """Linear ramp toward the next (month, day): 0 outside the window,
     (window−d)/window inside, 1 on the day itself."""
     year = dt.dt.year
-    this_year = pd.to_datetime(
-        {"year": year, "month": month, "day": day})
-    next_year = pd.to_datetime(
-        {"year": year + 1, "month": month, "day": day})
+    this_year = pd.to_datetime(pd.DataFrame(
+        {"year": year, "month": month, "day": day}))
+    next_year = pd.to_datetime(pd.DataFrame(
+        {"year": year + 1, "month": month, "day": day}))
     nxt = this_year.where(this_year >= dt, next_year)
     d = (nxt - dt).dt.days.to_numpy()
     return np.clip((window - d) / window, 0.0, 1.0)
