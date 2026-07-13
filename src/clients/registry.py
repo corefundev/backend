@@ -76,6 +76,14 @@ class ClientRecord:
     # legacy global API_KEY at /auth/token until they re-register.
     api_key_hash: Optional[str] = None
 
+    # ── Password auth (AUTH-1 #445) ──────────────────────────────────
+    # bcrypt hash of the account password. NULL = no password: legacy
+    # email-OTP accounts (forced at next login, AUTH-4) and OAuth
+    # accounts (optional). password_set_at doubles as the session-
+    # revocation watermark (JWT iat < password_set_at → rejected).
+    password_hash: Optional[str] = None
+    password_set_at: Optional[str] = None
+
     # ── Self-service signup (Phase 7) ─────────────────────────────────
     # `email` — what the user typed; shown back to them in UI.
     # `email_canonical` — normalized form, used for UNIQUE de-dup
@@ -188,7 +196,8 @@ CLIENT_UPDATABLE_COLUMNS: frozenset = frozenset({
     "status", "model_version", "horizon", "notes", "suspended_at",
     "deleted_at",
     "plan", "trained_sku_count",
-    "api_key_hash", "email", "email_canonical", "email_verified_at",
+    "api_key_hash", "password_hash", "password_set_at",
+    "email", "email_canonical", "email_verified_at",
     "oauth_provider", "oauth_subject",
 })
 
@@ -232,12 +241,12 @@ class PostgresClientRegistry(ClientRegistry):
         INSERT INTO sku_clients
             (client_id, config, storage_path, created_at, status, horizon,
              plan, notes,
-             api_key_hash,
+             api_key_hash, password_hash, password_set_at,
              email, email_canonical, email_verified_at,
              oauth_provider, oauth_subject)
         VALUES (%s, %s, %s, %s, %s, %s,
                 %s, %s,
-                %s,
+                %s, %s, %s,
                 %s, %s, %s,
                 %s, %s)
         ON CONFLICT (client_id) DO UPDATE
@@ -250,6 +259,8 @@ class PostgresClientRegistry(ClientRegistry):
                 -- Re-running register() for an existing client is a no-op
                 -- on auth fields; for that there's update() / rotate().
                 api_key_hash = COALESCE(EXCLUDED.api_key_hash, sku_clients.api_key_hash),
+                password_hash = COALESCE(EXCLUDED.password_hash, sku_clients.password_hash),
+                password_set_at = COALESCE(EXCLUDED.password_set_at, sku_clients.password_set_at),
                 email = COALESCE(EXCLUDED.email, sku_clients.email),
                 email_canonical = COALESCE(EXCLUDED.email_canonical, sku_clients.email_canonical),
                 email_verified_at = COALESCE(EXCLUDED.email_verified_at, sku_clients.email_verified_at),
@@ -269,6 +280,8 @@ class PostgresClientRegistry(ClientRegistry):
                         record.plan,
                         record.notes,
                         record.api_key_hash,
+                        record.password_hash,
+                        record.password_set_at,
                         record.email,
                         record.email_canonical,
                         record.email_verified_at,
@@ -523,6 +536,10 @@ class PostgresClientRegistry(ClientRegistry):
             plan=row.get("plan") or "free",
             trained_sku_count=row.get("trained_sku_count"),
             api_key_hash=row.get("api_key_hash"),
+            password_hash=row.get("password_hash"),
+            password_set_at=(
+                str(row["password_set_at"]) if row.get("password_set_at") else None
+            ),
             email=row.get("email"),
             email_canonical=row.get("email_canonical"),
             email_verified_at=(

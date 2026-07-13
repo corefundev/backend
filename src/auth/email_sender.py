@@ -279,6 +279,56 @@ def reset_for_tests() -> None:
 
 # ── OTP message templates ───────────────────────────────────────────────
 
+def render_link_email(*, purpose: str, url: str, ttl_minutes: int) -> tuple[str, str, str]:
+    """AUTH-1 #445 — one-time-link mails (confirm / reset). Same
+    multipart contract as render_otp_email: text and HTML must carry
+    the same information (anti-phishing signal parity)."""
+    if purpose == "confirm":
+        subject = "Подтвердите почту — SKU Forecasting"
+        intro   = ("Вы зарегистрировались в SKU Forecasting. "
+                   "Нажмите кнопку, чтобы подтвердить адрес почты:")
+        button  = "Подтвердить почту"
+        note    = ("Проигнорируйте это письмо, если вы не "
+                   "регистрировались в SKU Forecasting.")
+    else:  # reset
+        subject = "Сброс пароля — SKU Forecasting"
+        intro   = ("Вы запросили сброс пароля. Нажмите кнопку и задайте "
+                   "новый пароль:")
+        button  = "Задать новый пароль"
+        note    = ("Если вы не запрашивали сброс, проигнорируйте письмо — "
+                   "пароль останется прежним.")
+
+    text_body = (
+        f"{intro}\n\n"
+        f"{url}\n\n"
+        f"Ссылка действительна {ttl_minutes} минут и работает один раз.\n\n"
+        f"{note}\n\n"
+        f"С уважением,\nКоманда SKU Forecasting"
+    )
+    html_body = f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+  </head>
+  <body style="margin:0;padding:32px 16px;background:#f6f7f9;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:#1b2436;">
+    <div style="max-width:440px;margin:0 auto;background:#ffffff;border:1px solid #e4e8ef;border-radius:8px;padding:32px;">
+      <div style="font-weight:700;font-size:15px;color:#2463eb;margin-bottom:20px;">SKU Forecasting</div>
+      <p style="font-size:14px;line-height:1.5;margin:0 0 20px;">{intro}</p>
+      <p style="margin:0 0 20px;">
+        <a href="{url}" style="display:inline-block;background:#2463eb;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">{button}</a>
+      </p>
+      <p style="font-size:12px;color:#5d6779;line-height:1.5;margin:0 0 8px;">Или скопируйте ссылку в браузер:<br>
+        <a href="{url}" style="color:#2463eb;word-break:break-all;">{url}</a></p>
+      <p style="font-size:12px;color:#5d6779;margin:16px 0 0;">Ссылка действительна {ttl_minutes} минут и работает один раз.</p>
+      <hr style="border:none;border-top:1px solid #e4e8ef;margin:20px 0;">
+      <p style="font-size:12px;color:#98a1b0;margin:0;">{note}</p>
+    </div>
+  </body>
+</html>"""
+    return subject, text_body, html_body
+
+
 def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str, str, str]:
     """
     Return (subject, text_body, html_body).
