@@ -142,6 +142,11 @@ ARMS: dict[str, dict] = {
     # пол. Смысл плеча: измерить, НАСКОЛЬКО движок бьёт наивку на том же
     # датасете/метрике (M5-литература: хороший ML ≈ 10-25% MASE над snaive).
     "snaive":        {"model": "snaive",   "statics": "fold_clean", "market": False},
+    # #460 прогон 2: US-праздники для американских данных (M5) — снимает
+    # RU-календарный гандикап базы; сравнивать с base на том же датасете.
+    "holidays_us":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "holidays": {"enabled": True, "country": "US"}}},
     # QH-9 #442: per-step калибровка горизонта (WMAPE растёт 0.33@1д →
     # ~0.50@13-14д; band-калибровка #422 шаги не различает). Факторы =
     # clip(Σфакт_h/Σпрогноз_h) на внутреннем хвосте ТОГО ЖЕ probe, по
@@ -598,6 +603,8 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--data-path", default=os.environ.get("BENCH_DATA_PATH"))
     parser.add_argument("--category-path",
                         default=os.environ.get("BENCH_CATEGORY_PATH"))
+    parser.add_argument("--horizon", type=int, default=None,
+                        help="переопределить model.horizon (напр. 28 — #460 прогон 3)")
     args = parser.parse_args(argv)
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
@@ -621,6 +628,8 @@ def main(argv: Optional[list] = None) -> int:
         args.client_id, get_registry())
     # Харнесс-константы: см. докстринг модуля.
     config.setdefault("hpo", {})["enabled"] = False
+    if args.horizon:
+        config["model"]["horizon"] = int(args.horizon)
 
     raw_df = load_data(args.data_path, config)
     cat_map = None
