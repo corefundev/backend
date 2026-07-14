@@ -1,6 +1,6 @@
 """
 ARCH-2 (#206) — the two cross-cutting OTP-verify guards, previously
-VERBATIM-DUPLICATED between /auth/signup/verify and /auth/login/verify, are now
+VERBATIM-DUPLICATED between /auth/signup/verify and the login path, are now
 single-source shared helpers:
 
   _assert_otp_verify_rate_ok(http_req)          — R4-4 per-IP (/24) OTP cap
@@ -134,9 +134,16 @@ def test_lockout_detail_messages_match_both_endpoints(monkeypatch):
 # ── structural: handlers delegate, no more inline duplication ─────────────────
 
 def test_handlers_delegate_to_shared_guards():
-    for fn in (auth.auth_signup_verify, auth.auth_login_verify):
+    # AUTH-4 #448: OTP-вход снесён — второй потребитель хелпера теперь
+    # парольный вход (тот же lockout-инвариант, та же дедупликация).
+    # per-fn rate-guard: у verify — общий OTP-cap, у пароля — R4-3 bucket
+    expected_rate_guard = {
+        "auth_signup_verify": "_assert_otp_verify_rate_ok(http_req)",
+        "auth_login_password": "check_login_attempt(",
+    }
+    for fn in (auth.auth_signup_verify, auth.auth_login_password):
         src = inspect.getsource(fn)
-        assert "_assert_otp_verify_rate_ok(http_req)" in src, f"{fn.__name__} must call the rate guard"
+        assert expected_rate_guard[fn.__name__] in src, f"{fn.__name__} must call the rate guard"
         assert "_assert_not_locked_out(" in src, f"{fn.__name__} must call the lockout guard"
         # the inline copies are gone — the raw call now lives ONLY in the helper
         assert "check_otp_verify_attempt(client_ip(" not in src, (

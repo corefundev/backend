@@ -279,18 +279,16 @@ def test_signup_without_cid_autogenerates(app_client):
     assert cid and "auto" in cid or cid    # слаг из local-part, непустой
     from src.clients.registry import get_registry
     assert get_registry().get(cid).password_hash is not None
-    # легаси без cid — по-прежнему 422
+    # без пароля — 422 (беспарольного флоу больше нет)
     r3 = app_client.post("/auth/signup", json={
         "email": "x@example.com", "accepted_terms": True})
     assert r3.status_code == 422
 
 
-def test_legacy_otp_signup_still_works(app_client):
-    """Без password — легаси OTP-флоу нетронут (FE переключается в
-    AUTH-3; снос — AUTH-4)."""
+def test_signup_without_password_rejected(app_client):
+    """AUTH-4 #448: беспарольная регистрация снесена — 422."""
     r = app_client.post("/auth/signup", json={
         "email": "old@example.com", "desired_client_id": "old-shop",
         "accepted_terms": True,
     })
-    assert r.status_code == 200
-    assert r.json()["status"] == "otp_sent"
+    assert r.status_code == 422

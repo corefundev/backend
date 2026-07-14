@@ -48,6 +48,7 @@ def harness(monkeypatch):
 def test_missing_consent_rejected_and_not_logged(harness):
     client, captured = harness
     r = client.post("/auth/signup", json={
+        "password": "unit-test-password-12",
         "email": "user@example.com", "desired_client_id": "acme"})
     assert r.status_code == 422
     assert not [e for e in captured
@@ -58,6 +59,7 @@ def test_consent_logged_with_doc_versions_before_email_checks(harness):
     client, captured = harness
     # email заведомо кривой — но согласие фиксируется ДО email-валидации
     r = client.post("/auth/signup", json={
+        "password": "unit-test-password-12",
         "email": "not-an-email", "desired_client_id": "acme",
         "accepted_terms": True})
     assert r.status_code != 500
@@ -80,6 +82,7 @@ def test_consent_audit_failure_refuses_signup(harness, monkeypatch):
         raise RuntimeError("db down")
     monkeypatch.setattr(auth_mod, "record_event", boom)
     r = client.post("/auth/signup", json={
+        "password": "unit-test-password-12",
         "email": "user@example.com", "desired_client_id": "acme",
         "accepted_terms": True})
     assert r.status_code == 503
