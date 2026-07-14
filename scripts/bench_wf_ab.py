@@ -133,6 +133,17 @@ ARMS: dict[str, dict] = {
     "event_ramp_full": {"model": "mimo",   "statics": "fold_clean", "market": False,
                         "features_overrides": {
                             "event_ramp": {"enabled": True, "set": "full"}}},
+    # QH-9 #442: per-step калибровка горизонта (WMAPE растёт 0.33@1д →
+    # ~0.50@13-14д; band-калибровка #422 шаги не различает). Факторы =
+    # clip(Σфакт_h/Σпрогноз_h) на внутреннем хвосте ТОГО ЖЕ probe, по
+    # band-скорректированному прогнозу (step правит остаток — уровень не
+    # считается дважды). Прод-путь MIMOForecaster (model.step_calibration).
+    # Пара плеч: поверх прод-band (ship-кандидат) и solo (изолирует сигнал).
+    "step_cal":      {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "step_calibration": {"clip": (0.8, 1.25)}},
+    "step_cal_solo": {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "step_calibration": {"clip": (0.8, 1.25)},
+                      "band_cal_off": True},
     # QW3-1b #316: category target-encoding ЛОКАЛЬНЫМ join-ом (карта
     # sku->категория из BENCH_CATEGORY_PATH; adapt_1c --categories-out).
     # Fold-clean: TE = smoothed mean спроса категории, посчитанный на
@@ -466,6 +477,14 @@ def run_arm(arm_name: str, base_df, config: dict,
             # #407: фиксированные HPO-пробы — ПОСЛЕ type/objective, чтобы
             # override мог менять и их при необходимости
             arm_config["model"].update(spec.get("model_overrides", {}))
+            # QH-9 #442: прод-путь step-калибровки + опциональный выключатель
+            # band'а (solo-плечо изолирует сигнал шага)
+            _sc = spec.get("step_calibration")
+            if _sc:
+                arm_config["model"]["step_calibration"] = {
+                    "enabled": True, "clip": list(_sc["clip"])}
+            if spec.get("band_cal_off"):
+                arm_config["model"]["band_calibration"] = {"enabled": False}
             _bc = spec.get("band_calibration")
             _br = spec.get("band_route")
             if _br:

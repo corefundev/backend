@@ -147,11 +147,16 @@ class MIMOForecaster:
             f"(objective={params['objective']}, per_sku_shift={groups is not None})"
         )
 
-        # QH-5 #422: per-band калибровка (fold-clean probe). Только при
-        # groups (нужны границы SKU); best-effort — сбой не роняет фит.
-        bc_cfg = (self.config.get("model") or {}).get("band_calibration") or {}
-        if bc_cfg.get("enabled") and groups is not None:
-            self._fit_band_calibration(X, y, groups, sample_weight, target_censor)
+        # QH-5 #422 band- / QH-9 #442 step-калибровка (общий fold-clean
+        # probe — один внутренний фит на обе). Только при groups (нужны
+        # границы SKU); best-effort — сбой не роняет фит.
+        mc = self.config.get("model") or {}
+        bc_cfg = mc.get("band_calibration") or {}
+        sc_cfg = mc.get("step_calibration") or {}
+        if ((bc_cfg.get("enabled") or sc_cfg.get("enabled"))
+                and groups is not None):
+            self._fit_probe_calibrations(X, y, groups, sample_weight,
+                                         target_censor)
 
         return self
 
@@ -203,16 +208,23 @@ class MIMOForecaster:
     # отдельный замер по cost-метрике). Ensemble-члены — калибровка
     # ЗАПРЕЩЕНА до отдельного замера (R14: платная метрика).
 
-    def _fit_band_calibration(self, X, y, groups, sample_weight,
-                              target_censor) -> None:
+    def _fit_probe_calibrations(self, X, y, groups, sample_weight,
+                                target_censor) -> None:
         """Fold-clean оценка факторов (алгоритм = плечо band_cal стенда):
         probe-фит на «голове» (без последних H строк каждого SKU), band'ы
         по тершилям среднего спроса головы, фактор = clip(Σфакт/Σпрогноз)
-        по band'у на внутреннем хвосте. Best-effort: любой сбой — модель
-        остаётся без факторов (=1.0), обучение не падает."""
+        по band'у на внутреннем хвосте. QH-9 #442: тот же probe даёт и
+        per-step факторы clip(Σфакт_h/Σпрогноз_h) — считаются по
+        band-скорректированному прогнозу (step правит остаток, уровень
+        не считается дважды). Best-effort: любой сбой — модель остаётся
+        без факторов (=1.0), обучение не падает."""
         try:
             import copy as _copy
-            bc = (self.config.get("model") or {}).get("band_calibration") or {}
+            mc = self.config.get("model") or {}
+            bc = mc.get("band_calibration") or {}
+            sc = mc.get("step_calibration") or {}
+            do_band = bool(bc.get("enabled"))
+            do_step = bool(sc.get("enabled"))
             lo, hi = bc.get("clip", [0.8, 1.25])
             g = pd.Series(groups).reset_index(drop=True)
             Xr = X.reset_index(drop=True)
@@ -229,6 +241,7 @@ class MIMOForecaster:
 
             cfg = _copy.deepcopy(self.config)
             cfg["model"]["band_calibration"] = {"enabled": False}
+            cfg["model"]["step_calibration"] = {"enabled": False}
             probe = MIMOForecaster(cfg)
             probe.fit(Xr[head], yr[head], groups=g[head],
                       sample_weight=None if sw is None else sw[head].to_numpy(),
@@ -245,6 +258,7 @@ class MIMOForecaster:
             tail_groups = g[tail].groupby(g[tail]).groups
             sums_p = {0: 0.0, 1: 0.0, 2: 0.0}
             sums_a = {0: 0.0, 1: 0.0, 2: 0.0}
+            probe_rows = []       # (band, preds[:k], actual[:k]) для step
             for sku in eligible:
                 try:
                     raw = probe.predict(Xr.loc[[head_groups[sku][-1]]])
@@ -258,13 +272,34 @@ class MIMOForecaster:
                 b = band_by_sku.get(str(sku), 1)
                 sums_p[b] += float(preds[:k].sum())
                 sums_a[b] += float(actual[:k].sum())
+                if do_step:
+                    probe_rows.append((b, preds[:k], actual[:k]))
             factors = {b: float(np.clip(sums_a[b] / sums_p[b], lo, hi))
                        for b in sums_p if sums_p[b] > 0}
-            self.band_cal_ = {"factors": factors, "band_of_sku": band_by_sku,
-                              "clip": [float(lo), float(hi)]}
-            logger.info(f"Band calibration fitted: factors={factors}")
+            if do_band:
+                self.band_cal_ = {"factors": factors,
+                                  "band_of_sku": band_by_sku,
+                                  "clip": [float(lo), float(hi)]}
+                logger.info(f"Band calibration fitted: factors={factors}")
+            if do_step:
+                slo, shi = sc.get("clip", [0.8, 1.25])
+                band_f = factors if do_band else {}
+                sp = np.zeros(self.horizon)
+                sa = np.zeros(self.horizon)
+                for b, p, a in probe_rows:
+                    f = band_f.get(b, 1.0)
+                    sp[: len(p)] += p * f
+                    sa[: len(a)] += a
+                step_factors = [
+                    float(np.clip(sa[h] / sp[h], slo, shi)) if sp[h] > 0
+                    else 1.0
+                    for h in range(self.horizon)
+                ]
+                self.step_cal_ = {"factors": step_factors,
+                                  "clip": [float(slo), float(shi)]}
+                logger.info(f"Step calibration fitted: factors={step_factors}")
         except Exception as e:    # noqa: BLE001 — залогировано, не проглочено
-            logger.warning(f"Band calibration failed (model stays uncalibrated): {e}")
+            logger.warning(f"Probe calibration failed (model stays uncalibrated): {e}")
 
     def _band_factor_vec(self, X: pd.DataFrame) -> np.ndarray:
         """Per-row фактор band'а SKU; 1.0 для legacy-моделей (нет атрибута),
@@ -278,6 +313,14 @@ class MIMOForecaster:
         bands = X[sku_col].astype(str).map(bc["band_of_sku"])
         return bands.map(bc["factors"]).fillna(1.0).to_numpy(dtype=float)
 
+    def _step_factor_vec(self) -> np.ndarray:
+        """QH-9 #442: per-step факторы горизонта; ones для legacy-моделей
+        (нет атрибута) и выключенной калибровки — serve-parity с probe."""
+        sc = getattr(self, "step_cal_", None)
+        if not sc or not sc.get("factors"):
+            return np.ones(self.horizon)
+        return np.asarray(sc["factors"], dtype=float)
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
         Predict all H steps for each row in X.
@@ -289,8 +332,10 @@ class MIMOForecaster:
             [np.clip(m.predict(X[self.feature_cols]), 0, None) for m in self.models_],
             axis=1,
         )
-        # QH-5 #422: точечный прогноз × фактор band'а (квантили не трогаем)
+        # QH-5 #422: точечный прогноз × фактор band'а (квантили не трогаем);
+        # QH-9 #442: × фактор шага горизонта (default OFF до замера)
         preds = preds * self._band_factor_vec(X)[:, None]
+        preds = preds * self._step_factor_vec()[None, :]
         return preds  # shape (N, H)
 
     def predict_next(self, X_last: pd.DataFrame) -> np.ndarray:
