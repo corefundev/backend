@@ -138,6 +138,10 @@ ARMS: dict[str, dict] = {
     # #384. Вместе с base и hybrid_prod образуют 2×2 ship/pre-ship панель.
     "mimo_uncal":    {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "band_cal_off": True},
+    # #460 M5-калибровка: seasonal-naive (lag-7 паттерн недели) — эталонный
+    # пол. Смысл плеча: измерить, НАСКОЛЬКО движок бьёт наивку на том же
+    # датасете/метрике (M5-литература: хороший ML ≈ 10-25% MASE над snaive).
+    "snaive":        {"model": "snaive",   "statics": "fold_clean", "market": False},
     # QH-9 #442: per-step калибровка горизонта (WMAPE растёт 0.33@1д →
     # ~0.50@13-14д; band-калибровка #422 шаги не различает). Факторы =
     # clip(Σфакт_h/Σпрогноз_h) на внутреннем хвосте ТОГО ЖЕ probe, по
@@ -266,6 +270,45 @@ class _BandRoutedModel:
             band = int(v) if v == v else None    # NaN-safe
         target = self._ens if band in self._route else self._mimo
         return np.asarray(target.predict(X), dtype=float)
+
+
+class _SeasonalNaive:
+    """#460: сезонная наивка — прогноз t+h = значение того же дня недели
+    из последних 7 наблюдений трейна. Никакого обучения: это измеренный
+    ПОЛ, относительно которого калибруется движок (MASE-язык статей)."""
+
+    is_mimo = True    # walk_forward: direct multi-step режим
+
+    def __init__(self, config: dict):
+        self._h = int(config["model"]["horizon"])
+        self._sku_col = config["data"]["sku_col"]
+
+    def fit(self, X, y, groups=None, sample_weight=None, target_censor=None):
+        import numpy as np
+        import pandas as pd
+        g = pd.Series(groups).reset_index(drop=True)
+        yr = pd.Series(y).reset_index(drop=True)
+        self._last7 = {}
+        for sku, idx in g.groupby(g).groups.items():
+            vals = yr.loc[idx].to_numpy(dtype=float)
+            if len(vals) >= 7:
+                self._last7[str(sku)] = vals[-7:]
+            elif len(vals) > 0:
+                self._last7[str(sku)] = np.resize(vals, 7)
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        out = []
+        for sku in X[self._sku_col].astype(str):
+            last7 = self._last7.get(sku)
+            if last7 is None:
+                out.append(np.zeros(self._h))
+                continue
+            # t+h — тот же день недели, что last7[(h-1) % 7] (h=7 → последний
+            # день трейна, h=1 → 6 дней до него).
+            out.append(np.array([last7[(h - 1) % 7] for h in range(1, self._h + 1)]))
+        return np.stack(out)
 
 
 class _BandCalibratedMIMO:
@@ -468,7 +511,9 @@ def run_arm(arm_name: str, base_df, config: dict,
 
     if model_factory is None:
         arm_config = {**config, "model": {**config["model"]}}
-        if spec["model"] == "hybrid":
+        if spec["model"] == "snaive":
+            model_factory = lambda: _SeasonalNaive(arm_config)      # noqa: E731
+        elif spec["model"] == "hybrid":
             arm_config["model"]["objective"] = "hybrid"
             from src.models.hybrid import HybridForecaster
             model_factory = lambda: HybridForecaster(arm_config)    # noqa: E731
