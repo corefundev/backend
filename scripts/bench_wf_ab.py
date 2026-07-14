@@ -114,6 +114,15 @@ ARMS: dict[str, dict] = {
     # Продуктовый HybridForecaster (equivalence-плечо: обязано ≈ повторить
     # route_slowmid_ens — тот же роутинг, но боевым классом)
     "hybrid_prod":       {"model": "hybrid", "statics": "fold_clean", "market": False},
+    # QH-8 #441: value-weighted обучение. Метрика WMAPE_g взвешена
+    # объёмом, лосс — нет: модель равно старается на копеечных и тяжёлых
+    # строках. Вес ∝ |y| (полное выравнивание) и ∝ sqrt|y| (полдозы) —
+    # dose-response. Нормировка к среднему весу 1, +1e-3 — нулевые строки
+    # не выпадают из обучения совсем.
+    "vw_abs":        {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "value_weight": "abs"},
+    "vw_sqrt":       {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "value_weight": "sqrt"},
     # QH-7 #440: event-ramp окна (пред-НГ ramp, мёртвый январь, 23фев/8мар,
     # 1мая). Именные разгоны вместо generic days_to_holiday (тот прыгает к
     # ЛЮБОМУ ближайшему празднику и размывает НГ). Две дозы — dose-response:
@@ -425,6 +434,21 @@ def run_arm(arm_name: str, base_df, config: dict,
         sample_weight_fn = (
             lambda tr: recency_weights(tr, date_col, half_life_days=_rd_hl)
         )
+
+    # QH-8 #441: value-веса — из ТАРГЕТА трейн-фолда (прошлое, лика нет)
+    _vw = spec.get("value_weight")
+    if _vw:
+        import numpy as _np
+
+        def _vw_fn(tr, _mode=_vw):
+            import pandas as _pd
+            y = _np.abs(_pd.to_numeric(tr[target_col], errors="coerce")
+                        .fillna(0.0).to_numpy())
+            w = y if _mode == "abs" else _np.sqrt(y)
+            w = w + 1e-3
+            return w * (len(w) / w.sum())
+
+        sample_weight_fn = _vw_fn
 
     if model_factory is None:
         arm_config = {**config, "model": {**config["model"]}}
