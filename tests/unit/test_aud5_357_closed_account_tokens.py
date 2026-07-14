@@ -171,7 +171,7 @@ def _handler_block(signature: str) -> str:
 
 
 @pytest.mark.parametrize("signature", [
-    "async def auth_login_verify",
+    "def auth_login_password",    # AUTH-4 #448: OTP-вход снесён — гейт у пароля
     "async def oauth_callback",
 ])
 def test_issuance_handlers_gate_account_state(signature):

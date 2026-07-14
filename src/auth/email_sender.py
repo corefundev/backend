@@ -331,20 +331,15 @@ def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str,
     The two MUST convey the same information — Gmail/mail.ru penalise
     HTML/text mismatch as a phishing signal.
     """
-    if purpose == "signup":
-        subject = "Подтверждение регистрации в SKU Forecasting"
-        intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
-        note    = (
-            "Проигнорируйте это письмо, если вы не пытались "
-            "зарегистрироваться в SKU Forecasting."
-        )
-    else:  # login
-        subject = "Код для входа в SKU Forecasting"
-        intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
-        note    = (
-            "Если вы не запрашивали вход, проигнорируйте письмо и "
-            "смените пароль почтового ящика — возможно, ваш адрес знает кто-то ещё."
-        )
+    # AUTH-4 #448: код шлётся только на подтверждение регистрации —
+    # OTP-вход снесён (вход = пароль; сброс = ссылка).
+    assert purpose == "signup", f"unexpected OTP purpose: {purpose}"
+    subject = "Подтверждение регистрации в SKU Forecasting"
+    intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
+    note    = (
+        "Проигнорируйте это письмо, если вы не пытались "
+        "зарегистрироваться в SKU Forecasting."
+    )
 
     text_body = (
         f"{intro}\n\n"

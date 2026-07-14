@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────
 
 PURPOSE_SIGNUP: str = "signup"
-PURPOSE_LOGIN:  str = "login"
 # AUTH-1 #445 — one-time reset LINK (token = "<id>.<secret>", bcrypt of
 # secret in code_hash). Links live longer than 6-digit codes (email travel
 # time), hence the per-call ttl_minutes override on create(). Email

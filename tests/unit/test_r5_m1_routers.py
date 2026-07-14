@@ -36,7 +36,9 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 111  # 105 после LEG-3/#431; +5 AUTH-1 #445; +1 AUTH-2 #446 /auth/refresh:
+_EXPECTED_ROUTE_COUNT = 109  # 111 (после AUTH-1/2) −2 AUTH-4 #448:
+# снесён OTP-вход (/auth/login, /auth/login/verify) — вход только паролем,
+# подтверждение регистрации кодом, сброс ссылкой.
 # /auth/login/password, /auth/password/reset-request, /auth/password/reset(+peek),
 # /auth/password/change. Подтверждение почты — КОДОМ через существующий
 # /auth/signup/verify (решение владельца: ссылки только для сброса).
@@ -168,8 +170,6 @@ def test_auth_domain_lives_in_router():
         ('post', '/auth/token'),
         ('post', '/auth/signup'),
         ('post', '/auth/signup/verify'),
-        ('post', '/auth/login'),
-        ('post', '/auth/login/verify'),
         ('post', '/auth/logout'),
         ('get',  '/auth/oauth/providers'),
         ('get',  '/auth/oauth/{provider}/start'),
@@ -190,7 +190,7 @@ def test_auth_domain_lives_in_router():
     main_text = _MAIN.read_text()
     for path in (
         "/auth/token", "/auth/signup", "/auth/signup/verify",
-        "/auth/login", "/auth/login/verify", "/auth/logout",
+        "/auth/logout",
         "/auth/oauth/providers",
     ):
         for method in ('get', 'post'):

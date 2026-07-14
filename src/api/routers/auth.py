@@ -47,7 +47,6 @@ from src.audit import (
     EVT_LOGIN,
     EVT_OAUTH_CALLBACK,
     EVT_PASSWORD_CHANGE,
-    EVT_OTP_SEND,
     EVT_OTP_VERIFY,
     EVT_SIGNUP,
     recent_failed_logins,
@@ -289,15 +288,9 @@ class SignupRequest(BaseModel):
     # LEG-2 #428: явное принятие условий — сервер требует и фиксирует факт
     # согласия в аудите (с версиями документов на момент согласия)
     accepted_terms: bool = False
-    # AUTH-1 #445: классическая регистрация. password присутствует →
-    # link-флоу (письмо со ссылкой подтверждения, пароль в стеше);
-    # отсутствует → легаси OTP-флоу (текущий FE; снос — AUTH-4 #448).
-    password: Optional[str] = Field(None, min_length=1, max_length=128)
-
-
-class LoginEmailRequest(BaseModel):
-    email: str = Field(..., max_length=254)
-    captcha_token: Optional[str] = None
+    # AUTH-4 #448: пароль обязателен — беспарольная регистрация снесена
+    # вместе с OTP-входом (единственный флоу: 3 поля + код подтверждения).
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class VerifyOtpRequest(BaseModel):
@@ -497,20 +490,15 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         )
     if req.desired_client_id:
         client_id = _validate_client_id_or_400(req.desired_client_id)
-    elif req.password is None:
-        # легаси-OTP-флоу без идентификатора не живёт (снос — AUTH-4)
-        raise HTTPException(status_code=422,
-                            detail="desired_client_id is required")
     else:
         client_id = None    # сгенерим из email ниже, когда будет registry
 
     # AUTH-1 #445 — password policy, independent of account existence
     # (runs for every password-flow request → no enumeration signal).
-    if req.password is not None:
-        from src.auth.passwords import validate_password_policy
-        _reason = validate_password_policy(req.password)
-        if _reason is not None:
-            raise HTTPException(status_code=422, detail=_reason)
+    from src.auth.passwords import validate_password_policy
+    _reason = validate_password_policy(req.password)
+    if _reason is not None:
+        raise HTTPException(status_code=422, detail=_reason)
 
     # 5. Canonicalize for uniqueness check
     try:
@@ -564,21 +552,19 @@ async def auth_signup(req: SignupRequest, http_req: Request):
         logger.info("signup: duplicate client_id=%s", client_id)
         raise HTTPException(status_code=409, detail="Workspace identifier already taken; choose another")
 
-    # 7. AUTH-1 #445 — парольный флоу: пароль хешируется СРАЗУ (плейнтекст
-    # не живёт нигде) и стешится рядом с cid/display; подтверждение почты —
-    # тем же 6-значным кодом (решение владельца: модалка №2 вводит
-    # «одноразовый пароль из письма»; ссылки — только для сброса).
-    if req.password is not None:
-        from starlette.concurrency import run_in_threadpool
+    # 7. AUTH-1 #445 — пароль хешируется СРАЗУ (плейнтекст не живёт нигде)
+    # и стешится рядом с cid/display; подтверждение почты — 6-значным
+    # кодом («одноразовый пароль из письма»; ссылки — только для сброса).
+    from starlette.concurrency import run_in_threadpool
 
-        from src.auth.otp_store import PURPOSE_SIGNUP as _PS
-        from src.auth.otp_store import get_otp_store as _gos
-        from src.auth.passwords import hash_password
+    from src.auth.otp_store import PURPOSE_SIGNUP as _PS
+    from src.auth.otp_store import get_otp_store as _gos
+    from src.auth.passwords import hash_password
 
-        pwd_hash = await run_in_threadpool(hash_password, req.password)
-        _gos().create(email=canonical, purpose=f"{_PS}:pwd", code_hash=pwd_hash)
+    pwd_hash = await run_in_threadpool(hash_password, req.password)
+    _gos().create(email=canonical, purpose=f"{_PS}:pwd", code_hash=pwd_hash)
 
-    # 7b. OTP + email (единый для обоих флоу; легаси-часть — снос в AUTH-4)
+    # 7b. код подтверждения + письмо
     from src.auth.otp import generate_otp, hash_otp
     from src.auth.otp_store import get_otp_store
     from src.auth.email_sender import get_email_sender, render_otp_email, EmailDeliveryError
@@ -733,40 +719,29 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     if registry.get_by_email(canonical) is not None or registry.get(desired_cid) is not None:
         raise HTTPException(status_code=409, detail="Email or client_id already in use")
 
-    from src.auth.api_keys import generate_api_key, hash_api_key
     from datetime import datetime as _dt, timezone as _tz
 
-    # AUTH-1 #445 — парольный флоу: хеш пароля ждёт в стеше с шага signup.
+    # AUTH-4 #448: хеш пароля ОБЯЗАН ждать в стеше (signup без пароля
+    # больше не существует); истёкший стеш при живом коде невозможен
+    # (созданы вместе с одним TTL) — но guard честный.
     pwd_record = store.find_active(canonical, f"{PURPOSE_SIGNUP}:pwd")
+    if pwd_record is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     now_iso = _dt.now(_tz.utc).isoformat()
     storage = ClientStorage(desired_cid)
-    if pwd_record is not None:
-        api_key = None    # ключи — в кабинете, отдельный трек (владелец)
-        record_ = ClientRecord(
-            client_id=desired_cid,
-            config={},
-            storage_path=storage.path(""),
-            plan=Plan.FREE.value,
-            api_key_hash=None,
-            password_hash=pwd_record.code_hash,
-            password_set_at=now_iso,
-            email=display_email,
-            email_canonical=canonical,
-            email_verified_at=now_iso,
-        )
-    else:
-        api_key = generate_api_key()
-        record_ = ClientRecord(
-            client_id=desired_cid,
-            config={},
-            storage_path=storage.path(""),
-            plan=Plan.FREE.value,
-            api_key_hash=hash_api_key(api_key),
-            email=display_email,
-            email_canonical=canonical,
-            email_verified_at=now_iso,
-        )
+    record_ = ClientRecord(
+        client_id=desired_cid,
+        config={},
+        storage_path=storage.path(""),
+        plan=Plan.FREE.value,
+        api_key_hash=None,    # ключи — в кабинете, отдельный трек
+        password_hash=pwd_record.code_hash,
+        password_set_at=now_iso,
+        email=display_email,
+        email_canonical=canonical,
+        email_verified_at=now_iso,
+    )
     # Postgres UNIQUE indexes are the actual source of truth for
     # uniqueness — the pre-checks above are best-effort. A concurrent
     # signup with the same email_canonical or client_id will surface
@@ -783,8 +758,7 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     store.mark_used(cid_record.id)
     if display_record:
         store.mark_used(display_record.id)
-    if pwd_record:
-        store.mark_used(pwd_record.id)
+    store.mark_used(pwd_record.id)
 
     # Bump the daily success counter for this /24 subnet.
     try:
@@ -799,104 +773,15 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         event_type=EVT_SIGNUP,
         client_id=desired_cid, actor_email=canonical,
         ip=ip, user_agent=http_req.headers.get("user-agent"),
-        metadata={"plan": Plan.FREE.value,
-                  "method": "email_password" if pwd_record else "email_otp"},
+        metadata={"plan": Plan.FREE.value, "method": "email_password"},
     )
 
-    if pwd_record is not None:
-        # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
-        return SignupVerifyResponse(
-            client_id=desired_cid,
-            plan=Plan.FREE.value,
-            model_name=get_plan_spec(Plan.FREE).model_display_name,
-            warning="Почта подтверждена — войдите с вашим паролем.",
-        )
-
-    token = create_access_token(client_id=desired_cid, roles=["forecast"])
+    # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
     return SignupVerifyResponse(
         client_id=desired_cid,
         plan=Plan.FREE.value,
         model_name=get_plan_spec(Plan.FREE).model_display_name,
-        api_key=api_key,
-        access_token=token,
-    )
-
-
-@router.post("/auth/login", response_model=SignupAcceptedResponse)
-async def auth_login_email(req: LoginEmailRequest, http_req: Request):
-    """
-    Email-OTP login (claude.ai-style). Step 1: send OTP if user exists.
-
-    Important: we ALWAYS return 202 with the same response shape, even
-    if the email isn't registered. This prevents email enumeration via
-    "user exists / doesn't exist" responses. Real users get an email,
-    fake users don't — but the API doesn't tell you which.
-
-    Audit R4-3 — per-IP rate-limit. Captcha alone is insufficient against
-    solver farms ($1/1k commodity). Without this cap, an attacker could
-    flood Resend quota, spam real users' mailboxes, and probe registration
-    via response timing.
-    """
-    try:
-        check_login_attempt(client_ip(http_req))
-    except RateLimited as e:
-        raise HTTPException(
-            status_code=429, detail=str(e),
-            headers={"Retry-After": str(e.retry_after_sec or 60)},
-        )
-
-    _verify_captcha_or_400(req.captcha_token)
-    email = _validate_email_or_400(req.email)
-
-    # Canonical form is the key to ALL OTP storage and lookups — without
-    # it, `vasya@gmail.com` and `vasya+spam@gmail.com` become different
-    # accounts at the OTP layer, even though they are the same to the
-    # registry. The /auth/signup path canonicalizes; this one MUST too.
-    from src.auth.email_normalize import canonical_email
-    try:
-        canonical = canonical_email(email)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid email format")
-
-    from src.auth.otp import generate_otp, hash_otp
-    from src.auth.otp_store import get_otp_store, otp_ttl, PURPOSE_LOGIN
-    from src.auth.email_sender import get_email_sender, render_otp_email, EmailDeliveryError
-
-    ttl_min = int(otp_ttl().total_seconds() / 60)
-    registry = get_registry()
-    record = registry.get_by_email(canonical)
-
-    # Only actually issue + send when the user exists AND is verified.
-    if record is not None and record.email_verified_at is not None:
-        store = get_otp_store()
-        code  = generate_otp()
-        store.create(email=canonical, purpose=PURPOSE_LOGIN, code_hash=hash_otp(code))
-        subject, body, html = render_otp_email(code=code, purpose=PURPOSE_LOGIN, ttl_minutes=ttl_min)
-        try:
-            get_email_sender().send(to=email, subject=subject, body=body, html=html)
-        except EmailDeliveryError as e:
-            # Hash email — same enumeration-defence pattern as signup.
-            logger.error("login email failed for email_hash=%s: %s", _email_hash(email), e)
-            # Still return 202 — don't leak that the user exists by
-            # returning 503 selectively. Better the user sees "email
-            # never arrived" once than enumeration becomes possible.
-
-    # Audit: only the user-facing intent — we don't audit the "user does
-    # not exist" branch to keep the enumeration story consistent.
-    record_event(
-        event_type=EVT_OTP_SEND,
-        actor_email=canonical,
-        client_id=record.client_id if record else None,
-        ip=client_ip(http_req),
-        user_agent=http_req.headers.get("user-agent"),
-        success=record is not None and record.email_verified_at is not None,
-        metadata={"purpose": "login"},
-    )
-
-    return SignupAcceptedResponse(
-        status="otp_sent",
-        email=email,
-        expires_in_minutes=ttl_min,
+        warning="Почта подтверждена — войдите с вашим паролем.",
     )
 
 
@@ -904,117 +789,6 @@ class LoginVerifyResponse(BaseModel):
     client_id:    str
     access_token: str
     token_type:   str = "bearer"
-
-
-@router.post("/auth/login/verify", response_model=LoginVerifyResponse)
-async def auth_login_verify(req: VerifyOtpRequest, http_req: Request):
-    """
-    Step 2 of email login. Verifies OTP, returns a JWT under the client_id
-    bound to that email. No api_key here — login by email is meant to be
-    used INSTEAD of the api_key path, not in addition.
-
-    Brute-force defence: counts failed attempts for this canonical email
-    over a sliding 15-minute window via audit_log; locks out at LOCKOUT_THRESHOLD.
-    The OTP store has its own per-row attempt cap, but it only protects a
-    SINGLE OTP — a credential-stuffer can issue a fresh OTP, fail max-attempts,
-    issue another, repeat. The audit_log window catches that pattern.
-    """
-    _assert_otp_verify_rate_ok(http_req)
-
-    email = _validate_email_or_400(req.email)
-    from src.auth.email_normalize import canonical_email
-    try:
-        canonical = canonical_email(email)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid email format")
-
-    _audit_ip = client_ip(http_req)
-    _audit_ua = http_req.headers.get("user-agent")
-
-    # ── Brute-force lockout (fail-closed when enabled, fail-open if
-    # the audit DB is unavailable: recent_failed_logins returns 0). ──
-    _assert_not_locked_out(
-        canonical, http_req,
-        event_type=EVT_LOGIN, event_subtype="locked_out",
-        attempt_label="login attempts",
-    )
-
-    from src.auth.otp import verify_otp
-    from src.auth.otp_store import get_otp_store, otp_max_attempts, PURPOSE_LOGIN
-
-    store  = get_otp_store()
-    # OTP rows for this purpose were stored under canonical email by /auth/login.
-    #
-    # `claim_active` atomically picks the latest active OTP and stamps
-    # `used_at = NOW()` in one transaction (SELECT ... FOR UPDATE SKIP
-    # LOCKED on Postgres). This closes the audit R2-3 race where two
-    # parallel /auth/login/verify requests could both pass with the
-    # same code before either had marked it used. After this call the
-    # row is single-use regardless of how the verify_otp / lockout
-    # branches resolve.
-    record = store.claim_active(canonical, PURPOSE_LOGIN)
-    is_match = verify_otp(req.code, record.code_hash if record else None)
-
-    if not is_match:
-        if record is not None:
-            # The row is already used (claim_active stamped it).
-            # increment_attempts is a no-op in terms of replay safety
-            # but keeps the audit counter accurate; cap is enforced by
-            # the existing audit-log lockout (recent_failed_logins).
-            store.increment_attempts(record.id)
-        record_event(
-            event_type=EVT_LOGIN, event_subtype="failure",
-            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
-            success=False,
-            metadata={"reason": "invalid_otp"},
-        )
-        raise HTTPException(status_code=401, detail="Invalid or expired code")
-
-    if record is None or record.attempts >= otp_max_attempts():
-        record_event(
-            event_type=EVT_LOGIN, event_subtype="failure",
-            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
-            success=False,
-            metadata={"reason": "expired_or_no_otp"},
-        )
-        raise HTTPException(status_code=401, detail="Invalid or expired code")
-
-    registry = get_registry()
-    client = registry.get_by_email(canonical)
-    if client is None or client.email_verified_at is None:
-        # The email had a valid OTP but the user is gone (deleted between
-        # /auth/login and /auth/login/verify). Don't leak this — keep the
-        # response indistinguishable from a wrong-code path. Row is
-        # already used by claim_active; no extra cleanup needed.
-        record_event(
-            event_type=EVT_LOGIN, event_subtype="failure",
-            actor_email=canonical, ip=_audit_ip, user_agent=_audit_ua,
-            success=False,
-            metadata={"reason": "client_gone"},
-        )
-        raise HTTPException(status_code=401, detail="Invalid or expired code")
-    # Row already marked used by claim_active — no extra mark_used here.
-
-    # AUD-5 (#357): OTP proves email ownership, not that the account is
-    # open — a suspended/closed client could re-enter here for the whole
-    # 30-day retention window. Runs AFTER OTP verification, so the 403
-    # discloses account state only to someone holding the mailbox (same
-    # post-credential disclosure /auth/token has made since ADM-10).
-    assert_account_open(client)
-
-    # Email-login → forecast role. Admin role is reserved for the
-    # ADMIN_API_KEY path; you don't get to be admin via email-OTP.
-    token = create_access_token(client_id=client.client_id, roles=["forecast"])
-    record_event(
-        event_type=EVT_LOGIN, event_subtype="success",
-        client_id=client.client_id, actor_email=canonical,
-        ip=_audit_ip, user_agent=_audit_ua, success=True,
-        metadata={"method": "email_otp"},
-    )
-    return LoginVerifyResponse(
-        client_id=client.client_id,
-        access_token=token,
-    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1127,16 +901,19 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request,
         LOGIN_PASSWORD_COUNT.labels(outcome="locked").inc()
         raise
 
-    # `rec`, не `record` — тест-пин R3-8 ищет ПЕРВОЕ вхождение литерала
-    # create_access_token(client_id=record..., этот эндпоинт стоит выше
+    # `rec`, не `record` — тест-пин R3-8 ищет первое вхождение литерала
+    # выдачи токена с client_id=record; этот эндпоинт стоит выше
     # oauth_callback в файле и не должен его перехватывать.
     rec = get_registry().get_by_email(canonical)
-    usable = (rec is not None
-              and rec.email_verified_at is not None
-              and rec.suspended_at is None
-              and rec.deleted_at is None)
+    # deleted/неверифицированные — как несуществующие (bcrypt-заглушка,
+    # generic 401, анти-enumeration); suspended верифицируем ЧЕСТНО и
+    # отказываем явно НИЖЕ каноническим гейтом (AUD-5: владелец пароля
+    # аутентифицирован — статус аккаунта ему знать можно и нужно).
+    known = (rec is not None
+             and rec.email_verified_at is not None
+             and rec.deleted_at is None)
     ok = verify_password(
-        req.password, rec.password_hash if usable and rec else None)
+        req.password, rec.password_hash if known and rec else None)
 
     _ip = client_ip(http_req)
     _ua = http_req.headers.get("user-agent")
@@ -1149,6 +926,10 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request,
             metadata={"method": "password"},
         )
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
+
+    # AUD-5 #357: единый гейт состояния аккаунта ПЕРЕД выдачей токена
+    from src.auth.jwt_auth import assert_account_open
+    assert_account_open(rec)
 
     LOGIN_PASSWORD_COUNT.labels(outcome="ok").inc()
     record_event(

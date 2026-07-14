@@ -242,7 +242,7 @@ def _auth_module_text() -> str:
         if not f.is_file():
             continue
         text = f.read_text()
-        if "async def auth_login_email" in text:
+        if "def auth_login_password" in text:
             return text
     raise AssertionError(
         "auth handlers not found in main.py or routers/auth.py"
@@ -260,17 +260,16 @@ def _auth_handler_block(text: str, signature: str) -> str:
     return text[start:end]
 
 
-def test_auth_login_route_calls_check_login_attempt():
-    """/auth/login handler must invoke check_login_attempt before
-    captcha + DB work."""
-    block = _auth_handler_block(_auth_module_text(), "async def auth_login_email")
+def test_auth_login_password_calls_check_login_attempt():
+    """AUTH-4 #448: OTP-вход снесён — R4-3-инвариант переезжает на
+    /auth/login/password: rate-limit ДО капчи и до bcrypt-работы."""
+    block = _auth_handler_block(_auth_module_text(), "def auth_login_password")
     assert "check_login_attempt" in block, (
-        "/auth/login must wire check_login_attempt (R4-3)"
+        "/auth/login/password must wire check_login_attempt (R4-3)"
     )
-    # Must come before captcha verify so cheap-rejects happen first.
     rl_idx = block.find("check_login_attempt")
-    captcha_idx = block.find("_verify_captcha_or_400")
-    assert rl_idx < captcha_idx, (
+    captcha_idx = block.find("_captcha_after_fails_or_400")
+    assert 0 < rl_idx < captcha_idx, (
         "rate-limit must precede captcha so we don't burn captcha CPU on flood"
     )
 
@@ -285,12 +284,15 @@ def test_auth_signup_verify_calls_check_otp_verify_attempt():
     )
 
 
-def test_auth_login_verify_calls_check_otp_verify_attempt():
-    # ARCH-2 (#206): see above — deduped into `_assert_otp_verify_rate_ok`.
-    block = _auth_handler_block(_auth_module_text(), "async def auth_login_verify")
-    assert "_assert_otp_verify_rate_ok(http_req)" in block, (
-        "/auth/login/verify must wire the per-IP OTP cap (R4-4) via the shared guard"
-    )
+def test_auth_password_reset_calls_otp_verify_rate_guard():
+    # AUTH-4 #448: login/verify снесён; R4-4-класс (per-IP cap на
+    # brute-поверхности secret-проверки) держат reset и reset/peek.
+    text = _auth_module_text()
+    for fn in ("def auth_password_reset(req", "def auth_password_reset_peek"):
+        block = _auth_handler_block(text, fn)
+        assert "_assert_otp_verify_rate_ok(http_req)" in block, (
+            f"{fn} must wire the per-IP cap (R4-4) via the shared guard"
+        )
 
 
 # ── R4-7: uploads IDOR enumeration → collapse cross-tenant to 404 ──────────
