@@ -108,3 +108,8 @@ artifacts/weather_cache.parquet
 # i.e. pointers a fresh clone cannot resolve. Guarded by
 # tests/lint/test_no_stray_gitlinks.py.
 .claude/worktrees/
+
+# AUTH-2 file-store test artifacts
+refresh_tokens.json
+otp_codes.json
+registry.json
