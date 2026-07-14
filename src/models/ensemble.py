@@ -94,10 +94,11 @@ class EnsembleForecaster:
             cfg_copy = copy.deepcopy(self.config)
             cfg_copy.setdefault("model", {})
             cfg_copy["model"]["objective"] = obj
-            # QH-5 #422: band-калибровка у ensemble-членов ЗАПРЕЩЕНА до
-            # отдельного замера ensemble_band_cal (R14: платная метрика
-            # не наследует MIMO-вердикт автоматически).
+            # QH-5 #422 / QH-9 #442: band- и step-калибровка у ensemble-
+            # членов ЗАПРЕЩЕНЫ до отдельного замера ensemble_band_cal
+            # (R14: платная метрика не наследует MIMO-вердикт автоматически).
             cfg_copy["model"]["band_calibration"] = {"enabled": False}
+            cfg_copy["model"]["step_calibration"] = {"enabled": False}
             child = MIMOForecaster(cfg_copy)
             logger.info(f"Ensemble: fitting child objective={obj}")
             child.fit(X, y, groups=groups, sample_weight=sample_weight,

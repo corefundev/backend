@@ -80,6 +80,12 @@ model:
   band_calibration:
     enabled: true
     clip: [0.8, 1.25]
+  # QH-9 #442: per-step калибровка горизонта (тот же fold-clean probe, что
+  # band_calibration; факторы по band-скорректированному прогнозу). Default
+  # OFF — bench-first: включение только по вердикту замера на 1c-live.
+  step_calibration:
+    enabled: false
+    clip: [0.8, 1.25]
   # #384 SHIP: параметры гибрида (objective=hybrid у платных тарифов).
   # slow/mid band -> ансамбль, fast -> калиброванный MIMO/tweedie —
   # замер route_slowmid_ens: MASE −3.04% при нейтральном WMAPE_g.
