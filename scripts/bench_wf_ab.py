@@ -133,6 +133,11 @@ ARMS: dict[str, dict] = {
     "event_ramp_full": {"model": "mimo",   "statics": "fold_clean", "market": False,
                         "features_overrides": {
                             "event_ramp": {"enabled": True, "set": "full"}}},
+    # QH-10 #443: конверт — панель до-кампании. MIMO без band-калибровки
+    # (#422 off) = Free/Start до ship'а; ensemble-арм (выше) = платные до
+    # #384. Вместе с base и hybrid_prod образуют 2×2 ship/pre-ship панель.
+    "mimo_uncal":    {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "band_cal_off": True},
     # QH-9 #442: per-step калибровка горизонта (WMAPE растёт 0.33@1д →
     # ~0.50@13-14д; band-калибровка #422 шаги не различает). Факторы =
     # clip(Σфакт_h/Σпрогноз_h) на внутреннем хвосте ТОГО ЖЕ probe, по
