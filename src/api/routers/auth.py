@@ -66,6 +66,8 @@ from src.auth.signup_rate_limit import (
     check_signup_attempt,
     check_token_attempt,
     client_ip,
+    recent_login_failures_ip,
+    record_login_failure,
     record_signup_success,
 )
 from src.clients.registry import ClientRecord, get_registry
@@ -804,17 +806,25 @@ def _frontend_link(path: str, token: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{path}?token={quote(token)}"
 
 
-def _captcha_after_fails_or_400(canonical: str, req_token: Optional[str]) -> None:
-    """Капча ПОСЛЕ N неудач (решение владельца: N=2) — чистый вход для
-    честных пользователей, стена для перебора. Счётчик — тот же
-    audit-log-окно, что и lockout (общее на пароль и OTP: пути не
-    складываются в два бюджета)."""
+def _captcha_after_fails_or_400(ip: str, canonical: Optional[str],
+                                req_token: Optional[str]) -> None:
+    """Капча ПОСЛЕ N неудач (решение владельца: N=2, счёт per-IP ИЛИ
+    per-email) — чистый вход для честных пользователей, стена для
+    перебора. Per-email — audit-log-окно (то же, что lockout: пути не
+    складываются в два бюджета); per-IP (/24, Redis, AUTH-5 #454) ловит
+    то, чего per-email не видит: невалидные адреса (canonical нет) и
+    ротацию email'ов (1 неудача на адрес). canonical=None — адрес не
+    распарсился, работает только per-IP-ветка. Токен проверяется не
+    более одного раза (Turnstile-токены одноразовые)."""
     after = int(os.environ.get("LOGIN_CAPTCHA_AFTER_FAILS", "2"))
     if after <= 0:
         _verify_captcha_or_400(req_token)
         return
-    if recent_failed_logins(canonical, window_minutes=int(
-            os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))) >= after:
+    need = recent_login_failures_ip(ip) >= after
+    if not need and canonical is not None:
+        need = recent_failed_logins(canonical, window_minutes=int(
+            os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))) >= after
+    if need:
         _verify_captcha_or_400(req_token)
 
 
@@ -879,19 +889,26 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request,
     from src.auth.email_normalize import canonical_email as _canon
     from src.auth.passwords import verify_password
 
+    _ip = client_ip(http_req)
+    _fail_window_min = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_MIN", "15"))
     try:
-        check_login_attempt(client_ip(http_req))
+        check_login_attempt(_ip)
     except RateLimited as e:
         raise HTTPException(status_code=429, detail=str(e),
                             headers={"Retry-After": str(e.retry_after_sec or 60)})
 
-    email = _validate_email_or_400(req.email)
     try:
+        email = _validate_email_or_400(req.email)
         canonical = _canon(email)
-    except ValueError:
+    except (HTTPException, ValueError):
+        # Невалидный формат — ТОЖЕ неудача (AUTH-5 #454): капча-стена
+        # стоит и здесь (иначе flood мимо неё), попытка идёт в per-IP
+        # счётчик — per-email счесть нечего, canonical не существует.
+        _captcha_after_fails_or_400(_ip, None, req.captcha_token)
+        record_login_failure(_ip, _fail_window_min)
         raise HTTPException(status_code=422, detail="Invalid email format")
 
-    _captcha_after_fails_or_400(canonical, req.captcha_token)
+    _captcha_after_fails_or_400(_ip, canonical, req.captcha_token)
     try:
         _assert_not_locked_out(
             canonical, http_req,
@@ -915,10 +932,10 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request,
     ok = verify_password(
         req.password, rec.password_hash if known and rec else None)
 
-    _ip = client_ip(http_req)
     _ua = http_req.headers.get("user-agent")
     if not ok:
         LOGIN_PASSWORD_COUNT.labels(outcome="fail").inc()
+        record_login_failure(_ip, _fail_window_min)
         record_event(
             event_type=EVT_LOGIN, event_subtype="failure",
             actor_email=canonical, client_id=rec.client_id if rec else None,
