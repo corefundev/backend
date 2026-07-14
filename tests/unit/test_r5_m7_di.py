@@ -51,6 +51,8 @@ def test_signup_rate_limit_public_functions_accept_redis_kwarg():
         "check_rotate_attempt",
         "record_signup_success",
         "assert_signup_allowed",
+        "record_login_failure",       # AUTH-5 #454 per-IP captcha wall
+        "recent_login_failures_ip",   # AUTH-5 #454
     ):
         fn = getattr(mod, name)
         sig = inspect.signature(fn)

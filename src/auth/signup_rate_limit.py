@@ -344,6 +344,37 @@ def check_login_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     )
 
 
+def record_login_failure(ip: str, window_min: int, *,
+                         redis=_USE_DEFAULT) -> None:
+    """Bump the per-/24 failed-login counter — captcha-wall input (AUTH-5
+    #454).
+
+    Owner decision (#445): captcha after N fails, counted per-IP OR
+    per-email. The per-email counter (audit-log window on canonical)
+    can't see malformed-email attempts (no canonical exists) and never
+    trips on email-rotation spray (1 fail per address) — this per-subnet
+    counter closes both. Window mirrors LOGIN_LOCKOUT_WINDOW_MIN; TTL is
+    set on the first failure (fixed window, same semantics as the hour
+    buckets). Fail-open on Redis outage. `redis`: R5-M7 DI hook.
+    """
+    r = _redis() if redis is _USE_DEFAULT else redis
+    if r is None:
+        return                  # fail open
+    _incr_with_ttl(r, f"rl:login:fail:{subnet(ip)}", window_min * 60)
+
+
+def recent_login_failures_ip(ip: str, *, redis=_USE_DEFAULT) -> int:
+    """Read the per-/24 failed-login counter (see record_login_failure).
+
+    Returns 0 when Redis is unavailable — the captcha wall fails open,
+    matching every other limit in this module. `redis`: R5-M7 DI hook.
+    """
+    r = _redis() if redis is _USE_DEFAULT else redis
+    if r is None:
+        return 0                # fail open
+    return int(r.get(f"rl:login:fail:{subnet(ip)}") or 0)
+
+
 def check_otp_verify_attempt(ip: str, *, redis=_USE_DEFAULT) -> None:
     """Per-/24 rate-limit for /auth/login/verify + /auth/signup/verify (R4-4).
 

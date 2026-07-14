@@ -61,19 +61,21 @@ def test_signup_rate_limit_has_hour_bucket_helper():
 def test_signup_rate_limit_no_duplicate_incr_with_ttl_calls():
     """After M2 collapse, the six 1-hour-TTL `check_*_attempt`
     wrappers must not call `_incr_with_ttl` directly — that logic
-    moved into `_hour_bucket_check`. Allow ≤2 callsites: one in the
-    helper itself, one in `record_signup_success` which is the
-    24-hour daily-success counter (genuinely different TTL shape,
-    not part of the hourly-attempt collapse)."""
+    moved into `_hour_bucket_check`. Allow ≤3 callsites: one in the
+    helper itself, one in `record_signup_success` (24-hour
+    daily-success counter) and one in `record_login_failure`
+    (AUTH-5 #454 — LOGIN_LOCKOUT_WINDOW_MIN-scoped failure counter
+    for the captcha wall). Both are genuinely different TTL shapes,
+    not part of the hourly-attempt collapse."""
     text = (_BACKEND / "src" / "auth" / "signup_rate_limit.py").read_text()
     callsites = sum(
         1 for line in text.splitlines()
         if "_incr_with_ttl(" in line and not line.lstrip().startswith(("def ", "#"))
     )
-    assert callsites <= 2, (
-        f"_incr_with_ttl callsites should be ≤2 (helper + daily-success "
-        f"counter). Got {callsites} — M2 hourly-attempt duplication "
-        "re-emerging?"
+    assert callsites <= 3, (
+        f"_incr_with_ttl callsites should be ≤3 (helper + daily-success "
+        f"counter + login-failure counter). Got {callsites} — M2 "
+        "hourly-attempt duplication re-emerging?"
     )
 
 
