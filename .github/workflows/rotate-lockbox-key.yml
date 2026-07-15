@@ -146,3 +146,29 @@ jobs:
               -H 'Content-Type: application/json' \
               -d '{"text":"🚨 Lockbox SA key rotation FAILED. See GitHub Actions run."}' \
               > /dev/null || true
+
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping Telegram notify."
+              exit 0
+          fi
+          MSG=$(printf '%s\n' \
+              '🔥 <b>Lockbox SA key rotation FAILED</b>' \
+              '' \
+              '<i>severity:</i> <code>high</code>' \
+              '<i>source:</i>   <code>rotate-lockbox-key.yml</code>' \
+              '' \
+              'Scheduled key rotation went red — the SA key may be nearing expiry without a successor. Follow the rotation runbook.' \
+              '' \
+              "Run: ${RUN_URL}")
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${MSG}" \
+              --data-urlencode "parse_mode=HTML" > /dev/null

@@ -322,3 +322,29 @@ jobs:
           echo "  Backup-restore drill PASSED"
           echo "  source: $BACKUP_REMOTE_PATH"
           echo "═══════════════════════════════════════════════════════"
+
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping Telegram notify."
+              exit 0
+          fi
+          MSG=$(printf '%s\n' \
+              '🔥 <b>Backup Restore Drill FAILED</b>' \
+              '' \
+              '<i>severity:</i> <code>high</code>' \
+              '<i>source:</i>   <code>backup-restore-drill.yml</code>' \
+              '' \
+              'Logical-dump restore drill went red — the daily backup chain is unverified. Check the run log; re-dispatch after fixing.' \
+              '' \
+              "Run: ${RUN_URL}")
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${MSG}" \
+              --data-urlencode "parse_mode=HTML" > /dev/null

@@ -272,3 +272,29 @@ jobs:
         run: |
           docker logs pitr 2>&1 | tail -20 || true
           docker rm -f pitr 2>/dev/null || true
+
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_ALERT_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+              echo "TELEGRAM_ALERT_* secrets not set — skipping Telegram notify."
+              exit 0
+          fi
+          MSG=$(printf '%s\n' \
+              '🔥 <b>PITR Drill FAILED</b>' \
+              '' \
+              '<i>severity:</i> <code>high</code>' \
+              '<i>source:</i>   <code>pitr-drill.yml</code>' \
+              '' \
+              'Point-in-time-recovery drill went red — the zero-RPO restore path is UNVERIFIED this month. Check the run log; re-dispatch after fixing.' \
+              '' \
+              "Run: ${RUN_URL}")
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${MSG}" \
+              --data-urlencode "parse_mode=HTML" > /dev/null
