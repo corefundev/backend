@@ -235,7 +235,22 @@ def decompose(combined, split_points, band_by_sku: dict, sku_col: str) -> dict:
         str(int(step)): {"wmape": _wmape(g), "rows": len(g)}
         for step, g in df.groupby("horizon_step")
     }
-    return {"by_band": by_band, "by_horizon_step": by_step}
+    # HZ-1 #464: «точность для заказа» — ошибка СУММЫ за окно горизонта.
+    # Закупщик заказывает сумму на период, дневные промахи в ней гасятся;
+    # WMAPE считается по парам (sku, fold): |Σфакт − Σпрогноз| / Σ|Σфакт|.
+    # Окна: 7, 14 и полный горизонт (если длиннее).
+    h_max = int(df["horizon_step"].max())
+    order_sum = {}
+    for w in sorted({min(7, h_max), min(14, h_max), h_max}):
+        sub = df[df["horizon_step"] <= w]
+        sums = sub.groupby([sku_col, "fold"]).agg(
+            a=("actual", "sum"), p=("predicted", "sum"))
+        denom = float(sums["a"].abs().sum())
+        wm = None if denom == 0 else round(
+            float((sums["a"] - sums["p"]).abs().sum() / denom), 5)
+        order_sum[str(w)] = {"wmape": wm, "groups": int(len(sums))}
+    return {"by_band": by_band, "by_horizon_step": by_step,
+            "order_sum": order_sum}
 
 
 class _BandRoutedModel:
