@@ -94,6 +94,12 @@ class PlanSpec:
     # ── UI hints ─────────────────────────────────────────────────────
     price_label:              str = ""
 
+    # ── Datasets (DS-1 #466) ─────────────────────────────────────────
+    # Сколько именованных датасетов может держать клиент (датасет =
+    # своя история, своя модель). Цифры — ПЛЕЙСХОЛДЕРЫ до решения
+    # владельца по тарифной сетке.
+    datasets_limit:           int = 1
+
 
 # The whitelist for the START plan: these are the "business regulators" —
 # toggles and knobs that a non-ML user can set meaningfully. We still
@@ -143,6 +149,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         hpo_n_trials=0,                # HPO off — keep training fast and free
         default_objective="mse",       # plain MSE, straightforward baseline
         price_label="₽0",
+        datasets_limit=1,
     ),
     Plan.START: PlanSpec(
         id=Plan.START,
@@ -162,6 +169,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
         default_objective="hybrid",    # #384: band-роутинг ансамбль↔MIMO (доминирует чистый ансамбль)
         price_label="",
+        datasets_limit=3,
     ),
     Plan.BUSINESS: PlanSpec(
         id=Plan.BUSINESS,
@@ -181,6 +189,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         predict_requests_per_hour=UNLIMITED,  # R2-10: enterprise has its own SRE
         config_allowed_keys=None,  # all keys
         price_label="",
+        datasets_limit=10,
     ),
 }
 
@@ -211,6 +220,7 @@ def all_specs_as_dicts() -> list[dict]:
             "max_skus":                 spec.max_skus,
             "max_horizon_days":         spec.max_horizon_days,
             "training_cooldown_hours":  spec.training_cooldown_hours,
+            "datasets_limit":           spec.datasets_limit,
             "config_allowed_keys":      (
                 sorted(spec.config_allowed_keys)
                 if spec.config_allowed_keys is not None

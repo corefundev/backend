@@ -331,6 +331,7 @@ from src.api.routers.training import router as training_router
 from src.api.routers.inference import router as inference_router
 from src.api.routers.auth import router as auth_router
 from src.api.routers.ops import router as ops_router
+from src.api.routers.datasets import router as datasets_router
 from src.api.routers.news import router as news_router
 from src.api.routers.help import router as help_router
 app.include_router(legal_router)
@@ -345,3 +346,4 @@ app.include_router(training_router)
 app.include_router(inference_router)
 app.include_router(auth_router)
 app.include_router(ops_router)
+app.include_router(datasets_router)
