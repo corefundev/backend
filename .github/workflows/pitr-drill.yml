@@ -79,7 +79,9 @@ jobs:
           chmod +x /usr/local/bin/mc
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
-          mc --version | head -1
+          # No pipe here: newer mc prints multi-line version; `| head -1`
+          # SIGPIPEs the producer (exit 141) under pipefail — drill #5 flake.
+          mc --version
           psql --version
 
       - name: Download latest base + full WAL archive from S3
