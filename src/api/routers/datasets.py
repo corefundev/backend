@@ -222,6 +222,135 @@ def detach_file(client_id: str, dataset_id: str, upload_id: str,
             "rebuilt_version": version}
 
 
+def _create_run_row(client_id: str, plan: str, data_path: str,
+                    dataset_id: str, dataset_version: int):
+    """Best-effort строка истории обучений; None при сбое — обучение
+    важнее истории (тот же контракт, что у /train)."""
+    try:
+        from src.storage.training_runs import (
+            TrainingRunRecord,
+            get_training_runs_registry,
+            new_run_id,
+        )
+        run_id = new_run_id()
+        get_training_runs_registry().create(TrainingRunRecord(
+            run_id=run_id, client_id=client_id, plan=plan,
+            data_path=data_path, dataset_id=dataset_id,
+            dataset_version=dataset_version))
+        return run_id
+    except Exception as e:    # noqa: BLE001 — история best-effort
+        logger.warning("could not create training_runs row: %s", e)
+        return None
+
+
+def _release_training_claim(registry, client_id: str) -> None:
+    """R5-4: освободить claim 'training' при сбое enqueue. Fail-silent —
+    rollback-of-rollback не должен ломать сам запрос."""
+    try:
+        registry.update(client_id, status="ready")
+    except Exception as e:    # noqa: BLE001
+        logger.warning("training claim release failed: %s", e)
+
+
+@router.post("/clients/{client_id}/datasets/{dataset_id}/train",
+             status_code=202)
+def train_dataset(client_id: str, dataset_id: str,
+                  auth: AuthContext = Depends(get_current_client)):
+    """Кнопка «Обучить модель» (решение владельца: ретрейн ПО КНОПКЕ).
+
+    Гейты — те же, что у /train (R11-H4 single-in-flight, квота плана,
+    fail-closed SKU-кап), источник данных — снапшот ТЕКУЩЕЙ версии
+    датасета; модель уезжает в неймспейс датасета (+ легаси-слот, если
+    датасет дефолтный), прогнозы — в его партицию."""
+    require_client_access(client_id, auth)
+    ds = _dataset_or_404(dataset_id, client_id)
+    reg = get_datasets_registry()
+
+    if ds.current_version < 1:
+        raise HTTPException(status_code=409,
+                            detail="В датасете ещё нет данных — доложите файл")
+    version = reg.get_version(dataset_id, ds.current_version)
+    if version is None or version.status != "ready" or not version.snapshot_key:
+        raise HTTPException(status_code=409,
+                            detail="Текущая версия датасета не готова")
+
+    from src.clients.registry import get_registry
+    from src.plans.quota import (
+        QuotaExceeded,
+        TrainingInProgress,
+        check_training_quota,
+        denial_envelope,
+        denial_envelope_from_exc,
+        record_training_started,
+    )
+    from src.plans.plans import get_plan_spec as _spec
+
+    registry = get_registry()
+    record = registry.get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+    if record.status == "training":
+        raise HTTPException(status_code=409, detail=denial_envelope(
+            "training_in_flight",
+            "A training run is already in progress for this client."))
+    try:
+        check_training_quota(record)
+    except QuotaExceeded as e:
+        headers = ({"Retry-After": str(e.retry_after_sec)}
+                   if e.retry_after_sec else None)
+        raise HTTPException(status_code=429,
+                            detail=denial_envelope_from_exc(e),
+                            headers=headers)
+
+    # SKU-кап — fail-closed по счётчику версии (R11-H3-класс).
+    spec = _spec(record.plan)
+    if spec.max_skus is not None:
+        if not version.sku_count:
+            raise HTTPException(status_code=409,
+                                detail="Версия без счётчика SKU — "
+                                       "пересоберите датасет")
+        if version.sku_count > spec.max_skus:
+            raise HTTPException(
+                status_code=403,
+                detail=f"В датасете {version.sku_count} SKU — больше "
+                       f"лимита тарифа ({spec.max_skus})")
+
+    from src.storage import zones as z
+    data_path = z.get_zone_backend(z.Zone.PROCESSED).path(
+        version.snapshot_key)
+    is_default = (reg.list_for_client(client_id) or [ds])[0].dataset_id         == dataset_id
+
+    try:
+        record = record_training_started(registry, record)
+    except TrainingInProgress as e:
+        raise HTTPException(status_code=409,
+                            detail=denial_envelope_from_exc(e))
+    except QuotaExceeded as e:
+        headers = ({"Retry-After": str(e.retry_after_sec)}
+                   if e.retry_after_sec else None)
+        raise HTTPException(status_code=429,
+                            detail=denial_envelope_from_exc(e),
+                            headers=headers)
+
+    run_id = _create_run_row(client_id, record.plan, data_path,
+                             dataset_id, version.version)
+
+    try:
+        from src.pipeline.task_queue import enqueue_training
+        job_id = enqueue_training(
+            client_id=client_id, data_path=data_path, run_id=run_id,
+            dataset_id=dataset_id, dataset_is_default=is_default)
+    except Exception as e:    # noqa: BLE001 — освобождаем claim (R5-4)
+        _release_training_claim(registry, client_id)
+        logger.error("dataset train enqueue failed: %s", e)
+        raise HTTPException(status_code=503,
+                            detail="Очередь обучения недоступна — "
+                                   "повторите позже")
+
+    return {"dataset_id": dataset_id, "dataset_version": version.version,
+            "run_id": run_id, "job_id": job_id, "status": "queued"}
+
+
 @router.delete("/clients/{client_id}/datasets/{dataset_id}")
 def delete_dataset(client_id: str, dataset_id: str,
                    auth: AuthContext = Depends(get_current_client)):

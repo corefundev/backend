@@ -47,6 +47,7 @@ def generate_and_store_forecasts(
     model_path:  str | None,
     config_path: str,
     run_id:      str,
+    dataset_id:  str | None = None,
 ) -> None:
     """
     Run forecast_all_skus for the just-trained model and persist into
@@ -91,7 +92,7 @@ def generate_and_store_forecasts(
     # R12-#100 — load BEFORE build_features so we can pin the lag/rolling
     # set to the model's trained one (no frame-dependent auto-drop); also
     # skips the feature build entirely when there's no model to serve.
-    storage = ClientStorage(client_id)
+    storage = ClientStorage(client_id, dataset_id=dataset_id)
     if not storage.model_exists():
         logger.info(
             "skip post-training forecasts: model not found in storage for client=%s",
@@ -159,8 +160,20 @@ def generate_and_store_forecasts(
         order_qty = order_quantity(p10, p90, service_level)
         rows.append((str(r["sku"]), fdate, float(r["predicted_sales"]), p10, p90, order_qty))
 
+    # DS-1 #466: партиция прогнозов. Легаси-запуск без датасета
+    # приписывается дефолтному (первому активному) датасету клиента —
+    # прогнозы видны в его карточке; совсем без датасета → 'legacy'.
+    effective_ds = dataset_id
+    if effective_ds is None:
+        try:
+            from src.storage.datasets import get_datasets_registry
+            ds_rows = get_datasets_registry().list_for_client(client_id)
+            effective_ds = ds_rows[0].dataset_id if ds_rows else None
+        except Exception as e:    # noqa: BLE001 — деградация до 'legacy'
+            logger.warning("default-dataset resolve failed: %s", e)
     get_forecasts_registry().replace_for_client(
         client_id=client_id, run_id=run_id, rows=rows,
+        dataset_id=effective_ds,
     )
     logger.info(
         "post-training forecasts: client=%s sku=%d horizon=%d rows=%d",

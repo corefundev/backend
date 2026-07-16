@@ -75,7 +75,7 @@ def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
     monkeypatch.setattr(pt, "validate_data", lambda df, config: df)
 
     class _Storage:
-        def __init__(self, cid): pass
+        def __init__(self, cid, **k): pass
         def model_exists(self): return model_exists
         def load_model(self): return SimpleNamespace(horizon=model_horizon)
     monkeypatch.setattr(pt, "ClientStorage", _Storage)
@@ -90,7 +90,7 @@ def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
     monkeypatch.setattr(pt, "forecast_all_skus", _fake_forecast)
 
     monkeypatch.setattr(pt, "get_forecasts_registry", lambda: SimpleNamespace(
-        replace_for_client=lambda client_id, run_id, rows: captured.update(rows=rows)))
+        replace_for_client=lambda client_id, run_id, rows, **k: captured.update(rows=rows)))
     return captured
 
 
@@ -150,7 +150,7 @@ def _wire_anomaly_env(monkeypatch, *, df, flag_threshold):
             return flagged, None
     monkeypatch.setattr(pt, "SalesAnomalyDetector", _Detector)
     monkeypatch.setattr(pt, "get_anomalies_registry", lambda: SimpleNamespace(
-        replace_for_client=lambda client_id, run_id, rows: captured.update(rows=rows)))
+        replace_for_client=lambda client_id, run_id, rows, **k: captured.update(rows=rows)))
     return captured
 
 

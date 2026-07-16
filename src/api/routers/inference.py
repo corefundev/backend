@@ -232,10 +232,23 @@ def _load_processed_for_sku(
 # PERF-4 (#186): `def` (not async) — the body is a synchronous psycopg2 read, so
 # FastAPI runs it in the threadpool instead of blocking the event loop. (Connection
 # pooling is handled by pgbouncer in front of postgres; no app-level pool needed.)
+def _default_dataset_id(client_id: str):
+    """DS-1 #466: дефолтный (первый активный) датасет клиента; None —
+    датасетов нет или реестр недоступен (легаси-чтение без фильтра)."""
+    try:
+        from src.storage.datasets import get_datasets_registry
+        ds_rows = get_datasets_registry().list_for_client(client_id)
+        return ds_rows[0].dataset_id if ds_rows else None
+    except Exception as e:    # noqa: BLE001 — деградация до легаси-чтения
+        logger.warning("default-dataset resolve failed: %s", e)
+        return None
+
+
 @router.get("/clients/{client_id}/forecasts")
 def list_forecasts(
     client_id: str,
     sku: Optional[str] = None,
+    dataset_id: Optional[str] = None,
     auth: AuthContext = Depends(get_current_client),
 ):
     """
@@ -248,7 +261,13 @@ def list_forecasts(
     """
     require_client_access(client_id, auth)
     from src.storage.forecasts import get_forecasts_registry
-    rows = get_forecasts_registry().list_for_client(client_id, sku=sku)
+    # DS-1 #466: прогнозы партиционированы по датасету. Без параметра —
+    # дефолтный (первый активный) датасет клиента; если датасетов нет —
+    # легаси-поведение (все строки клиента).
+    if dataset_id is None:
+        dataset_id = _default_dataset_id(client_id)
+    rows = get_forecasts_registry().list_for_client(
+        client_id, sku=sku, dataset_id=dataset_id)
     if not rows:
         return {
             "client_id":     client_id,

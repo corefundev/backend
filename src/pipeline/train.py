@@ -291,6 +291,8 @@ def run_training_pipeline(
     data_path: str,
     config_path: str = "configs/config.yaml",
     client_id:  str = "default",
+    dataset_id: Optional[str] = None,
+    dataset_is_default: bool = False,
 ) -> dict:
     t0 = time.time()
     logger.info(f"=== Training pipeline START | client={client_id} ===")
@@ -352,7 +354,11 @@ def run_training_pipeline(
     except Exception as e:    # noqa: BLE001
         logger.warning(f"Could not apply plan defaults: {e}")
 
-    storage = ClientStorage(client_id)
+    # DS-1 #466: датасет = своя модель — артефакты уезжают в
+    # {client}/datasets/{dataset}/… . Для ДЕФОЛТНОГО датасета модель
+    # дублируется и в легаси-слот клиента (его читают /predict и
+    # существующие клиентские потоки) — см. сохранение ниже.
+    storage = ClientStorage(client_id, dataset_id=dataset_id)
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
 
     # ── 1. Load ───────────────────────────────────────────────
@@ -753,6 +759,12 @@ def run_training_pipeline(
     attach_static_to_model(final_model, static_map)
     model_path = storage.save_model(final_model)
     logger.info(f"  Saved → {model_path}")
+    # DS-1 #466: модель дефолтного датасета дублируется в легаси-слот
+    # клиента — его читают /predict и все существующие клиентские потоки;
+    # мульти-датасетный serve адресует datasets-неймспейс напрямую.
+    if dataset_id and dataset_is_default:
+        legacy_path = ClientStorage(client_id).save_model(final_model)
+        logger.info(f"  Saved (default-dataset legacy slot) → {legacy_path}")
 
     # ── 8. Cold-start + SHAP done above; mark step 8 ──────────
     _progress(8, 9, "Cold-start модель + SHAP объяснения")

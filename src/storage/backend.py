@@ -407,12 +407,19 @@ class ClientStorage:
     METRICS_KEY    = "{client_id}/metrics/per_sku.csv"
     DRIFT_KEY      = "{client_id}/metrics/drift.parquet"
 
-    def __init__(self, client_id: str, backend: StorageBackend | None = None):
+    def __init__(self, client_id: str, backend: StorageBackend | None = None,
+                 dataset_id: str | None = None):
         self.client_id = client_id
+        # DS-1 #466: датасет = своя модель — все ключи уезжают в
+        # {client_id}/datasets/{dataset_id}/... ; без dataset_id —
+        # легаси-слот клиента (обратная совместимость).
+        self.dataset_id = dataset_id
+        self._ns = (f"{client_id}/datasets/{dataset_id}"
+                    if dataset_id else client_id)
         self.backend = backend or get_storage()
 
     def _k(self, template: str, **kwargs) -> str:
-        return template.format(client_id=self.client_id, **kwargs)
+        return template.format(client_id=self._ns, **kwargs)
 
     # ── Model ─────────────────────────────────────────────────────────────────
 
