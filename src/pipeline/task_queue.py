@@ -268,6 +268,9 @@ def _record_run_finished(
                 mase=metrics.get("mase_global",  metrics.get("mase_mean")),
                 mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
                 smape=metrics.get("smape_global", metrics.get("smape_mean")),
+                # HZ-1 #464: «точность для заказа» — WMAPE суммы окна 7/14.
+                wmape_order_7=metrics.get("wmape_order_7"),
+                wmape_order_14=metrics.get("wmape_order_14"),
                 model_path=result.get("model_path"),
                 mlflow_run_id=result.get("mlflow_run_id"),
                 # R11: persist MLflow telemetry-logging failure (NULL when
@@ -319,10 +322,19 @@ def _emit_training_inbox_row(client_id, run_id, notif_args) -> None:
             )
         else:
             wm = notif_args.get("wmape")
+            ow = notif_args.get("wmape_order_14")
+            # HZ-1 #464: lead with the buyer's number — «точность для
+            # заказа» (100−WMAPE of the 14-day order sum); daily WMAPE stays
+            # for continuity.
+            parts = []
+            if isinstance(ow, float):
+                parts.append(f"Точность для заказа (14 дн): {max(0.0, (1 - ow)) * 100:.1f}%")
+            if isinstance(wm, float):
+                parts.append(f"WMAPE {wm:.3f}")
             emit_notification(
                 client_id, type="training_finished", severity="success",
                 title="Обучение модели завершено",
-                body=(f"WMAPE {wm:.3f}" if isinstance(wm, float) else ""),
+                body=" · ".join(parts),
                 dedup_key=f"training:{run_id}" if run_id else None,
             )
     except Exception as inbox_err:    # noqa: BLE001 — best-effort emitter
@@ -351,6 +363,7 @@ def _notify_finished_idempotent(
         wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
         mase=metrics.get("mase_global",  metrics.get("mase_mean")),
         mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
+        wmape_order_14=metrics.get("wmape_order_14"),
         gate_passed=(result.get("gate") or {}).get("passed"),
         gate_blocked=(
             (result.get("gate") or {}).get("passed") is False
