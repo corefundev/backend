@@ -114,6 +114,21 @@ ARMS: dict[str, dict] = {
     # Продуктовый HybridForecaster (equivalence-плечо: обязано ≈ повторить
     # route_slowmid_ens — тот же роутинг, но боевым классом)
     "hybrid_prod":       {"model": "hybrid", "statics": "fold_clean", "market": False},
+    # QH-11 #483: Volume→Daily allocation — сумма окна из прогноза модели
+    # (объём знаем: 0.235), дневная форма из weekday-профиля хвоста
+    # train-фолда. Пост-hoc, fold-clean по построению. Дозы: чистая
+    # weekday-форма и 50/50 blend с формой модели.
+    "volume_alloc":       {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "volume_alloc": "weekday"},
+    "volume_alloc_blend": {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "volume_alloc": "blend"},
+    # QH-11 #483: mid-band квантильный сервинг — недопрогноз erratic-рядов
+    # (bias 0.86) лечим асимметрией распределения (квантиль τ как точка,
+    # ТОЛЬКО mid), не множителем (#422/#442 отвергнуты). Дозы τ 0.55/0.60.
+    "mid_q55":            {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "mid_quantile": 0.55},
+    "mid_q60":            {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "mid_quantile": 0.60},
     # QH-8 #441: value-weighted обучение. Метрика WMAPE_g взвешена
     # объёмом, лосс — нет: модель равно старается на копеечных и тяжёлых
     # строках. Вес ∝ |y| (полное выравнивание) и ∝ sqrt|y| (полдозы) —
@@ -290,6 +305,102 @@ class _BandRoutedModel:
             band = int(v) if v == v else None    # NaN-safe
         target = self._ens if band in self._route else self._mimo
         return np.asarray(target.predict(X), dtype=float)
+
+
+class _MidQuantileMIMO:
+    """QH-11 #483: сервинг квантили τ>0.5 как ТОЧКИ для mid-band.
+
+    Диагноз B2: mid (erratic, 87.7% массы ошибки) системно НЕДОпрогнозирован
+    (bias 0.86); константные калибровки отвергнуты замерами (#422/#442/#443).
+    Лечим асимметрией РАСПРЕДЕЛЕНИЯ: точечный фит + квантильная голова τ,
+    на predict mid-band строки получают квантиль, остальные — точку.
+    Band — из fold-clean velocity_band строки (как _BandRoutedModel):
+    утечки нет по построению; строка без band'а → точка (fallback)."""
+
+    is_mimo = True    # walk_forward: direct multi-step режим
+
+    def __init__(self, config: dict, tau: float,
+                 route_bands=(1,), band_col: str = "velocity_band"):
+        from src.models.mimo import MIMOForecaster
+        self._m = MIMOForecaster(config)
+        self._tau = float(tau)
+        self._route = {int(b) for b in route_bands}
+        self._band_col = band_col
+
+    def fit(self, X, y, groups=None, sample_weight=None, target_censor=None):
+        self._m.fit(X, y, groups=groups, sample_weight=sample_weight,
+                    target_censor=target_censor)
+        self._m.fit_quantiles(X, y, quantiles=[self._tau], groups=groups,
+                              target_censor=target_censor)
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        cols = getattr(X, "columns", [])
+        band = None
+        if self._band_col in cols and len(X) > 0:
+            v = X[self._band_col].iloc[0]
+            band = int(v) if v == v else None    # NaN-safe
+        if band in self._route:
+            q = self._m.predict_quantiles(X)
+            key = next(iter(q))                  # единственная голова τ
+            return np.clip(np.asarray(q[key], dtype=float), 0, None)
+        return np.asarray(self._m.predict(X), dtype=float)
+
+
+def reallocate_volume(combined, split_points, sku_col: str,
+                      mode: str = "weekday", tail_days: int = 28):
+    """QH-11 #483: Volume → Daily Allocation (temporal reconciliation).
+
+    Объём окна модель знает (order_sum 0.235 vs daily 0.459) — дневную
+    ФОРМУ пересобираем: сумма прогнозов (sku, fold)-окна сохраняется
+    БИТ-В-БИТ, дни распределяются по weekday-профилю хвоста train-фолда
+    (последние `tail_days` значений train_values; последний элемент =
+    день split_date фолда → индексная арифметика даёт weekday каждому).
+    mode="blend" — 50/50 с формой модели (полдозы). Fold-clean по
+    построению: только train_values + собственные прогнозы. Нулевой/
+    пустой weekday-профиль → форма модели (без деления на ноль)."""
+    import numpy as np
+    import pandas as pd
+
+    df = combined.copy()
+    split_by_fold = {i: pd.Timestamp(s) for i, s in enumerate(split_points)}
+    out = []
+    for (sku, fold), g in df.groupby([sku_col, "fold"], sort=False):
+        g = g.sort_values("date").copy()
+        pred_sum = float(g["predicted"].sum())
+        tv = g["train_values"].iloc[0]
+        split = split_by_fold[int(fold)]
+        model_shape = g["predicted"].to_numpy(dtype=float)
+
+        wd_share = None
+        if tv is not None and not (isinstance(tv, float) and np.isnan(tv)):
+            tail = np.asarray(tv, dtype=float)[-int(tail_days):]
+            if len(tail) >= 7:
+                # weekday последнего элемента хвоста = weekday(split_date)
+                idx = np.arange(len(tail))
+                wds = (split.dayofweek - (len(tail) - 1 - idx)) % 7
+                wd_mean = {w: float(tail[wds == w].mean())
+                           for w in range(7) if (wds == w).any()}
+                dates_wd = pd.to_datetime(g["date"]).dt.dayofweek.to_numpy()
+                raw = np.array([wd_mean.get(int(w), np.nan) for w in dates_wd])
+                if not np.isnan(raw).any() and raw.sum() > 0:
+                    wd_share = raw / raw.sum()
+
+        if wd_share is None:
+            new = model_shape                       # честный fallback
+        else:
+            target_shape = wd_share * pred_sum
+            if mode == "blend":
+                new = 0.5 * model_shape + 0.5 * target_shape
+                s = new.sum()
+                if s > 0:                            # сумма окна сохраняется
+                    new = new * (pred_sum / s)
+            else:
+                new = target_shape
+        g["predicted"] = np.clip(new, 0, None)
+        out.append(g)
+    return pd.concat(out, ignore_index=True)
 
 
 class _SeasonalNaive:
@@ -573,6 +684,11 @@ def run_arm(arm_name: str, base_df, config: dict,
                 # QH-5 #422: MIMO с fold-clean band-калибровкой
                 model_factory = lambda: _BandCalibratedMIMO(         # noqa: E731
                     arm_config, tuple(_bc["clip"]))
+            elif spec.get("mid_quantile"):
+                # QH-11 #483: точка + квантильная голова τ для mid-band
+                _tau = float(spec["mid_quantile"])
+                model_factory = lambda: _MidQuantileMIMO(            # noqa: E731
+                    arm_config, _tau)
             else:
                 from src.models.mimo import MIMOForecaster
                 model_factory = lambda: MIMOForecaster(arm_config)   # noqa: E731
@@ -595,14 +711,24 @@ def run_arm(arm_name: str, base_df, config: dict,
         config["model"]["horizon"],
         config.get("validation", {}).get("n_splits", 3),
     )
+    combined = res.combined
     agg = res.aggregated
+    _va = spec.get("volume_alloc")
+    if _va:
+        # QH-11 #483: пересборка дневной формы + честный пере-скоринг тем
+        # же путём, что walk_forward (per-SKU + pooled). Сумма окна
+        # сохраняется по построению — order_sum обязан быть бит-в-бит.
+        from src.validation.metrics import aggregate_metrics, compute_metrics_per_sku
+        combined = reallocate_volume(combined, split_points, sku_col, mode=_va)
+        per_sku = compute_metrics_per_sku(combined, sku_col)
+        agg = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col)
     return {
         "arm": arm_name, "spec": spec, "n_features": len(feature_cols),
         "wmape_global": round(float(agg.get("wmape_global", float("nan"))), 5),
         "wmape_mean":   round(float(agg.get("wmape_mean", float("nan"))), 5),
         "mase_global":  round(float(agg.get("mase_global", float("nan"))), 5),
         "elapsed_s":    round(time.time() - t0, 1),
-        "decomposition": decompose(res.combined, split_points, band_by_sku, sku_col),
+        "decomposition": decompose(combined, split_points, band_by_sku, sku_col),
     }
 
 
