@@ -51,7 +51,7 @@ src/features/engineering.py:129  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:137  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:208  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
-src/api/routers/inference.py:466  DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
+src/api/routers/inference.py:604  (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
 src/storage/upload_pipeline.py:302  DP-4b #324 — run_prepare best-effort sniff: a sniff failure sets result=None and falls through to a CANONICAL parse (never blocks the upload); logged loudly, no state swallowed
 src/storage/upload_pipeline.py:421  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment] (was :344, +24 DP-4b run_prepare)
 src/storage/upload_pipeline.py:434  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment] (was :357, +24 DP-4b run_prepare)
@@ -94,3 +94,4 @@ src/api/routers/clients.py:409  B4 #156 — export training-runs guard: a missin
 src/api/routers/clients.py:417  B4 #156 — export uploads guard: same rationale as :334 (−3 #387 fix)
 src/api/routers/clients.py:422  B4 #156 — export access-log guard: same rationale as :334 (−3 #387 fix)
 src/storage/sandbox.py:387  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed
+src/api/routers/inference.py:375  AZ-1 #465 — effective-config blip degrades τ to the documented default 0.7 (logged loudly): рекомендации к заказу остаются доступными при блипе конфиг-чтения; сама τ-override-ветка и гейты выше не задеты

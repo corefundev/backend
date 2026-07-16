@@ -329,6 +329,144 @@ def list_forecasts(
 
 
 # PERF-4 (#186): `def` — synchronous psycopg2 read → threadpool, off the loop.
+@router.get("/clients/{client_id}/order-recommendations")
+def order_recommendations(
+    client_id: str,
+    window: int = 14,
+    dataset_id: Optional[str] = None,
+    service_level: Optional[float] = None,
+    format: str = "json",
+    auth: AuthContext = Depends(get_current_client),
+):
+    """AZ-1 (#465): рекомендации к заказу — агрегат окна заказа по SKU.
+
+    Закупщик заказывает СУММУ периода: по каждому SKU суммируем первые
+    `window` дней прогноза — спрос (point), рекомендацию (newsvendor-
+    квантиль на τ) и границы интервала. Рекомендация ПЕРЕСЧИТЫВАЕТСЯ на
+    лету из хранимых калиброванных p10/p90 той же формулой
+    order_quantity(), которой post_training считал сохранённый order_qty
+    — поэтому смена τ не требует переобучения. `service_level` override —
+    платная ручка (та же, что config-ключ model.service_level, Start+;
+    Free всегда получает effective-τ конфига). Дни без калиброванной
+    полосы (рекурсивный хвост) в рекомендацию не входят —
+    `days_covered`/`days` делает пробел видимым, как скрытая лента p10/p90.
+
+    format=csv — выгрузка для 1С: UTF-8 с BOM, разделитель ';',
+    количество к заказу округлено ВВЕРХ до штук (безопасный запас).
+    """
+    require_client_access(client_id, auth)
+    import math
+
+    if not (1 <= window <= 60):
+        raise HTTPException(422, detail="window must be 1..60 days")
+    if format not in ("json", "csv"):
+        raise HTTPException(422, detail="format must be json or csv")
+
+    from src.clients.registry import get_registry
+    record = get_registry().get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+
+    # ── τ: платный override / effective-конфиг ────────────────────────
+    from src.clients.config_manager import get_config_manager
+    try:
+        cfg = get_config_manager().get_effective(client_id, get_registry())
+        cfg_tau = float(cfg.get("model", {}).get("service_level", 0.7))
+    except Exception as e:    # noqa: BLE001 — конфиг-блип ≠ отказ страницы
+        logger.warning("order-recommendations: effective config failed: %s", e)
+        cfg_tau = 0.7
+    if service_level is not None:
+        if record.plan not in ("start", "business"):
+            raise HTTPException(
+                403, detail="Настройка сервис-уровня доступна на платных тарифах")
+        if not (0.5 <= service_level <= 0.95):
+            raise HTTPException(422, detail="service_level must be in [0.5, 0.95]")
+        tau = float(service_level)
+    else:
+        tau = cfg_tau
+
+    # ── строки прогноза (та же датасет-резолюция, что /forecasts) ────
+    from src.models.newsvendor import order_quantity
+    from src.storage.forecasts import get_forecasts_registry
+    if dataset_id is None:
+        dataset_id = _default_dataset_id(client_id)
+    rows = get_forecasts_registry().list_for_client(client_id, dataset_id=dataset_id)
+
+    empty_meta: dict = {
+        "client_id": client_id, "dataset_id": dataset_id,
+        "service_level": tau, "window": window,
+        "generated_at": None, "first_date": None, "last_date": None,
+        "count": 0, "items": [],
+    }
+    if not rows:
+        if format == "csv":
+            raise HTTPException(404, detail="Прогнозов ещё нет — обучите модель")
+        return empty_meta
+
+    window_dates = sorted({r["forecast_date"] for r in rows})[:window]
+    in_window = set(window_dates)
+
+    from collections import defaultdict
+    per_sku: dict[str, dict] = defaultdict(
+        lambda: {"demand": 0.0, "order": 0.0, "p10": 0.0, "p90": 0.0, "covered": 0})
+    for r in rows:
+        if r["forecast_date"] not in in_window:
+            continue
+        s = per_sku[r["sku"]]
+        if r["value"] is not None:
+            s["demand"] += float(r["value"])
+        oq = order_quantity(r.get("p10"), r.get("p90"), tau)
+        if oq is not None:
+            s["order"] += oq
+            s["p10"] += float(r["p10"])
+            s["p90"] += float(r["p90"])
+            s["covered"] += 1
+
+    items = []
+    for sku_name in sorted(per_sku.keys()):
+        s = per_sku[sku_name]
+        covered = s["covered"]
+        items.append({
+            "sku":            sku_name,
+            "demand_sum":     round(s["demand"], 2),
+            "order_sum":      round(s["order"], 2) if covered else None,
+            "order_qty":      int(math.ceil(s["order"])) if covered else None,
+            "p10_sum":        round(s["p10"], 2) if covered else None,
+            "p90_sum":        round(s["p90"], 2) if covered else None,
+            "days":           len(window_dates),
+            "days_covered":   covered,
+        })
+
+    if format == "csv":
+        from starlette.responses import Response
+        lines = ["sku;Спрос (прогноз);К заказу;Мин (p10);Макс (p90);Дней в окне;Дней с рекомендацией"]
+        for i in items:
+            lines.append(";".join([
+                str(i["sku"]),
+                f"{i['demand_sum']:.2f}".replace(".", ","),
+                "" if i["order_qty"] is None else str(i["order_qty"]),
+                "" if i["p10_sum"] is None else f"{i['p10_sum']:.2f}".replace(".", ","),
+                "" if i["p90_sum"] is None else f"{i['p90_sum']:.2f}".replace(".", ","),
+                str(i["days"]), str(i["days_covered"]),
+            ]))
+        body = "\ufeff" + "\r\n".join(lines) + "\r\n"  # BOM — 1С/Excel-RU
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition":
+                     f'attachment; filename="order-recommendations-{window}d.csv"'},
+        )
+
+    return {
+        **empty_meta,
+        "generated_at": rows[0]["generated_at"],
+        "first_date": window_dates[0],
+        "last_date": window_dates[-1],
+        "count": len(items),
+        "items": items,
+    }
+
+
 @router.get("/clients/{client_id}/anomalies")
 def list_anomalies(
     client_id: str,
