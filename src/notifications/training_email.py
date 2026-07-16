@@ -87,6 +87,7 @@ def _render_finished(
     wmape:         float | None,
     mase:          float | None,
     mase_seasonal: float | None = None,
+    wmape_order_14: float | None = None,
     gate_passed:   bool | None  = None,
     gate_blocked:  bool | None  = None,
 ) -> tuple[str, str]:
@@ -119,6 +120,9 @@ def _render_finished(
         "",
         f"  • Длительность:       {_format_duration(duration_sec)}",
         f"  • Товаров (SKU):      {n_skus if n_skus is not None else '—'}",
+        (f"  • Точность для заказа (14 дн): {max(0.0, (1 - wmape_order_14)) * 100:.1f}%  — совпадение суммы заказа за 2 недели"
+         if isinstance(wmape_order_14, float) else
+         "  • Точность для заказа (14 дн): —"),
         f"  • WMAPE (точность):   {_format_pct(wmape)}  — чем меньше, тем точнее",
         f"  • MASE:               {_format_num(mase)}  — < 1: лучше наивного «как вчера»",
         f"  • MASE сезонный:      {_format_num(mase_seasonal)}  — < 1: лучше «как в этот день неделю назад» (базовая модель)",
@@ -187,6 +191,7 @@ def notify_training_finished(
     wmape:         float | None = None,
     mase:          float | None = None,
     mase_seasonal: float | None = None,
+    wmape_order_14: float | None = None,
     gate_passed:   bool | None  = None,
     gate_blocked:  bool | None  = None,
 ) -> None:
@@ -201,6 +206,7 @@ def notify_training_finished(
             return
         subject, body = _render_finished(
             client_id, duration_sec, n_skus, wmape, mase, mase_seasonal,
+            wmape_order_14,
             gate_passed,
             gate_blocked,
         )

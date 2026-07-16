@@ -59,6 +59,10 @@ class TrainingRunRecord:
     mase:          Optional[float] = None
     mase_seasonal: Optional[float] = None
     smape:         Optional[float] = None
+    # HZ-1 #464: «точность для заказа» — WMAPE суммы за окно заказа 7/14 дн
+    # (bench-parity math). NULL = pre-#464 run / no measurable demand.
+    wmape_order_7:  Optional[float] = None
+    wmape_order_14: Optional[float] = None
     model_path:    Optional[str]   = None
     mlflow_run_id: Optional[str]   = None
     error:         Optional[str]   = None
@@ -75,6 +79,7 @@ class PostgresTrainingRunsRegistry:
         "status", "job_id", "started_at", "ended_at", "elapsed_sec",
         "n_skus", "n_features", "n_rows",
         "wmape", "mase", "mase_seasonal", "smape",
+        "wmape_order_7", "wmape_order_14",
         "model_path", "mlflow_run_id", "error",
         "mlflow_logging_error", "gate_passed",
     }
@@ -273,6 +278,8 @@ class PostgresTrainingRunsRegistry:
             wmape=row.get("wmape"),
             mase=row.get("mase"),
             mase_seasonal=row.get("mase_seasonal"),
+            wmape_order_7=row.get("wmape_order_7"),
+            wmape_order_14=row.get("wmape_order_14"),
             gate_passed=row.get("gate_passed"),
             smape=row.get("smape"),
             model_path=row.get("model_path"),

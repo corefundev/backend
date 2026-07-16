@@ -196,6 +196,13 @@ def walk_forward_validate(
             continue
 
         fold_df["fold"] = fold_idx
+        # HZ-1 (#464): step index 1..H inside the fold's test window —
+        # lets downstream consumers (order-sum WMAPE, step decompositions)
+        # window rows without re-deriving each fold's split date.
+        fold_df["horizon_step"] = (
+            (pd.to_datetime(fold_df[date_col]) - pd.Timestamp(split_date))
+            .dt.days.astype(int)
+        )
 
         # Attach training targets per SKU for MASE.
         train_targets_per_sku = (

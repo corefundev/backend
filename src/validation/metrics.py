@@ -201,6 +201,8 @@ def aggregate_metrics(
         if date_col in raw_df.columns:
             _fill_aggregate_accuracy(agg, raw_df, actual_col, pred_col,
                                      sku_col, date_col)
+        # HZ-1 #464: «точность для заказа» — WMAPE суммы за окно 7/14.
+        _fill_order_accuracy(agg, raw_df, actual_col, pred_col, sku_col)
         # MASE needs a baseline naive error per SKU; pool one global
         # naive_mae from each SKU's training values (deduped per SKU
         # so we don't repeat the same series for every test row).
@@ -276,3 +278,36 @@ def _fill_aggregate_accuracy(agg: dict, raw_df: pd.DataFrame,
         agg["wmape_daily_portfolio"] = agg_wmape(fold + [date_col])
     except Exception:    # noqa: BLE001 — залогировано, не проглочено
         logger.warning("aggregate accuracy metrics failed", exc_info=True)
+
+
+def _fill_order_accuracy(agg: dict, raw_df: pd.DataFrame,
+                         actual_col: str, pred_col: str,
+                         sku_col: str) -> None:
+    """HZ-1 (#464): «точность для заказа» — WMAPE СУММЫ за окно заказа.
+
+    Закупщик заказывает сумму периода, не дни: дневные промахи внутри
+    окна взаимно гасятся, знак не штрафуется. Математика зеркалит
+    bench_wf_ab.decompose/order_sum БИТ-В-БИТ (числа кабинета обязаны
+    сходиться со стендовыми): группировка (sku, fold), окно =
+    horizon_step ≤ w, WMAPE по СУММАМ групп. Окна — продуктовые 7 и 14
+    дней (усечённые горизонтом, если он короче: min(w, H) — как на
+    стенде). Требует колонку horizon_step (walk_forward штампует с
+    HZ-1); её нет у рукодельных raw_df — тогда ключи не пишутся.
+    Best-effort как соседний #433-helper: сбой не трогает headline."""
+    try:
+        if "horizon_step" not in raw_df.columns:
+            return
+        d = raw_df
+        fold = ["fold"] if "fold" in d.columns else []
+        h_max = int(d["horizon_step"].max())
+        for w in (7, 14):
+            sub = d[d["horizon_step"] <= min(w, h_max)]
+            sums = sub.groupby(fold + [sku_col], observed=True).agg(
+                a=(actual_col, "sum"), p=(pred_col, "sum"))
+            denom = float(sums["a"].abs().sum())
+            if denom == 0:
+                continue
+            agg[f"wmape_order_{w}"] = float(
+                (sums["a"] - sums["p"]).abs().sum() / denom)
+    except Exception:    # noqa: BLE001 — залогировано, не проглочено
+        logger.warning("order accuracy metrics failed", exc_info=True)
