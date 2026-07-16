@@ -45,6 +45,9 @@ class TrainingRunRecord:
     status:        str = QUEUED
     job_id:        Optional[str]   = None
     upload_id:     Optional[str]   = None
+    # DS-1 #466: происхождение — на какой версии какого датасета учились.
+    dataset_id:      Optional[str] = None
+    dataset_version: Optional[int] = None
     enqueued_at:   str             = field(default_factory=_now_iso)
     started_at:    Optional[str]   = None
     ended_at:      Optional[str]   = None
@@ -124,15 +127,17 @@ class PostgresTrainingRunsRegistry:
         sql = """
         INSERT INTO sku_training_runs
             (run_id, client_id, plan, data_path, status,
-             job_id, upload_id, enqueued_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+             job_id, upload_id, dataset_id, dataset_version, enqueued_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     record.run_id, record.client_id, record.plan,
                     record.data_path, record.status,
-                    record.job_id, record.upload_id, record.enqueued_at,
+                    record.job_id, record.upload_id,
+                    record.dataset_id, record.dataset_version,
+                    record.enqueued_at,
                 ))
             conn.commit()
 

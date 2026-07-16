@@ -67,6 +67,10 @@ class PostgresForecastsRegistry:
         # p10/p90/order_qty may be None when the model has no quantile
         # sub-models (e.g. fallback SeasonalNaiveModel) — ribbon + order
         # recommendation hide themselves (#308).
+        dataset_id: Optional[str] = None,
+        # DS-1 #466: прогнозы партиционированы по датасету — replace
+        # чистит ТОЛЬКО партицию своего датасета. None → 'legacy'
+        # (админский raw-path без датасета; PK требует NOT NULL).
     ) -> int:
         """
         Atomically replace this client's forecasts with the given rows.
@@ -84,21 +88,23 @@ class PostgresForecastsRegistry:
         # src/storage/_dedup.py for the full rationale (intra-batch dup
         # would roll back the whole replace, leaving stale forecasts).
         rows = dedup_last_wins(rows, key=lambda r: (r[0], r[1]))
+        ds = dataset_id or "legacy"
         ts = datetime.now(timezone.utc)
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM sku_forecasts WHERE client_id = %s",
-                    (client_id,),
+                    "DELETE FROM sku_forecasts WHERE client_id = %s "
+                    "AND dataset_id = %s",
+                    (client_id, ds),
                 )
                 self._extras.execute_values(
                     cur,
                     "INSERT INTO sku_forecasts "
-                    "(client_id, sku, forecast_date, value, p10, p90, order_qty, run_id, generated_at) "
+                    "(client_id, dataset_id, sku, forecast_date, value, p10, p90, order_qty, run_id, generated_at) "
                     "VALUES %s",
                     [
                         (
-                            client_id, sku, fdate, float(v),
+                            client_id, ds, sku, fdate, float(v),
                             None if p10 is None else float(p10),
                             None if p90 is None else float(p90),
                             None if order_qty is None else float(order_qty),
@@ -118,6 +124,7 @@ class PostgresForecastsRegistry:
     def list_for_client(
         self, client_id: str, sku: Optional[str] = None,
         limit: int = FORECASTS_LIST_HARD_CAP,
+        dataset_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Return rows for a client, optionally filtered by SKU. Sorted by
@@ -132,6 +139,9 @@ class PostgresForecastsRegistry:
             "FROM sku_forecasts WHERE client_id = %s"
         )
         params: list = [client_id]
+        if dataset_id:
+            sql += " AND dataset_id = %s"
+            params.append(dataset_id)
         if sku:
             sql += " AND sku = %s"
             params.append(sku)

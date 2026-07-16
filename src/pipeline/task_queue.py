@@ -177,6 +177,8 @@ def _run_pipeline_or_fail(
     config_path: str,
     runs,
     run_id: Optional[str],
+    dataset_id: Optional[str] = None,
+    dataset_is_default: bool = False,
 ) -> dict:
     """Invoke `run_training_pipeline`; on exception, write FAILED to
     training_runs + flip sku_clients.status=failed + fire failure
@@ -193,6 +195,8 @@ def _run_pipeline_or_fail(
             data_path=effective_data_path,
             config_path=config_path,
             client_id=client_id,
+            dataset_id=dataset_id,
+            dataset_is_default=dataset_is_default,
         )
     except Exception as e:
         _mark_run_failed(runs, run_id, str(e))
@@ -397,6 +401,7 @@ def _post_training_artifacts(
     config_path: str,
     run_id: Optional[str],
     result: dict,
+    dataset_id: Optional[str] = None,
 ) -> None:
     """Generate batch forecasts + persist anomalies after a successful
     training. Both best-effort — failure here doesn't fail the run,
@@ -419,6 +424,7 @@ def _post_training_artifacts(
             model_path=result.get("model_path"),
             config_path=config_path,
             run_id=run_id or "",
+            dataset_id=dataset_id,
         )
     except Exception as e:    # noqa: BLE001
         logger.warning("post-training batch forecast failed: %s", e, exc_info=True)
@@ -466,6 +472,8 @@ def _training_job(
     storage_backend: str = "local",
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
+    dataset_id: Optional[str] = None,
+    dataset_is_default: bool = False,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.
@@ -504,6 +512,8 @@ def _training_job(
     # (R5-M5: error handling belongs in the helpers).
     with _merged_cleanup_guard(merged_cleanup):
         result = _run_pipeline_or_fail(
+            dataset_id=dataset_id,
+            dataset_is_default=dataset_is_default,
             client_id=client_id,
             effective_data_path=effective_data_path,
             config_path=config_path,
@@ -513,7 +523,8 @@ def _training_job(
 
         _record_run_finished(runs, run_id, result, client_id)
         _notify_finished_idempotent(client_id, run_id, result)
-        _post_training_artifacts(client_id, effective_data_path, config_path, run_id, result)
+        _post_training_artifacts(client_id, effective_data_path, config_path,
+                                 run_id, result, dataset_id=dataset_id)
 
         return result
 
@@ -581,6 +592,8 @@ def enqueue_training(
     timeout: int = 7200,          # 2 hours max
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
+    dataset_id: Optional[str] = None,
+    dataset_is_default: bool = False,
 ) -> Optional[str]:
     """
     Enqueue a training job. Returns rq job_id.
@@ -606,6 +619,8 @@ def enqueue_training(
                 storage_backend=backend,
                 run_id=run_id,
                 extend_from_paths=extend_from_paths,
+                dataset_id=dataset_id,
+                dataset_is_default=dataset_is_default,
             ),
             job_timeout=timeout,
             result_ttl=86400,       # keep result 24h
@@ -650,6 +665,8 @@ def enqueue_training(
             storage_backend=backend,
             run_id=run_id,
             extend_from_paths=extend_from_paths,
+            dataset_id=dataset_id,
+            dataset_is_default=dataset_is_default,
         )
         return None
 

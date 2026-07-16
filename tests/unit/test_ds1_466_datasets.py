@@ -200,3 +200,82 @@ def test_cross_tenant_404(app_client):
     r = app_client.get(f"/clients/rival/datasets/{ds}",
                        headers={"Authorization": f"Bearer {rival_token}"})
     assert r.status_code == 404
+
+
+# ── slice B: датасет = своя модель ───────────────────────────────────────
+
+def test_client_storage_dataset_namespace():
+    from src.storage.backend import ClientStorage
+
+    class _B:
+        def __init__(self): self.keys = []
+        def upload_bytes(self, data, key): self.keys.append(key)
+
+    b = _B()
+    legacy = ClientStorage("acme", backend=b)
+    scoped = ClientStorage("acme", backend=b, dataset_id="ds42")
+    assert legacy._k(ClientStorage.MODEL_KEY) == "acme/models/model.pkl"
+    assert scoped._k(ClientStorage.MODEL_KEY) == \
+        "acme/datasets/ds42/models/model.pkl"
+
+
+def _stub_training_gates(monkeypatch, enqueued: dict):
+    import src.api.routers.datasets as dsr
+    from types import SimpleNamespace as NS
+    import src.plans.quota as quota
+    monkeypatch.setattr(quota, "check_training_quota", lambda rec: None)
+    monkeypatch.setattr(quota, "record_training_started",
+                        lambda reg, rec: rec)
+    import src.pipeline.task_queue as tq
+    monkeypatch.setattr(
+        tq, "enqueue_training",
+        lambda **kw: (enqueued.update(kw), "job-1")[1])
+    import src.storage.training_runs as tr
+    monkeypatch.setattr(tr, "get_training_runs_registry",
+                        lambda: NS(create=lambda r: enqueued.update(
+                            run_dataset=r.dataset_id,
+                            run_version=r.dataset_version)))
+    return dsr
+
+
+def test_train_button_enqueues_with_dataset(app_client, monkeypatch):
+    _seed_processed_upload("u1", _df([("2026-01-01", "a", 1.0),
+                                      ("2026-01-02", "a", 2.0)]))
+    r = app_client.post("/clients/acme/datasets", json={"name": "DS"})
+    ds = r.json()["dataset_id"]
+    app_client.post(f"/clients/acme/datasets/{ds}/files",
+                    json={"upload_id": "u1"})
+
+    enqueued: dict = {}
+    _stub_training_gates(monkeypatch, enqueued)
+    r = app_client.post(f"/clients/acme/datasets/{ds}/train")
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["dataset_version"] == 1 and body["job_id"] == "job-1"
+    assert enqueued["dataset_id"] == ds
+    assert enqueued["dataset_is_default"] is True     # единственный датасет
+    assert enqueued["run_dataset"] == ds and enqueued["run_version"] == 1
+    assert enqueued["data_path"].endswith("data.parquet")
+
+
+def test_train_button_empty_dataset_409(app_client, monkeypatch):
+    r = app_client.post("/clients/acme/datasets", json={"name": "Пустой"})
+    ds = r.json()["dataset_id"]
+    _stub_training_gates(monkeypatch, {})
+    r = app_client.post(f"/clients/acme/datasets/{ds}/train")
+    assert r.status_code == 409
+    assert "нет данных" in r.json()["detail"]
+
+
+def test_train_button_sku_cap_fail_closed(app_client, monkeypatch):
+    # free: max_skus=30 — версия с 31 SKU должна получить 403
+    frame = _df([("2026-01-01", f"sku{i}", 1.0) for i in range(31)])
+    _seed_processed_upload("u1", frame)
+    r = app_client.post("/clients/acme/datasets", json={"name": "Большой"})
+    ds = r.json()["dataset_id"]
+    app_client.post(f"/clients/acme/datasets/{ds}/files",
+                    json={"upload_id": "u1"})
+    _stub_training_gates(monkeypatch, {})
+    r = app_client.post(f"/clients/acme/datasets/{ds}/train")
+    assert r.status_code == 403
+    assert "лимита тарифа" in r.json()["detail"]

@@ -29,11 +29,11 @@
 # Each of these should either get narrowed to a specific exception type,
 # convert the swallow into a persisted error, or document the fail-open
 # branch as deliberate (and then move out of "broad except" to a typed one).
-src/pipeline/task_queue.py:209  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
-src/pipeline/task_queue.py:216  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
-src/pipeline/task_queue.py:230  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
-src/pipeline/train.py:314  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :311, +4 #268) (was :315, #231 kill -1 import)
-src/pipeline/train.py:352  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :349, +4 #268) (was :353, #231 kill -1 import)
+src/pipeline/task_queue.py:213  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
+src/pipeline/task_queue.py:220  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
+src/pipeline/task_queue.py:234  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
+src/pipeline/train.py:316  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :311, +4 #268) (was :315, #231 kill -1 import)
+src/pipeline/train.py:354  pre-R9 baseline; triage in R10 — plan-spec lookup in train pipeline (was :349, +4 #268) (was :353, #231 kill -1 import)
 src/pipeline/train.py:249  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
 src/pipeline/inference_utils.py:214  QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes
 src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
@@ -51,7 +51,7 @@ src/features/engineering.py:129  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:137  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block)
 src/storage/upload_pipeline.py:178  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment]
 src/storage/upload_pipeline.py:208  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment]
-src/api/routers/inference.py:447  DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
+src/api/routers/inference.py:466  DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
 src/storage/upload_pipeline.py:302  DP-4b #324 — run_prepare best-effort sniff: a sniff failure sets result=None and falls through to a CANONICAL parse (never blocks the upload); logged loudly, no state swallowed
 src/storage/upload_pipeline.py:421  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment] (was :344, +24 DP-4b run_prepare)
 src/storage/upload_pipeline.py:434  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment] (was :357, +24 DP-4b run_prepare)
