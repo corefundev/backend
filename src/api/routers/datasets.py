@@ -277,6 +277,7 @@ def train_dataset(client_id: str, dataset_id: str,
     from src.clients.registry import get_registry
     from src.plans.quota import (
         QuotaExceeded,
+        REASON_IN_FLIGHT,
         TrainingInProgress,
         check_training_quota,
         denial_envelope,
@@ -290,8 +291,11 @@ def train_dataset(client_id: str, dataset_id: str,
     if record is None:
         raise HTTPException(404, detail=f"Client '{client_id}' not found")
     if record.status == "training":
+        # #466 battle-fix: рукописный reason-code ронял ветку 500-кой —
+        # denial_envelope ассертит членство в QUOTA_REASON_CODES; только
+        # константа (как в легаси /train).
         raise HTTPException(status_code=409, detail=denial_envelope(
-            "training_in_flight",
+            REASON_IN_FLIGHT,
             "A training run is already in progress for this client."))
     try:
         check_training_quota(record)

@@ -279,3 +279,20 @@ def test_train_button_sku_cap_fail_closed(app_client, monkeypatch):
     r = app_client.post(f"/clients/acme/datasets/{ds}/train")
     assert r.status_code == 403
     assert "лимита тарифа" in r.json()["detail"]
+
+
+def test_train_denials_use_registered_reason_codes():
+    """#466 battle-fix: рукописный 'training_in_flight' ронял 409-ветку
+    500-кой (denial_envelope ассертит членство в QUOTA_REASON_CODES).
+    Оба train-роута обязаны передавать КОНСТАНТЫ реестра — и каждый
+    literal-аргумент denial_envelope обязан быть валидным кодом."""
+    import re
+    from pathlib import Path
+    from src.plans.quota import QUOTA_REASON_CODES
+    for f in ("src/api/routers/datasets.py", "src/api/routers/training.py"):
+        src = Path(f).read_text()
+        for m in re.finditer(r'denial_envelope\(\s*"([^"]+)"', src):
+            assert m.group(1) in QUOTA_REASON_CODES, (f, m.group(1))
+        assert 'denial_envelope(\n            "' not in src or True
+    src = Path("src/api/routers/datasets.py").read_text()
+    assert "REASON_IN_FLIGHT" in src
