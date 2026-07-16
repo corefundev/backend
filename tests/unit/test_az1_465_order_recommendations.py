@@ -46,6 +46,9 @@ def _env(monkeypatch, rows=None, plan="business", cfg_tau=0.7):
         "src.storage.forecasts.get_forecasts_registry",
         lambda: SimpleNamespace(
             list_for_client=lambda cid, dataset_id=None: rows if rows is not None else _rows()))
+    monkeypatch.setattr(
+        "src.storage.datasets.get_datasets_registry",
+        lambda: SimpleNamespace(get=lambda ds_id: None))
 
 
 def _call(**kw):
@@ -137,8 +140,10 @@ def test_csv_is_1c_friendly(monkeypatch):
     assert lines[0].startswith("sku;")
     row_a = next(ln for ln in lines if ln.startswith("A;"))
     cells = row_a.split(";")
-    assert cells[1] == "30,00"                           # десятичная запятая
-    assert cells[2] == "42"                              # целые штуки, ceil
+    assert cells[1] == ""                                # остатков нет — пусто
+    assert cells[2] == "30,00"                           # десятичная запятая
+    assert cells[3] == "12,00"                           # страховой запас = 42−30
+    assert cells[4] == "42"                              # целые штуки, ceil
     assert "attachment" in resp.headers["content-disposition"]
     assert "csv" in resp.media_type
 
@@ -151,4 +156,57 @@ def test_csv_ceil_rounds_up_partial_units(monkeypatch):
     resp = _call(window=1, format="csv")
     row = next(ln for ln in resp.body.decode("utf-8").split("\r\n")
                if ln.startswith("A;"))
-    assert row.split(";")[2] == "2"
+    assert row.split(";")[4] == "2"
+
+
+# ── остаток и страховой запас (прототип: заказ = прогноз + запас − остаток) ──
+
+def _env_with_stock(monkeypatch, stock_df):
+    import pandas as pd
+    _env(monkeypatch)
+    ver = SimpleNamespace(snapshot_key="snap.parquet", status="ready")
+    ds = SimpleNamespace(client_id="test", current_version=1)
+    monkeypatch.setattr(
+        "src.storage.datasets.get_datasets_registry",
+        lambda: SimpleNamespace(get=lambda ds_id: ds,
+                                get_version=lambda ds_id, v: ver))
+    import src.storage.zones as z
+    monkeypatch.setattr(z, "get_zone_backend", lambda zone: SimpleNamespace(
+        load_dataframe=lambda key: stock_df))
+    return pd
+
+
+def test_stock_subtracted_from_order(monkeypatch):
+    import pandas as pd
+    _env_with_stock(monkeypatch, pd.DataFrame({
+        "sku": ["A", "A", "B"],
+        "date": ["2026-07-10", "2026-07-15", "2026-07-15"],
+        "stock": [99.0, 10.0, None],
+    }))
+    out = _call(window=3, dataset_id="ds1")
+    a = next(i for i in out["items"] if i["sku"] == "A")
+    assert a["stock"] == 10.0                            # последний по дате
+    assert a["safety_sum"] == pytest.approx(12.0)        # 42 − 30
+    assert a["order_qty"] == 32                          # ceil(42 − 10)
+    b = next(i for i in out["items"] if i["sku"] == "B")
+    assert b["stock"] is None                            # только NaN-строки
+    assert b["order_qty"] == 10                          # без вычитания
+
+
+def test_stock_never_pushes_order_below_zero(monkeypatch):
+    import pandas as pd
+    _env_with_stock(monkeypatch, pd.DataFrame({
+        "sku": ["A"], "date": ["2026-07-15"], "stock": [10_000.0]}))
+    out = _call(window=3, dataset_id="ds1")
+    a = next(i for i in out["items"] if i["sku"] == "A")
+    assert a["order_qty"] == 0                           # не отрицательный
+
+
+def test_stock_read_failure_degrades_quietly(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setattr(
+        "src.storage.datasets.get_datasets_registry",
+        lambda: (_ for _ in ()).throw(RuntimeError("s3 down")))
+    out = _call(window=3, dataset_id="ds1")              # страница живёт
+    a = next(i for i in out["items"] if i["sku"] == "A")
+    assert a["stock"] is None and a["order_qty"] == 42

@@ -392,6 +392,30 @@ def order_recommendations(
         dataset_id = _default_dataset_id(client_id)
     rows = get_forecasts_registry().list_for_client(client_id, dataset_id=dataset_id)
 
+    # ── остатки: последний известный stock per SKU из snapshot'а датасета
+    # (прототип: «Заказ = прогноз + страховой запас − остаток»). Best-effort:
+    # нет stock-колонки у клиента / нет snapshot'а / блип чтения → остатки
+    # отсутствуют, страница живёт (колонка «—», заказ без вычитания).
+    stock_by_sku: dict[str, float] = {}
+    if dataset_id:
+        try:
+            from src.storage import zones as z
+            from src.storage.datasets import get_datasets_registry
+            ds_reg = get_datasets_registry()
+            ds = ds_reg.get(dataset_id)
+            if ds is not None and ds.client_id == client_id and ds.current_version >= 1:
+                ver = ds_reg.get_version(dataset_id, ds.current_version)
+                if ver is not None and ver.snapshot_key:
+                    snap = z.get_zone_backend(z.Zone.PROCESSED).load_dataframe(
+                        ver.snapshot_key)
+                    if "stock" in snap.columns:
+                        last = (snap.dropna(subset=["stock"])
+                                    .sort_values("date")
+                                    .groupby("sku")["stock"].last())
+                        stock_by_sku = {str(k): float(v) for k, v in last.items()}
+        except Exception as e:    # noqa: BLE001 — enrichment, не отказ страницы
+            logger.warning("order-recommendations: stock read failed: %s", e)
+
     empty_meta: dict = {
         "client_id": client_id, "dataset_id": dataset_id,
         "service_level": tau, "window": window,
@@ -426,11 +450,19 @@ def order_recommendations(
     for sku_name in sorted(per_sku.keys()):
         s = per_sku[sku_name]
         covered = s["covered"]
+        stock = stock_by_sku.get(sku_name)
+        # Прототип: страховой запас = квантиль − точечный прогноз окна;
+        # заказ = прогноз + запас − остаток, не ниже нуля, вверх до штук.
+        order_final = None
+        if covered:
+            order_final = int(math.ceil(max(0.0, s["order"] - (stock or 0.0))))
         items.append({
             "sku":            sku_name,
+            "stock":          stock,
             "demand_sum":     round(s["demand"], 2),
+            "safety_sum":     round(s["order"] - s["demand"], 2) if covered else None,
             "order_sum":      round(s["order"], 2) if covered else None,
-            "order_qty":      int(math.ceil(s["order"])) if covered else None,
+            "order_qty":      order_final,
             "p10_sum":        round(s["p10"], 2) if covered else None,
             "p90_sum":        round(s["p90"], 2) if covered else None,
             "days":           len(window_dates),
@@ -439,11 +471,13 @@ def order_recommendations(
 
     if format == "csv":
         from starlette.responses import Response
-        lines = ["sku;Спрос (прогноз);К заказу;Мин (p10);Макс (p90);Дней в окне;Дней с рекомендацией"]
+        lines = ["sku;Остаток;Спрос (прогноз);Страховой запас;К заказу;Мин (p10);Макс (p90);Дней в окне;Дней с рекомендацией"]
         for i in items:
             lines.append(";".join([
                 str(i["sku"]),
+                "" if i["stock"] is None else f"{i['stock']:.0f}",
                 f"{i['demand_sum']:.2f}".replace(".", ","),
+                "" if i["safety_sum"] is None else f"{i['safety_sum']:.2f}".replace(".", ","),
                 "" if i["order_qty"] is None else str(i["order_qty"]),
                 "" if i["p10_sum"] is None else f"{i['p10_sum']:.2f}".replace(".", ","),
                 "" if i["p90_sum"] is None else f"{i['p90_sum']:.2f}".replace(".", ","),
