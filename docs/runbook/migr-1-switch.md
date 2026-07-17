@@ -73,6 +73,11 @@ app-tier пересоздаст ближайший CD, либо руками `--
    - `REFRESH_COOKIE_SAMESITE=lax` (фронт и api теперь один registrable domain)
    - `EMAIL_FROM=noreply@sprosly.com` — ТОЛЬКО если DKIM уже зелёный,
      иначе отдельной версией позже.
+   - `SMTP_USER=noreply@sprosly.com` + `SMTP_PASSWORD=<пароль ящика>` —
+     ТОЙ ЖЕ версией, что и EMAIL_FROM: у Beget авторизация и From обязаны
+     совпадать, раздельная ротация оставит рассылку с 535/rejected.
+     Пароль владелец диктует в момент исполнения — в чат/файлы не пишем,
+     сразу в Lockbox.
    Затем force-recreate api (+ worker'ы, если читают эти ключи).
 3. Фронт-VPS: `LEGACY_REDIRECT=1` в .env → `docker compose ... up -d
    --force-recreate web` → skusystem.ru постранично 301-ит
