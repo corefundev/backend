@@ -33,6 +33,8 @@ services:
       context: ./nginx
     environment:
       API_DOMAIN: "${API_DOMAIN:?ERROR: set API_DOMAIN in .env (e.g. api.example.com)}"
+      # MIGR-1 #424: второй API-хост (api.sprosly.com); пусто = как раньше
+      API_DOMAIN_ALT: "${API_DOMAIN_ALT:-}"
       ADMIN_CIDR: ${ADMIN_CIDR:-127.0.0.1/32}
     ports:
       - "80:80"

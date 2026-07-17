@@ -24,7 +24,7 @@
 server {
     listen 80;
     listen [::]:80;
-    server_name ${API_DOMAIN};
+    server_name ${API_DOMAIN} ${API_DOMAIN_ALT};
 
     # certbot webroot challenge; served over plain HTTP on purpose
     location /.well-known/acme-challenge/ {
@@ -47,7 +47,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name ${API_DOMAIN};
+    server_name ${API_DOMAIN} ${API_DOMAIN_ALT};
 
     # ── TLS ─────────────────────────────────────────────────────────────────
     ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
