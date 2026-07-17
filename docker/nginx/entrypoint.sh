@@ -5,6 +5,7 @@ set -eu
 
 : "${API_DOMAIN:?API_DOMAIN must be set}"
 : "${ADMIN_CIDR:=127.0.0.1/32}"
+: "${API_DOMAIN_ALT:=}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # First-boot: if there's no cert yet, start nginx with a minimal HTTP-only
@@ -16,7 +17,7 @@ if [ ! -f "/etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem" ]; then
     cat > /etc/nginx/conf.d/bootstrap.conf <<EOF
 server {
     listen 80;
-    server_name ${API_DOMAIN};
+    server_name ${API_DOMAIN} ${API_DOMAIN_ALT};
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
         default_type "text/plain";
@@ -27,7 +28,7 @@ EOF
 else
     # Full config. Render by substituting only the two variables we use —
     # default envsubst would clobber every $var in nginx directives.
-    envsubst '${API_DOMAIN} ${ADMIN_CIDR}' \
+    envsubst '${API_DOMAIN} ${API_DOMAIN_ALT} ${ADMIN_CIDR}' \
         < /etc/nginx/templates/api.conf.template \
         > /etc/nginx/conf.d/api.conf
     rm -f /etc/nginx/conf.d/bootstrap.conf
@@ -41,7 +42,7 @@ fi
         sleep 21600
         if [ -f "/etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem" ]; then
             if [ ! -f /etc/nginx/conf.d/api.conf ]; then
-                envsubst '${API_DOMAIN} ${ADMIN_CIDR}' \
+                envsubst '${API_DOMAIN} ${API_DOMAIN_ALT} ${ADMIN_CIDR}' \
                     < /etc/nginx/templates/api.conf.template \
                     > /etc/nginx/conf.d/api.conf
                 rm -f /etc/nginx/conf.d/bootstrap.conf
