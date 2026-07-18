@@ -69,7 +69,8 @@ def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
     cfg = {"model": {"horizon": user_horizon},
            "data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}}
     monkeypatch.setattr(pt, "get_config_manager",
-                        lambda cp: SimpleNamespace(get_effective=lambda cid, reg: cfg))
+                        lambda cp: SimpleNamespace(get_effective=lambda cid, reg: cfg,
+                                                   get_effective_serving=lambda cid, reg: cfg))
 
     monkeypatch.setattr(pt, "load_data", lambda path, config: pd.DataFrame({"sku": ["A"]}))
     monkeypatch.setattr(pt, "validate_data", lambda df, config: df)
@@ -138,7 +139,8 @@ def _wire_anomaly_env(monkeypatch, *, df, flag_threshold):
     monkeypatch.setattr(pt, "get_registry", lambda: SimpleNamespace())
     cfg = {"data": {"sku_col": "sku", "date_col": "date", "target_col": "sales"}}
     monkeypatch.setattr(pt, "get_config_manager",
-                        lambda cp: SimpleNamespace(get_effective=lambda cid, reg: cfg))
+                        lambda cp: SimpleNamespace(get_effective=lambda cid, reg: cfg,
+                                                   get_effective_serving=lambda cid, reg: cfg))
     monkeypatch.setattr(pt, "load_data", lambda path, config: df)
     monkeypatch.setattr(pt, "validate_data", lambda d, config: d)
     monkeypatch.setattr(pt, "build_features", lambda d, config: d)

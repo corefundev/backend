@@ -18,7 +18,7 @@ import pandas as pd
 
 from src.data.loader import load_config, load_data, validate_data
 from src.data.ge_validator import validate_with_great_expectations
-from src.clients.config_manager import _has_nested, _set_nested, get_config_manager
+from src.clients.config_manager import get_config_manager
 from src.data.anomaly_detection import SalesAnomalyDetector
 from src.features.engineering import build_features, get_feature_columns
 from src.models.forecaster import SKUForecaster, log_to_mlflow
@@ -309,13 +309,11 @@ def run_training_pipeline(
     # Client config is merged ON TOP of system config.
     # System config.yaml is never modified.
     record = None
-    client_cfg: dict = {}    # explicit client deltas; gates plan defaults below
     try:
         from src.clients.registry import get_registry
         registry = get_registry()
         mgr      = get_config_manager(config_path)
         record   = registry.get(client_id)
-        client_cfg = (record.config if record else None) or {}
         config   = mgr.get_effective(client_id, registry)
         logger.info(f"Config for client={client_id}: applied per-client overrides")
     except Exception as e:
@@ -336,22 +334,14 @@ def run_training_pipeline(
     # value by forgetting to add a matching flag (the trap backtest_runner
     # warns about).
     try:
-        from src.plans.plans import get_plan_spec
-        spec = get_plan_spec(record.plan if record else None)
-        plan = record.plan if record else "free"
-        # (gate dotted-key in client override, target dotted-key in config, value)
-        plan_defaults = [
-            ("hpo",                             "hpo.enabled",     spec.hpo_n_trials > 0),
-            ("hpo",                             "hpo.n_trials",    spec.hpo_n_trials),
-            ("model.objective",                 "model.objective", spec.default_objective),
-            ("features.external_regressors_ru", "features.external_regressors_ru.enabled",
-                                                plan in {"start", "business"}),
-        ]
-        for gate, target, value in plan_defaults:
-            if not _has_nested(client_cfg, gate):
-                _set_nested(config, target, value)
+        # Модель-аудит H1: единый источник план-дефолтов — config_manager.
+        # apply_plan_defaults(config, record) обязана давать РОВНО тот же
+        # конфиг, что и serve-пути (get_effective_serving) — иначе
+        # feature_cols модели разойдутся с serve-фреймом.
+        from src.clients.config_manager import apply_plan_defaults
+        apply_plan_defaults(config, record)
         logger.info(
-            f"Plan-tier defaults: plan={plan} "
+            f"Plan-tier defaults: plan={record.plan if record else 'free'} "
             f"hpo_n_trials={config.get('hpo', {}).get('n_trials', 0)} "
             f"objective={config.get('model', {}).get('objective', 'mse')} "
             f"regressors_ru={config.get('features', {}).get('external_regressors_ru', {}).get('enabled', False)}"

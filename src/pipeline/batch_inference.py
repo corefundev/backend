@@ -23,6 +23,19 @@ from src.pipeline.inference_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _serving_config(config_path: str, client_id: str):
+    """Модель-аудит H1: клиентский serving-конфиг; None — CLI/дев-путь
+    без реестра (caller падает обратно на системный)."""
+    try:
+        from src.clients.config_manager import get_config_manager
+        from src.clients.registry import get_registry
+        return get_config_manager(config_path).get_effective_serving(
+            client_id, get_registry())
+    except Exception as e:    # noqa: BLE001 — фолбэк осознанный и логируемый
+        logger.warning(f"serving config unavailable ({e}) — system config")
+        return None
+
+
 def run_batch_inference(
     data_path:   str,
     model_path:  str,
@@ -34,7 +47,9 @@ def run_batch_inference(
     Generate horizon-day forecasts for all SKUs.
     Returns DataFrame with columns: sku, date, predicted_sales, step.
     """
-    config  = get_config(config_path)
+    # Модель-аудит H1: serving-конфиг клиента (override + план-дефолты),
+    # иначе фичи разойдутся с feature_cols платной модели.
+    config = _serving_config(config_path, client_id) or get_config(config_path)
     horizon = config["model"]["horizon"]
 
     logger.info(f"Batch inference: client={client_id}, horizon={horizon}d")
