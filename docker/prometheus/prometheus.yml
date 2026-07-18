@@ -154,6 +154,15 @@ scrape_configs:
       - targets:
           - "https://api.testcore.ru"
           - "https://skusystem.ru"
+          # MIGR-1 #424 Phase 3: sprosly.com hosts (one SAN cert on the
+          # frontend + the expanded api cert). skusystem.ru stays probed
+          # through the transition — its cert keeps renewing for the 301
+          # host.
+          - "https://api.sprosly.com"
+          - "https://sprosly.com"
+          - "https://www.sprosly.com"
+          - "https://news.sprosly.com"
+          - "https://help.sprosly.com"
     relabel_configs:
       - source_labels: [__address__]
         target_label:  __param_target
