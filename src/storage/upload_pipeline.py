@@ -89,11 +89,14 @@ def _validate_upload(filename: str, data: bytes) -> str:
 
 # ── Stage 1: accept ───────────────────────────────────────────────────────────
 
-def accept_upload(client_id: str, filename: str, data: bytes) -> ur.UploadRecord:
+def accept_upload(client_id: str, filename: str, data: bytes,
+                  dataset_id: str | None = None) -> ur.UploadRecord:
     """
     Called synchronously from the HTTP handler. Returns the new UploadRecord
     with status=uploaded. Does NOT block on scanning — that is done by the
-    worker after scan_task is enqueued.
+    worker after scan_task is enqueued. dataset_id (DS-2 #467, pre-validated
+    by the API layer) aims the upload at a dataset: the process worker
+    auto-attaches after the user-triggered prep completes.
     """
     z.validate_component(client_id, field="client_id")
     safe_filename = _validate_upload(filename, data)
@@ -106,6 +109,7 @@ def accept_upload(client_id: str, filename: str, data: bytes) -> ur.UploadRecord
         filename=safe_filename,
         size_bytes=len(data),
         sha256=sha,
+        dataset_id=dataset_id,
     )
 
     key = z.upload_key(client_id, upload_id, safe_filename)

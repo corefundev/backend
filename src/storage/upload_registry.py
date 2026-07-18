@@ -119,6 +119,10 @@ class UploadRecord:
     sniff_report: Optional[dict] = None            # in-sandbox format sniff
     mapping_proposal: Optional[dict] = None         # column-mapping engine output
     confirmed_mapping: Optional[dict] = None        # {canonical: source} applied at parse
+    # DS-2 (#467): target dataset chosen at upload time; the process
+    # worker auto-attaches after the user-triggered prep completes.
+    # NULL = legacy flow (upload not aimed at a dataset).
+    dataset_id: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -177,14 +181,16 @@ class PostgresUploadRegistry(UploadRegistry):
     def create(self, record: UploadRecord) -> None:
         sql = """
         INSERT INTO sku_uploads
-            (upload_id, client_id, filename, size_bytes, sha256, status)
-        VALUES (%s, %s, %s, %s, %s, %s)
+            (upload_id, client_id, filename, size_bytes, sha256, status,
+             dataset_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     record.upload_id, record.client_id, record.filename,
                     record.size_bytes, record.sha256, record.status,
+                    record.dataset_id,
                 ))
             conn.commit()
 
@@ -328,6 +334,7 @@ class PostgresUploadRegistry(UploadRegistry):
             sniff_report=row.get("sniff_report"),
             mapping_proposal=row.get("mapping_proposal"),
             confirmed_mapping=row.get("confirmed_mapping"),
+            dataset_id=row.get("dataset_id"),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
         )

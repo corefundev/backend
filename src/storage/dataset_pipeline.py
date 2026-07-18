@@ -56,6 +56,17 @@ def _load_upload_frame(upload_id: str, client_id: str) -> pd.DataFrame:
     return _read_parquet(rec.processed_key)
 
 
+def _persist_merge_stats(reg, dataset_id: str, upload_id: str, res) -> None:
+    """DS-2 #467: per-file «+N · заменено M» for the files table.
+    Best-effort — the version's merge_report stays authoritative."""
+    try:
+        reg.set_file_merge_stats(dataset_id, upload_id,
+                                 res.added, res.replaced)
+    except Exception as e:    # noqa: BLE001 — cosmetics only
+        logger.warning(
+            f"merge stats for {dataset_id}/{upload_id} not persisted: {e}")
+
+
 def materialize(dataset_id: str, *,
                 new_upload_id: Optional[str] = None) -> DatasetVersion:
     """Build version current+1: append one upload (new wins on overlap)
@@ -116,6 +127,8 @@ def materialize(dataset_id: str, *,
             date_max=str(pd.Timestamp(frame["date"].max()).date()),
             merge_report=report)
         reg.add_version(v)
+        if new_upload_id is not None:
+            _persist_merge_stats(reg, dataset_id, new_upload_id, res)
         logger.info(
             f"dataset {dataset_id} v{version}: {v.row_count} rows, "
             f"{v.sku_count} skus, fp={v.fingerprint} ({report['kind']})")

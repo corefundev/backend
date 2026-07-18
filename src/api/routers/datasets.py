@@ -71,6 +71,51 @@ def _ds_view(ds, reg) -> dict:
     }
 
 
+def _model_blocks(client_id: str) -> Optional[dict]:
+    """DS-2 #467: per-dataset model card — newest FINISHED run with an
+    artifact, keyed by dataset_id. One runs query per request (not per
+    dataset). Best-effort: an unavailable registry degrades to None
+    (call sites `or {}` → «модель не обучена»), never a 5xx."""
+    try:
+        from src.storage.training_runs import (
+            FINISHED,
+            get_training_runs_registry,
+        )
+        out: dict = {}
+        for r in get_training_runs_registry().list_for_client(
+                client_id, limit=100):
+            if (r.status != FINISHED or not r.model_path
+                    or not r.dataset_id or r.dataset_id in out):
+                continue    # list is newest-first — first hit wins
+            improvement = None
+            if (r.baseline_wmape and r.wmape is not None
+                    and r.baseline_wmape > 0):
+                improvement = (r.baseline_wmape - r.wmape) / r.baseline_wmape
+            out[r.dataset_id] = {
+                "trained_at": r.ended_at,
+                "dataset_version": r.dataset_version,
+                "wmape": r.wmape,
+                "wmape_order_7": r.wmape_order_7,
+                "wmape_order_14": r.wmape_order_14,
+                "baseline_wmape": r.baseline_wmape,
+                "improvement_vs_naive": improvement,
+            }
+        return out
+    except Exception as e:    # noqa: BLE001 — degrade, don't 5xx
+        logger.warning("model blocks unavailable for %s: %s", client_id, e)
+        return None
+
+
+def _with_model(view: dict, blocks: dict) -> dict:
+    m = blocks.get(view["dataset_id"])
+    if m is not None:
+        m = dict(m)
+        m["up_to_date"] = (m["dataset_version"] == view["current_version"]
+                           if m["dataset_version"] is not None else None)
+    view["model"] = m
+    return view
+
+
 def _migrate_default_dataset(client_id: str) -> None:
     """Ленивая миграция: у клиента есть processed-загрузки, но нет ни
     одного датасета → создаём «Основной» с ПОСЛЕДНЕЙ processed-загрузкой.
@@ -137,7 +182,9 @@ def list_datasets(client_id: str,
     if not rows:
         _migrate_default_dataset(client_id)
         rows = reg.list_for_client(client_id)
-    return {"datasets": [_ds_view(d, reg) for d in rows]}
+    blocks = _model_blocks(client_id) or {}
+    return {"datasets": [_with_model(_ds_view(d, reg), blocks)
+                         for d in rows]}
 
 
 @router.get("/clients/{client_id}/datasets/{dataset_id}")
@@ -155,6 +202,9 @@ def get_dataset(client_id: str, dataset_id: str,
             "filename": u.filename if u else None,
             "status": u.status if u else "deleted",
             "row_count": u.row_count if u else None,
+            # DS-2 #467: «+N · заменено M» (None = pre-DS-2 attach)
+            "merge_added": f.get("merge_added"),
+            "merge_replaced": f.get("merge_replaced"),
         })
     versions = [{
         "version": v.version, "status": v.status,
@@ -163,9 +213,21 @@ def get_dataset(client_id: str, dataset_id: str,
         "date_max": v.date_max, "merge_report": v.merge_report,
         "created_at": v.created_at,
     } for v in reg.list_versions(dataset_id, limit=20)]
-    out = _ds_view(ds, reg)
+    # DS-2 #467: uploads aimed at this dataset that have not attached yet
+    # (awaiting scan/prep, or failed) — the files table shows them as
+    # «Ждёт подготовки»/error rows next to the merged ones.
+    attached = {f["upload_id"] for f in reg.list_files(dataset_id)}
+    pending = [{
+        "upload_id": u.upload_id, "filename": u.filename,
+        "status": u.status, "row_count": u.row_count,
+        "created_at": u.created_at,
+    } for u in ureg.list_for_client(client_id, limit=100)
+        if u.dataset_id == dataset_id and u.upload_id not in attached]
+
+    out = _with_model(_ds_view(ds, reg), _model_blocks(client_id) or {})
     out["files_detail"] = files
     out["versions"] = versions
+    out["pending_uploads"] = pending
     return out
 
 

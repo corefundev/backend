@@ -104,22 +104,82 @@ def _scan_job(upload_id: str) -> dict:
     }
 
 
+def _auto_attach_to_dataset(record) -> Optional[dict]:
+    """DS-2 (#467): a PROCESSED upload aimed at a dataset (dataset_id set
+    at upload time) is attached + materialized here, in the process
+    worker — the user pressed «Подготовить», attach is the natural
+    continuation, no extra click. Never raises: prep already succeeded
+    and its status must stand; an attach failure is surfaced via the
+    inbox so the user can re-attach from the dataset page."""
+    from src.storage.dataset_pipeline import MaterializeError, materialize
+    from src.storage.datasets import ACTIVE, get_datasets_registry
+    from src.storage.notifications import emit_notification
+
+    try:
+        reg = get_datasets_registry()
+        ds = reg.get(record.dataset_id)
+        if ds is None or ds.client_id != record.client_id \
+                or ds.status != ACTIVE:
+            logger.warning("auto-attach skipped: dataset %s gone/foreign "
+                           "for upload %s", record.dataset_id,
+                           record.upload_id)
+            return None
+        if any(f["upload_id"] == record.upload_id
+               for f in reg.list_files(ds.dataset_id)):   # RQ-retry rerun
+            return {"dataset_id": ds.dataset_id, "already_attached": True}
+        reg.attach_file(ds.dataset_id, record.upload_id)
+        try:
+            v = materialize(ds.dataset_id, new_upload_id=record.upload_id)
+        except MaterializeError as e:
+            reg.detach_file(ds.dataset_id, record.upload_id)
+            emit_notification(
+                record.client_id, type="upload_failed", severity="error",
+                title="Файл не удалось доложить в датасет",
+                body=(f"«{record.filename}» обработан, но не влился в "
+                      f"«{ds.name}»: {str(e)[:200]}"),
+                dedup_key=f"attach:{record.upload_id}",
+            )
+            return {"dataset_id": ds.dataset_id, "attach_error": str(e)}
+        emit_notification(
+            record.client_id, type="upload_processed", severity="success",
+            title=f"Файл доложен в «{ds.name}»",
+            body=(f"«{record.filename}»: версия данных v{v.version} — "
+                  f"добавлено {v.merge_report.get('added', 0)}, заменено "
+                  f"{v.merge_report.get('replaced', 0)}. Обучите модель, "
+                  f"чтобы прогнозы учли новые данные."),
+            dedup_key=f"attach:{record.upload_id}",
+        )
+        return {"dataset_id": ds.dataset_id, "version": v.version}
+    except Exception as e:    # noqa: BLE001 — prep result must stand
+        logger.error("auto-attach failed for upload %s → dataset %s: %s",
+                     record.upload_id, record.dataset_id, e)
+        return {"dataset_id": record.dataset_id, "attach_error": str(e)}
+
+
 def _process_job(upload_id: str) -> dict:
     """
     Runs in the prep/process worker (sku-process). DP-4b (#324): the USER-
     triggered «Подготовить» step — sniff + system auto-mapping + sandbox parse,
     all in run_prepare. Distinct from the scan worker (which only did AV).
     """
+    from src.storage import upload_registry as ur
     from src.storage.upload_pipeline import run_prepare
 
     record = run_prepare(upload_id)
-    _emit_upload_inbox(record)          # PROCESSED / PROCESSING_FAIL
+    attach = None
+    if record.status == ur.PROCESSED and record.dataset_id:
+        # DS-2 (#467): dataset-aimed upload → attach here; the attach
+        # inbox row replaces the generic «файл обработан» one.
+        attach = _auto_attach_to_dataset(record)
+    if not (attach and "version" in attach):
+        _emit_upload_inbox(record)      # PROCESSED / PROCESSING_FAIL
     return {
         "upload_id": upload_id,
         "status": record.status,
         "processed_key": record.processed_key,
         "row_count": record.row_count,
         "error_message": record.error_message,
+        "dataset_attach": attach,
     }
 
 

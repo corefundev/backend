@@ -25,7 +25,15 @@ from typing import Optional
 import os
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel
 
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
@@ -62,6 +70,9 @@ class UploadStatusResponse(BaseModel):
     processed_key: Optional[str]
     row_count: Optional[int]
     sku_count: Optional[int]
+    # DS-2 #467: target dataset (NULL = legacy flow) — «История
+    # подготовок» shows the dataset column from it.
+    dataset_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -87,9 +98,21 @@ def _max_bytes() -> int:
 async def upload_file(
     client_id: str,
     file: UploadFile = File(..., description="CSV or XLSX (≤ MAX_UPLOAD_BYTES)"),
+    dataset_id: Optional[str] = Form(
+        None, min_length=1, max_length=64,
+        description="DS-2 #467: датасет, в который доложить файл после "
+                    "подготовки (авто-прикрепление)"),
     auth: AuthContext = Depends(get_current_client),
 ):
     require_client_access(client_id, auth)
+
+    if dataset_id is not None:
+        # Same 404 contract as the datasets router (R4-7: no existence
+        # leak for foreign/deleted datasets).
+        from src.storage.datasets import ACTIVE, get_datasets_registry
+        ds = get_datasets_registry().get(dataset_id)
+        if ds is None or ds.client_id != client_id or ds.status != ACTIVE:
+            raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Read with a hard cap — don't rely on Content-Length. We peel off
     # max_bytes + 1 so we can detect overflow without loading unlimited data.
@@ -106,6 +129,7 @@ async def upload_file(
             client_id=client_id,
             filename=file.filename or "upload",
             data=data,
+            dataset_id=dataset_id,
         )
     except pipeline.UploadRejected as e:
         raise HTTPException(status_code=400, detail=str(e))

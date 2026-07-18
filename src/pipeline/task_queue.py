@@ -271,6 +271,8 @@ def _record_run_finished(
                 # HZ-1 #464: «точность для заказа» — WMAPE суммы окна 7/14.
                 wmape_order_7=metrics.get("wmape_order_7"),
                 wmape_order_14=metrics.get("wmape_order_14"),
+                # DS-2 #467: naive baseline from the promotion gate.
+                baseline_wmape=metrics.get("baseline_wmape"),
                 model_path=result.get("model_path"),
                 mlflow_run_id=result.get("mlflow_run_id"),
                 # R11: persist MLflow telemetry-logging failure (NULL when
