@@ -9,7 +9,7 @@
 #                      recreate api + worker* services. Other infra
 #                      services (postgres/redis/nginx/...) are restarted
 #                      only if their compose-time defs changed.
-#   3. smoke-staging  — external probes (https://api.staging.testcore.ru/healthz).
+#   3. smoke-staging  — external probes (https://api.staging.sprosly.com/healthz).
 #   4. deploy-prod    — environment "production" requires reviewer approval
 #                      (configure in GH Settings → Environments). Mirrors
 #                      staging steps on prod VPS using same image SHA.
@@ -294,7 +294,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 12); do
-              BODY=$(curl -fsS https://api.staging.testcore.ru/healthz 2>&1) || BODY=""
+              BODY=$(curl -fsS https://api.staging.sprosly.com/healthz 2>&1) || BODY=""
               if echo "$BODY" | grep -q '"status":"ok"'; then
                   echo "  /healthz OK on attempt $i: $BODY"
                   exit 0
@@ -307,7 +307,7 @@ jobs:
       - name: TLS cert chain valid (LE)
         run: |
           set -euo pipefail
-          ISSUER=$(echo | openssl s_client -connect api.staging.testcore.ru:443 -servername api.staging.testcore.ru 2>/dev/null | openssl x509 -noout -issuer)
+          ISSUER=$(echo | openssl s_client -connect api.staging.sprosly.com:443 -servername api.staging.sprosly.com 2>/dev/null | openssl x509 -noout -issuer)
           echo "  issuer: $ISSUER"
           echo "$ISSUER" | grep -q "Let's Encrypt" || { echo "::error::cert not Let's Encrypt"; exit 1; }
 
