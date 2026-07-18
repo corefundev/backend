@@ -60,8 +60,11 @@ if ! openssl verify -CAfile "$CA_DIR/ca.crt" "$CA_DIR/ca.crt" >/dev/null 2>&1; t
     exit 1
 fi
 
-CA_DAYS_LEFT=$(( ($(date -j -f "%b %d %H:%M:%S %Y %Z" "$(openssl x509 -in "$CA_DIR/ca.crt" -noout -enddate | cut -d= -f2)" +%s 2>/dev/null \
-                 || date -d "$(openssl x509 -in "$CA_DIR/ca.crt" -noout -enddate | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+# openssl prints single-digit days with a DOUBLE space ("May  6 ...");
+# BSD strptime chokes on it — squeeze whitespace before parsing.
+CA_END=$(openssl x509 -in "$CA_DIR/ca.crt" -noout -enddate | cut -d= -f2 | tr -s " ")
+CA_DAYS_LEFT=$(( ($(date -j -f "%b %d %H:%M:%S %Y %Z" "$CA_END" +%s 2>/dev/null \
+                 || date -d "$CA_END" +%s) - $(date +%s)) / 86400 ))
 echo "CA days remaining: $CA_DAYS_LEFT"
 if [[ "$CA_DAYS_LEFT" -lt $((DAYS + 30)) ]]; then
     echo "WARNING: CA itself expires in $CA_DAYS_LEFT days, less than leaf validity ($DAYS) + 30 day buffer." >&2
@@ -160,7 +163,7 @@ ssh_r 'docker restart postgres-replica >/dev/null && sleep 8'
 
 # 6. Verify replication is back.
 echo "→ verify"
-RAW_REP=$(ssh_p 'docker exec docker-postgres-1 psql -U sku -d sku_forecasting -tAc "SELECT client_addr || \"|\" || state || \"|\" || EXTRACT(EPOCH FROM (now() - reply_time))::int FROM pg_stat_replication"')
+RAW_REP=$(ssh_p "docker exec docker-postgres-1 psql -U sku -d sku_forecasting -tAc \"SELECT client_addr || '|' || state || '|' || EXTRACT(EPOCH FROM (now() - reply_time))::int FROM pg_stat_replication\"")
 echo "  pg_stat_replication: $RAW_REP"
 if [[ "$RAW_REP" != *"|streaming|"* ]]; then
     echo "FAIL: replication is not streaming. Manual rollback required:" >&2
@@ -169,7 +172,7 @@ if [[ "$RAW_REP" != *"|streaming|"* ]]; then
     exit 2
 fi
 
-RAW_RECV=$(ssh_r 'docker exec postgres-replica psql -U sku -d sku_forecasting -tAc "SELECT status || \"|\" || sender_host FROM pg_stat_wal_receiver"')
+RAW_RECV=$(ssh_r "docker exec postgres-replica psql -U sku -d sku_forecasting -tAc \"SELECT status || '|' || sender_host FROM pg_stat_wal_receiver\"")
 echo "  pg_stat_wal_receiver: $RAW_RECV"
 # MIGR-2 #494: до Фазы 3 conninfo ходит на легаси-имя, после — на
 # sprosly; ротация обязана быть зелёной в обоих состояниях.

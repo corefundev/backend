@@ -1,7 +1,7 @@
 # Postgres failover runbook
 
-Steps to recover when the production primary at `api.testcore.ru` is
-unrecoverable. Promotes the replica at `db-replica.testcore.ru` to a
+Steps to recover when the production primary at `the prod VPS (62.217.181.157)` is
+unrecoverable. Promotes the replica at `the replica VPS (212.8.226.233)` to a
 writable primary, cuts over the app, and re-bootstraps the failed
 primary as the new replica.
 
@@ -12,7 +12,7 @@ Symptoms (Telegram → Alert System group):
 - 🔥 `PostgresDown (cluster=prod)` firing for >5 min, AND
 - 🔥 `PgReplicaWalReceiverDown (cluster=prod)` firing simultaneously
 
-Confirmed: the api.testcore.ru postgres is unreachable (host down /
+Confirmed: the the prod VPS (62.217.181.157) postgres is unreachable (host down /
 disk failure / kernel panic), AND the replica is healthy.
 
 If only `PostgresDown` fires (without `PgReplicaWalReceiverDown`), the
@@ -20,8 +20,8 @@ issue is most likely a transient blip — postgres restart, network
 flap, or container OOM. Diagnose first:
 
 1. `Diagnose Backup Pipeline` workflow — runs sanity checks over SSH.
-2. `ssh deploy@api.testcore.ru docker ps` — is postgres container up?
-3. `ssh deploy@api.testcore.ru docker logs --tail=50 docker-postgres-1`
+2. `ssh deploy@62.217.181.157 docker ps` — is postgres container up?
+3. `ssh deploy@62.217.181.157 docker logs --tail=50 docker-postgres-1`
 
 If recoverable in <10 min via `docker restart docker-postgres-1`, do
 that instead. Do NOT promote unless you have a real outage.
@@ -30,9 +30,9 @@ that instead. Do NOT promote unless you have a real outage.
 
 | Role | Before | After promote |
 |---|---|---|
-| Primary | api.testcore.ru (62.217.181.157) | **db-replica.testcore.ru (212.8.226.233)** |
-| Replica | db-replica.testcore.ru | (was primary) api.testcore.ru — becomes replica via `failback.sh` |
-| App stack | api.testcore.ru | api.testcore.ru (unchanged) — but DATABASE_URL repointed |
+| Primary | the prod VPS (62.217.181.157) (62.217.181.157) | **the replica VPS (212.8.226.233) (212.8.226.233)** |
+| Replica | the replica VPS (212.8.226.233) | (was primary) the prod VPS (62.217.181.157) — becomes replica via `failback.sh` |
+| App stack | the prod VPS (62.217.181.157) | the prod VPS (62.217.181.157) (unchanged) — but DATABASE_URL repointed |
 | Frontend | skusystem.ru | skusystem.ru (unchanged) |
 
 ## Recovery time / data loss
@@ -60,7 +60,7 @@ This is the single irreversible step. It:
 4. Waits for `pg_is_in_recovery() = false` (~5 s)
 5. Verifies INSERT works against the new primary
 
-**After this completes**: `db-replica.testcore.ru:5432` is the new
+**After this completes**: `the replica VPS (212.8.226.233):5432` is the new
 primary, on a new timeline (ID +1). The old primary, if it ever comes
 back, can no longer be reattached as a replica without a full
 re-bootstrap from `pg_basebackup` (Phase 3).
@@ -68,7 +68,7 @@ re-bootstrap from `pg_basebackup` (Phase 3).
 ## Phase 2 — App cutover (5–10 min)
 
 The app's `DATABASE_URL` currently points at `postgres:5432` (docker
-network) on the api.testcore.ru VPS. We need it to point at the new
+network) on the the prod VPS (62.217.181.157) VPS. We need it to point at the new
 primary host.
 
 ### 2a. Update DATABASE_URL in Lockbox
@@ -80,7 +80,7 @@ yc lockbox payload get e6q1oejlsqgn4hn7p1fi --format json > /tmp/payload.json
 # Edit DATABASE_URL value to use the new primary host. Example:
 #   "postgresql://sku:<PG_PWD>@212.8.226.233:5432/sku_forecasting?sslmode=verify-ca&sslrootcert=/etc/ssl/pg/ca.crt"
 # (use sslmode=verify-ca, NOT verify-full — leaf cert CN is still
-#  api.testcore.ru, won't match host db-replica.testcore.ru until
+#  the prod VPS (62.217.181.157), won't match host the replica VPS (212.8.226.233) until
 #  Phase 4 cert rotation. verify-ca only checks CA chain, not CN.)
 nano /tmp/payload.json
 
@@ -97,7 +97,7 @@ The new primary's `pg_hba.conf` allows replication-only from the old
 replica's IP. Need to add an entry for the app's IP:
 
 ```bash
-ssh deploy@db-replica.testcore.ru
+ssh deploy@212.8.226.233
 docker exec -u 0 postgres-replica sh -c 'cat >> /var/lib/postgresql/data/pg_hba.conf <<EOF
 hostssl all sku 62.217.181.157/32 scram-sha-256
 EOF'
@@ -117,7 +117,7 @@ to allow app source. Two options:
 ### 2d. Restart app stack to pick up new DATABASE_URL
 
 ```bash
-ssh deploy@api.testcore.ru
+ssh deploy@62.217.181.157
 cd /srv/backend
 COMPOSE_ARGS='--env-file .env -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml -f docker/docker-compose.replication.yml'
 docker compose $COMPOSE_ARGS restart api worker scan-worker process-worker
@@ -130,11 +130,11 @@ container recreate needed.
 ### 2e. Smoke
 
 ```bash
-curl -fsS https://api.testcore.ru/healthz
+curl -fsS https://api.sprosly.com/healthz
 # {"status":"ok"}
 
 # Plus a DB-touching call:
-ssh deploy@api.testcore.ru 'docker exec docker-api-1 python -c "
+ssh deploy@62.217.181.157 'docker exec docker-api-1 python -c "
 import os, psycopg2
 c = psycopg2.connect(os.environ[\"DATABASE_URL\"])
 c.cursor().execute(\"SELECT count(*) FROM sku_forecasts\")
@@ -180,10 +180,10 @@ might be a few seconds of unreplicated transactions in there.
 In `docker/prometheus.yml`, swap target IPs/hosts:
 
 - `postgres` job → currently scrapes `postgres-exporter:9187` (in-stack on
-  api.testcore.ru); after failback it should scrape the postgres-exporter
-  on the new primary VPS at db-replica.testcore.ru
+  the prod VPS (62.217.181.157)); after failback it should scrape the postgres-exporter
+  on the new primary VPS at the replica VPS (212.8.226.233)
 - `postgres-replica` job → currently 212.8.226.233; should be the new
-  replica host (api.testcore.ru) once it's streaming again
+  replica host (the prod VPS (62.217.181.157)) once it's streaming again
 
 (In practice we run both: the in-stack `postgres-exporter` continues
 to scrape its local postgres regardless of which is primary, so the
@@ -207,7 +207,7 @@ Phase 2 used `sslmode=verify-ca` as a workaround. To restore
 
 ```bash
 # Edit scripts/rotate_pg_replication_certs.sh — change
-#   PRIMARY_HOST="api.testcore.ru" → "db-replica.testcore.ru"
+#   PRIMARY_HOST="the prod VPS (62.217.181.157)" → "the replica VPS (212.8.226.233)"
 # Then run.
 bash scripts/rotate_pg_replication_certs.sh
 ```
@@ -218,8 +218,8 @@ Then revert Lockbox `DATABASE_URL` to use `sslmode=verify-full`.
 
 If the failover state is permanent, point DNS:
 
-- `api.testcore.ru` A record → 212.8.226.233 (new primary VPS)
-- `db-replica.testcore.ru` A record → 62.217.181.157 (new replica VPS)
+- `the prod VPS (62.217.181.157)` A record → 212.8.226.233 (new primary VPS)
+- `the replica VPS (212.8.226.233)` A record → 62.217.181.157 (new replica VPS)
 
 Don't do this unless you've decided the topology change is
 permanent — DNS propagation takes 5–60 min and is hard to undo.

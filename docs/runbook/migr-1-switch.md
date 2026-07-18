@@ -1,7 +1,7 @@
 # MIGR-1 (#424): переезд на sprosly.com — runbook исполнения
 
 Прототип-решения владельца: поддомены news.sprosly.com / help.sprosly.com;
-.ru = только 301; api.testcore.ru остаётся алиасом ≥ переходного периода.
+.ru = только 301; the prod VPS (62.217.181.157) остаётся алиасом ≥ переходного периода.
 Все per-фазовые prod-действия — только после prod-approve владельца.
 
 ## Фаза 1a — api.sprosly.com параллельно (без переключения)
@@ -10,7 +10,7 @@
 nginx — правило cd-scope):
 
 ```sh
-ssh deploy@api.testcore.ru
+ssh deploy@62.217.181.157
 cd /srv/backend
 echo 'API_DOMAIN_ALT=api.sprosly.com' >> .env
 set -a && . .env && set +a
@@ -22,7 +22,7 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml \
   -f docker/docker-compose.minimal.yml -f docker/docker-compose.lockbox.yml \
   -f docker/docker-compose.replication.yml run --rm certbot \
   certonly --webroot -w /var/www/certbot --expand \
-  --cert-name api.testcore.ru -d api.testcore.ru -d api.sprosly.com
+  --cert-name the prod VPS (62.217.181.157) -d the prod VPS (62.217.181.157) -d api.sprosly.com
 docker exec docker-nginx-1 nginx -s reload
 curl -sI https://api.sprosly.com/healthz | head -1     # 200 OK
 ```
@@ -35,7 +35,7 @@ curl -sI https://api.sprosly.com/healthz | head -1     # 200 OK
 ssh root@212.67.15.32
 cd /srv/frontend
 # env: новый домен + CSP на ОБА API (переходный период)
-sed -i 's|^CSP_CONNECT_SRC=.*|CSP_CONNECT_SRC=https://api.testcore.ru https://api.sprosly.com|' .env
+sed -i 's|^CSP_CONNECT_SRC=.*|CSP_CONNECT_SRC=https://api.sprosly.com https://api.sprosly.com|' .env
 grep -q NEW_DOMAIN .env || echo 'NEW_DOMAIN=sprosly.com' >> .env
 docker compose -f docker-compose.prod.yml up -d --force-recreate web
 # SAN-серт четырёх хостов (http-01 сквозь CF-proxy; SSL-mode зоны = Full)
@@ -49,7 +49,7 @@ for h in sprosly.com www.sprosly.com news.sprosly.com help.sprosly.com; do
 done
 ```
 
-⚠️ Пока VITE_API_URL в бандле = api.testcore.ru, sprosly.com обслуживает
+⚠️ Пока VITE_API_URL в бандле = the prod VPS (62.217.181.157), sprosly.com обслуживает
 приложение через СТАРЫЙ API — это норма Фазы 1 (CORS уже пускает, см. 1c).
 
 ## Фаза 1c — CORS: пустить новые origin'ы в API (Lockbox, атомарно)

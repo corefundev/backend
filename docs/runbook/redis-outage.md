@@ -13,7 +13,7 @@
 ## Triage (60s)
 
 ```bash
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker ps -f name=docker-redis-1 --format "{{.Names}}\t{{.Status}}"'
 # Expected on healthy: "Up Nh (healthy)"
 # Expected on broken: "Exited" or missing
@@ -43,7 +43,7 @@ ssh ... 'docker exec docker-redis-1 redis-cli ping'
 ### Option 1 — Container is `Exited`, no data loss expected
 
 ```bash
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'cd /srv/backend && docker compose ... up -d redis'
 # Verify:
 ssh ... 'docker exec docker-redis-1 redis-cli ping'
@@ -81,7 +81,7 @@ print(\"reaped\")
 ## Verify
 
 ```bash
-curl -fsS https://api.testcore.ru/readyz | jq .
+curl -fsS https://api.sprosly.com/readyz | jq .
 # Expected: {"ready": true, "checks": {"redis": {"ok": true}, ...}}
 ```
 

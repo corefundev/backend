@@ -29,9 +29,9 @@ to bottom in the moment** — each file follows the same shape:
 
 ```bash
 # SSH access (one of these depending on target VPS):
-~/.ssh/claude/deploy-key                    # api.testcore.ru (prod)
-~/.ssh/id_ed25519_replica                    # db-replica.testcore.ru
-~/.ssh/claude/staging-deploy-key             # staging.testcore.ru
+~/.ssh/claude/deploy-key                    # the prod VPS (62.217.181.157) (prod)
+~/.ssh/id_ed25519_replica                    # the replica VPS (212.8.226.233)
+~/.ssh/claude/staging-deploy-key             # 159.194.202.86 (staging VPS)
 ~/.ssh/claude/yc-sa-key.json                 # Yandex Cloud SA (Lockbox)
 
 # Memory references (read before acting):

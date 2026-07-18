@@ -25,7 +25,7 @@ cat ~/.claude/projects/-Users-ilailin-Desktop-core/memory/project_lockbox_bootst
 
 # 3. Note current key id in audit_log so you can verify
 #    the rotation registered.
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c \
      "SELECT target_id, ts FROM audit_log \
       WHERE event_type = '"'"'secret_rotation'"'"' \
@@ -58,7 +58,7 @@ bash scripts/rotate_lockbox_key.sh
 
 ```bash
 # 1. /readyz green
-curl -fsS https://api.testcore.ru/readyz | jq .
+curl -fsS https://api.sprosly.com/readyz | jq .
 
 # 2. secret_rotation audit event emitted (new target_id).
 ssh ... 'docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c \
@@ -107,7 +107,7 @@ Forensic copy: see audit_log secret_rotation event id <Y>
 
 ## DO NOT
 
-* **DO NOT** run rotation FROM api.testcore.ru. Master-creds must
+* **DO NOT** run rotation FROM the prod VPS (62.217.181.157). Master-creds must
   not live on prod.
 * **DO NOT** delete the previous key without confirming the new
   one bootstrapped successfully (`/readyz=200`).

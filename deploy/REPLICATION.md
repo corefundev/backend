@@ -1,12 +1,12 @@
 # PostgreSQL Streaming Replication
 
-Async streaming replica of the production primary (api.testcore.ru) on
-a dedicated VPS (db-replica.testcore.ru / 212.8.226.233).
+Async streaming replica of the production primary (the prod VPS (62.217.181.157)) on
+a dedicated VPS (the replica VPS (212.8.226.233) / 212.8.226.233).
 
 ## Topology
 
 ```
-  api.testcore.ru (primary)              db-replica.testcore.ru (standby)
+  the prod VPS (62.217.181.157) (primary)              the replica VPS (212.8.226.233) (standby)
   ┌──────────────────────┐                ┌──────────────────────┐
   │ postgres:16-alpine   │   WAL stream   │ postgres:16-alpine   │
   │ /srv/backend/...     │ ─────────────► │ /srv/postgres-replica│
@@ -121,7 +121,7 @@ Use only when primary is **dead** and not coming back.
 ### Pre-promotion sanity check
 
 ```bash
-ssh deploy@db-replica.testcore.ru
+ssh deploy@212.8.226.233
 docker exec -it postgres-replica psql -U sku -d sku_forecasting \
   -c "SELECT pg_last_wal_replay_lsn(), now() - pg_last_xact_replay_timestamp();"
 ```
@@ -144,8 +144,8 @@ After promotion:
 
 ### Cut over the application
 
-1. Update `DATABASE_URL` in Lockbox to point at `db-replica.testcore.ru`
-   (or update DNS to swap `api.testcore.ru`'s database hostname).
+1. Update `DATABASE_URL` in Lockbox to point at `the replica VPS (212.8.226.233)`
+   (or update DNS to swap `the prod VPS (62.217.181.157)`'s database hostname).
 2. Restart `api` + `worker` containers on whatever VPS you're using.
 3. Set up a fresh replica (or pre-baked one) and re-base from the new
    primary using this same playbook in reverse.
@@ -188,7 +188,7 @@ Expect ~365 right after rotation, decreasing 1/day.
 2. Set `force_regen_cert: true`. All other inputs at default.
 3. The workflow:
    - Wipes `/srv/backend/secrets/pg-ssl/server.{crt,key}` on primary.
-   - Re-generates a fresh cert (CN=api.testcore.ru, SAN includes IP).
+   - Re-generates a fresh cert (CN=the prod VPS (62.217.181.157), SAN includes IP).
    - Recreates postgres container — picks up the new cert at boot.
    - Prints the new public cert PEM between markers
      `===PG_REPLICATION_CERT_START===` / `===PG_REPLICATION_CERT_END===`
@@ -246,7 +246,7 @@ If WAL retention slipped and the replica fell behind so far it can't
 catch up (e.g. the slot was dropped), the only path is a re-base:
 
 ```bash
-ssh deploy@db-replica.testcore.ru
+ssh deploy@212.8.226.233
 sudo docker compose -f /srv/postgres-replica/docker-compose.replica.yml down
 # rerun bootstrap_replica.sh from local — it wipes the data dir
 ```
@@ -272,12 +272,12 @@ From your local box, against the replica VPS:
 
 ```bash
 # 1. Replica is in standby mode + WAL receiver streaming.
-ssh deploy@db-replica.testcore.ru \
+ssh deploy@212.8.226.233 \
   'docker exec postgres-replica psql -U sku -d sku_forecasting -c \
    "SELECT status, sender_host, written_lsn, latest_end_lsn FROM pg_stat_wal_receiver;"'
 
 # 2. Replay lag (how far behind the primary the replica is).
-ssh deploy@db-replica.testcore.ru \
+ssh deploy@212.8.226.233 \
   'docker exec postgres-replica psql -U sku -d sku_forecasting -c \
    "SELECT pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(),
            now() - pg_last_xact_replay_timestamp() AS replay_lag;"'
@@ -296,4 +296,4 @@ Healthy state:
 | 2 | UFW does not gate 5432 (Docker NAT bypasses it) | ~~Anyone can reach 5432 even if pg_hba refuses; brute-force surface.~~ Closed via privileged `pg-firewall` sidecar in `docker-compose.replication.yml` — manages DOCKER-USER chain rules without OS-level sudo. | shipped |
 | 3 | Async replication only | A primary failure + lag at that moment = data loss. Acceptable for our SLAs. | — |
 | 4 | Manual promote required | DR runbook is human-driven. Patroni/repmgr would automate. | TODO |
-| 5 | No postgres-exporter on replica VPS | ~~Can't see lag in Grafana.~~ Closed via postgres-exporter sidecar in `docker-compose.replica.yml` (uses `replicator` user with pg_monitor role) + replica-firewall sidecar restricting 9187 to PRIMARY_CIDR. Primary's Prometheus scrapes via the new `postgres-replica` job (label `host="db-replica.testcore.ru"`). | shipped |
+| 5 | No postgres-exporter on replica VPS | ~~Can't see lag in Grafana.~~ Closed via postgres-exporter sidecar in `docker-compose.replica.yml` (uses `replicator` user with pg_monitor role) + replica-firewall sidecar restricting 9187 to PRIMARY_CIDR. Primary's Prometheus scrapes via the new `postgres-replica` job (label `host="the replica VPS (212.8.226.233)"`). | shipped |
