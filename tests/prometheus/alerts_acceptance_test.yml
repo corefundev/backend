@@ -819,7 +819,7 @@ tests:
           - exp_labels: {job: "postgres-replica", severity: critical, team: forecasting}
             exp_annotations:
               summary: "Replica's postgres-exporter unreachable for 2m"
-              description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to db-replica.testcore.ru and inspect."
+              description: "Either replica VPS is down, replica-firewall sidecar dropped its rules, or the exporter container died. SSH to the replica VPS (deploy@212.8.226.233) and inspect."
 
   - interval: 1m
     name: "PgReplicaScrapeFailed fires when up=0"
