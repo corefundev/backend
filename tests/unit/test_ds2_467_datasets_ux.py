@@ -209,3 +209,37 @@ def test_model_block_absent_without_runs(app_client, monkeypatch):
     r = app_client.get("/clients/acme/datasets")
     row = next(d for d in r.json()["datasets"] if d["dataset_id"] == ds)
     assert row["model"] is None
+
+
+# ── период данных per-upload (DS-2 tail) ─────────────────────────────────
+
+def test_upload_date_range_flows_to_dataset_views(app_client):
+    from src.storage import upload_registry as ur
+    ds = _mk_dataset(app_client)
+    _seed_processed_upload("u1", _df([("2026-01-01", "a", 1.0),
+                                      ("2026-02-15", "a", 2.0)]))
+    # даты приходят из sandbox-манифеста при PROCESSED (update_status)
+    # или бэкфиллом (update_fields, plain-колонки)
+    ur.get_upload_registry().update_fields("u1", date_min="2026-01-01",
+                                           date_max="2026-02-15")
+    app_client.post(f"/clients/acme/datasets/{ds}/files",
+                    json={"upload_id": "u1"})
+
+    rows = app_client.get("/clients/acme/uploads").json()
+    row = next(x for x in rows if x["upload_id"] == "u1")
+    assert (row["date_min"], row["date_max"]) == ("2026-01-01", "2026-02-15")
+
+    d = app_client.get(f"/clients/acme/datasets/{ds}").json()
+    f = d["files_detail"][0]
+    assert (f["date_min"], f["date_max"]) == ("2026-01-01", "2026-02-15")
+
+
+def test_pending_upload_carries_dates(app_client):
+    from src.storage import upload_registry as ur
+    ds = _mk_dataset(app_client)
+    ur.get_upload_registry().create(ur.UploadRecord(
+        upload_id="w1", client_id="acme", filename="w.csv", size_bytes=1,
+        sha256="x", status=ur.SCANNED_CLEAN, dataset_id=ds,
+        date_min=None, date_max=None))
+    d = app_client.get(f"/clients/acme/datasets/{ds}").json()
+    assert d["pending_uploads"][0]["date_min"] is None

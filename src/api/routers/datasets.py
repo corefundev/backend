@@ -205,6 +205,8 @@ def get_dataset(client_id: str, dataset_id: str,
             # DS-2 #467: «+N · заменено M» (None = pre-DS-2 attach)
             "merge_added": f.get("merge_added"),
             "merge_replaced": f.get("merge_replaced"),
+            "date_min": u.date_min if u else None,
+            "date_max": u.date_max if u else None,
         })
     versions = [{
         "version": v.version, "status": v.status,
@@ -220,6 +222,7 @@ def get_dataset(client_id: str, dataset_id: str,
     pending = [{
         "upload_id": u.upload_id, "filename": u.filename,
         "status": u.status, "row_count": u.row_count,
+        "date_min": u.date_min, "date_max": u.date_max,
         "created_at": u.created_at,
     } for u in ureg.list_for_client(client_id, limit=100)
         if u.dataset_id == dataset_id and u.upload_id not in attached]
