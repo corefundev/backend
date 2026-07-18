@@ -10,7 +10,7 @@
 #   bash scripts/failback.sh [--yes]
 #
 # What it does:
-#   1. ssh to old-primary VPS (api.testcore.ru)
+#   1. ssh to old-primary VPS (prod, api.sprosly.com)
 #   2. Stop docker-postgres-1
 #   3. Move existing postgres_data volume aside as a backup
 #   4. pg_basebackup from new primary (db-replica.testcore.ru:5432)
@@ -29,14 +29,14 @@
 #   - Replication user 'replicator' exists on new primary with the
 #     password from the staging/prod Lockbox (REPLICATION_PASSWORD).
 #   - pg_hba on new primary allows hostssl replication from
-#     api.testcore.ru (62.217.181.157/32).
+#     the prod VPS (62.217.181.157/32).
 #   - TLS cert files exist on old primary VPS at the locations the
 #     new primary's leaf cert expects (default — fine after promote
 #     since both were already provisioned for mTLS).
 
 set -euo pipefail
 
-OLD_PRIMARY_HOST="api.testcore.ru"
+OLD_PRIMARY_HOST="62.217.181.157"
 OLD_PRIMARY_USER="deploy"
 OLD_PRIMARY_SSH_KEY="${OLD_PRIMARY_SSH_KEY:-$HOME/.ssh/claude/deploy-key}"
 OLD_PRIMARY_SSH_KH="${OLD_PRIMARY_SSH_KH:-$HOME/.ssh/claude/known_hosts}"
@@ -121,7 +121,7 @@ echo "[4/8] pg_basebackup from $NEW_PRIMARY_HOST (this takes a while)"
 echo "      using replicator user + mTLS client cert (#174)"
 
 REPL_PWD=$(ssh -i ~/.ssh/claude/deploy-key -o UserKnownHostsFile=~/.ssh/claude/known_hosts \
-    deploy@api.testcore.ru "grep '^REPLICATION_PASSWORD=' /srv/backend/.env | cut -d= -f2-" 2>/dev/null) || true
+    deploy@62.217.181.157 "grep '^REPLICATION_PASSWORD=' /srv/backend/.env | cut -d= -f2-" 2>/dev/null) || true
 
 if [[ -z "$REPL_PWD" ]]; then
     echo "  REPLICATION_PASSWORD not in .env — fetching from Lockbox"
@@ -193,6 +193,6 @@ echo "       postgres-replica targets so monitoring dashboards reflect"
 echo "       the new topology."
 echo "    3. Drop the (now-orphaned) replication slot on the new replica"
 echo "       (this old primary): the slot 'replica_1' was for streaming"
-echo "       TO db-replica when api.testcore.ru was primary — no longer"
+echo "       TO db-replica when the prod VPS was primary — no longer"
 echo "       needed."
 echo "═══════════════════════════════════════════════════════════════════"

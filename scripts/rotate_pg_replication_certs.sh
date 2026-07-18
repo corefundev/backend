@@ -30,13 +30,15 @@ set -euo pipefail
 CA_DIR="${CA_DIR:-$HOME/.config/pg-ca}"
 DAYS="${DAYS:-365}"
 
-PRIMARY_HOST="api.testcore.ru"
+# MIGR-2 #494: SSH — по голому IP (инфра не зависит от DNS-зон);
+# идентичность серта БД — отдельной переменной ниже.
+PRIMARY_HOST="62.217.181.157"
 PRIMARY_USER="deploy"
 PRIMARY_SSH_KEY="${PRIMARY_SSH_KEY:-$HOME/.ssh/claude/deploy-key}"
 PRIMARY_SSH_KH="${PRIMARY_SSH_KH:-$HOME/.ssh/claude/known_hosts}"
 PRIMARY_SSL_DIR="/srv/backend/secrets/pg-ssl"
 
-REPLICA_HOST="db-replica.testcore.ru"
+REPLICA_HOST="212.8.226.233"
 REPLICA_USER="deploy"
 REPLICA_SSH_KEY="${REPLICA_SSH_KEY:-$HOME/.ssh/id_ed25519_replica}"
 REPLICA_SSH_KH="${REPLICA_SSH_KH:-$HOME/.ssh/known_hosts}"
@@ -81,9 +83,14 @@ echo "Generating leaves in $TMP"
 cd "$TMP"
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out primary.key 2>/dev/null
-openssl req -new -key primary.key -subj "/CN=api.testcore.ru" -out primary.csr 2>/dev/null
+# MIGR-2 #494 Phase 3: primary identity = api.sprosly.com; the legacy
+# SAN rides along until Phase 4 so a not-yet-switched replica conninfo
+# keeps verify-full green during the transition.
+openssl req -new -key primary.key -subj "/CN=api.sprosly.com" \
+    -addext "subjectAltName=DNS:api.sprosly.com,DNS:api.testcore.ru" \
+    -out primary.csr 2>/dev/null
 cat > primary.ext <<EOF
-subjectAltName = DNS:api.testcore.ru
+subjectAltName = DNS:api.sprosly.com, DNS:api.testcore.ru
 extendedKeyUsage = serverAuth
 basicConstraints = CA:FALSE
 EOF
@@ -164,7 +171,9 @@ fi
 
 RAW_RECV=$(ssh_r 'docker exec postgres-replica psql -U sku -d sku_forecasting -tAc "SELECT status || \"|\" || sender_host FROM pg_stat_wal_receiver"')
 echo "  pg_stat_wal_receiver: $RAW_RECV"
-if [[ "$RAW_RECV" != "streaming|api.testcore.ru" ]]; then
+# MIGR-2 #494: до Фазы 3 conninfo ходит на легаси-имя, после — на
+# sprosly; ротация обязана быть зелёной в обоих состояниях.
+if [[ "$RAW_RECV" != "streaming|api.sprosly.com" && "$RAW_RECV" != "streaming|api.testcore.ru" ]]; then
     echo "FAIL: wal_receiver not streaming." >&2
     exit 2
 fi

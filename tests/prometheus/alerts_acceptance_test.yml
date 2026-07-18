@@ -674,79 +674,79 @@ tests:
     input_series:
       # ssl_cert_not_after = unix ts. value 1000000 ≈ 11.57d from epoch;
       # (1000000 - time())/86400 < 14 from t=0.
-      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.testcore.ru"}'
+      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.sprosly.com"}'
         values: '1000000x70'
     alert_rule_test:
       - eval_time: 65m
         alertname: LeCertExpiringSoon
         exp_alerts:
-          - exp_labels: {job: "ssl-https", instance: "https://api.testcore.ru", severity: warning, team: forecasting}
+          - exp_labels: {job: "ssl-https", instance: "https://api.sprosly.com", severity: warning, team: forecasting}
             exp_annotations:
-              summary: "LE cert https://api.testcore.ru expires in <14d (11.5d)"
+              summary: "LE cert https://api.sprosly.com expires in <14d (11.5d)"
               description: "Certbot should auto-renew at 30d remaining. If we're at 14d, cron isn't firing or renewal is failing. Inspect certbot container logs."
 
   - interval: 1m
     name: "LeCertExpiringCritical fires when cert <3d out"
     input_series:
       # value 100000 ≈ 1.16d from epoch; (100000 - time())/86400 < 3 from t=0.
-      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.testcore.ru"}'
+      - series: 'ssl_cert_not_after{job="ssl-https", instance="https://api.sprosly.com"}'
         values: '100000x20'
     alert_rule_test:
       - eval_time: 16m
         alertname: LeCertExpiringCritical
         exp_alerts:
-          - exp_labels: {job: "ssl-https", instance: "https://api.testcore.ru", severity: critical, team: forecasting}
+          - exp_labels: {job: "ssl-https", instance: "https://api.sprosly.com", severity: critical, team: forecasting}
             exp_annotations:
-              summary: "LE cert https://api.testcore.ru expires in <3 DAYS"
+              summary: "LE cert https://api.sprosly.com expires in <3 DAYS"
               description: "User-facing TLS will break. Run certbot manually now and check renewal cron."
 
   # ── host-resources ────────────────────────────────────────────
   - interval: 1m
     name: "HostDiskFillingUp fires at 90% disk usage"
     input_series:
-      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.sprosly.com"}'
         values: '10x20'
-      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.sprosly.com"}'
         values: '100x20'
     alert_rule_test:
       - eval_time: 16m
         alertname: HostDiskFillingUp
         exp_alerts:
-          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.testcore.ru", severity: warning, team: forecasting}
+          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.sprosly.com", severity: warning, team: forecasting}
             exp_annotations:
-              summary: "Host disk usage >80% on api.testcore.ru"
+              summary: "Host disk usage >80% on api.sprosly.com"
               description: "Filesystem at / is 90.0% full. Likely cause: pg_wal backup if S3 archive_command failing, or container logs / docker images bloat. Run `docker system df` and check S3 archive health."
 
   - interval: 1m
     name: "HostDiskCritical fires at 95% disk usage"
     input_series:
-      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+      - series: 'node_filesystem_avail_bytes{fstype="ext4", mountpoint="/", instance="api.sprosly.com"}'
         values: '5x10'
-      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.testcore.ru"}'
+      - series: 'node_filesystem_size_bytes{fstype="ext4", mountpoint="/", instance="api.sprosly.com"}'
         values: '100x10'
     alert_rule_test:
       - eval_time: 6m
         alertname: HostDiskCritical
         exp_alerts:
-          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.testcore.ru", severity: critical, team: forecasting}
+          - exp_labels: {fstype: "ext4", mountpoint: "/", instance: "api.sprosly.com", severity: critical, team: forecasting}
             exp_annotations:
-              summary: "Host disk usage >92% on api.testcore.ru — postgres at risk"
+              summary: "Host disk usage >92% on api.sprosly.com — postgres at risk"
               description: "Postgres will stop accepting writes when the disk fills. Evacuate large files NOW. 95.0% used."
 
   - interval: 1m
     name: "HostMemoryHigh fires at 95% memory usage"
     input_series:
-      - series: 'node_memory_MemAvailable_bytes{instance="api.testcore.ru"}'
+      - series: 'node_memory_MemAvailable_bytes{instance="api.sprosly.com"}'
         values: '5x35'
-      - series: 'node_memory_MemTotal_bytes{instance="api.testcore.ru"}'
+      - series: 'node_memory_MemTotal_bytes{instance="api.sprosly.com"}'
         values: '100x35'
     alert_rule_test:
       - eval_time: 32m
         alertname: HostMemoryHigh
         exp_alerts:
-          - exp_labels: {instance: "api.testcore.ru", severity: warning, team: forecasting}
+          - exp_labels: {instance: "api.sprosly.com", severity: warning, team: forecasting}
             exp_annotations:
-              summary: "Host memory >90% used for 30m on api.testcore.ru"
+              summary: "Host memory >90% used for 30m on api.sprosly.com"
               description: "95.0% used. Check for memory-leak suspects (mlflow has had crash loops; api / worker can spike during training)."
 
   # ════════════════════════════════════════════════════════════════
