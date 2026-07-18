@@ -68,8 +68,11 @@ app-tier пересоздаст ближайший CD, либо руками `--
 1. GH-секрет frontend `VITE_API_URL=https://api.sprosly.com` → пустой
    коммит в main фронта → CD пересобирает бандл (уже с host-routing).
 2. Lockbox: одна атомарная версия:
-   - `FRONTEND_OAUTH_RETURN_URL=https://sprosly.com`
-   - `WEB_DOMAIN=sprosly.com` (если потребитель есть)
+   - `FRONTEND_OAUTH_RETURN_URL=https://sprosly.com/oauth/return` —
+     ПОЛНЫЙ путь: auth.py валидирует «origin ∈ FRONTEND_ORIGINS» И
+     «path == /oauth/return», голый origin даст 500 на OAuth-ветке.
+   - ~~WEB_DOMAIN~~ — потребителя в backend НЕТ (это env nginx-шаблона
+     фронт-VPS, не Lockbox-ключ); не заводить.
    - `REFRESH_COOKIE_SAMESITE=lax` (фронт и api теперь один registrable domain)
    - `EMAIL_FROM=noreply@sprosly.com` — ТОЛЬКО если DKIM уже зелёный,
      иначе отдельной версией позже.
