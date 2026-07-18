@@ -432,7 +432,7 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 12); do
-              BODY=$(curl -fsS https://api.testcore.ru/healthz 2>&1) || BODY=""
+              BODY=$(curl -fsS https://api.sprosly.com/healthz 2>&1) || BODY=""
               if echo "$BODY" | grep -q '"status":"ok"'; then
                   echo "  /healthz OK on attempt $i: $BODY"
                   exit 0

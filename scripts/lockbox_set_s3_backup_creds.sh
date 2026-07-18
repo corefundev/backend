@@ -127,7 +127,7 @@ echo
 echo "═══════════════════════════════════════════════════════════════════"
 echo "  S3_BACKUP_* keys updated in Lockbox '$SECRET_NAME'."
 echo "  Next: recreate backup container so it picks up new bucket:"
-echo "    ssh deploy@api.testcore.ru \\"
+echo "    ssh deploy@62.217.181.157 \\"
 echo "      'cd /srv/backend && docker compose ... up -d --force-recreate backup'"
 echo "  Then init lifecycle rules on the new bucket:"
 echo "    docker exec docker-backup-1 sh /scripts/init_s3_lifecycle.sh"

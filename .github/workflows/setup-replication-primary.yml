@@ -110,8 +110,8 @@ jobs:
                   openssl req -new -x509 -days 365 -nodes \
                       -keyout /out/server.key \
                       -out /out/server.crt \
-                      -subj "/CN=api.testcore.ru" \
-                      -addext "subjectAltName=DNS:api.testcore.ru,IP:62.217.181.157"
+                      -subj "/CN=api.sprosly.com" \
+                      -addext "subjectAltName=DNS:api.sprosly.com,DNS:api.testcore.ru,IP:62.217.181.157"
                   chown 70:70 /out/server.crt /out/server.key
                   chmod 644 /out/server.crt
                   chmod 600 /out/server.key

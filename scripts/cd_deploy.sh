@@ -575,7 +575,7 @@ docker logout ghcr.io
 # R4-20 followup (2026-05-17) — periodic image prune.
 # CD churn (Trivy scan builds, multiple R4-* deploys/day) had
 # accumulated 89 GB of reclaimable layers and fired HostDiskFillingUp
-# at 83% on api.testcore.ru. Prune dangling + unused images older
+# at 83% on the prod VPS (api.sprosly.com). Prune dangling + unused images older
 # than 72h after each successful deploy.
 #
 # CRITICAL: must run AFTER the image-identity assertions above and

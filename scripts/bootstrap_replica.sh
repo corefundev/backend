@@ -28,7 +28,7 @@ set -euo pipefail
 
 REPLICA_HOST="${REPLICA_HOST:-deploy@212.8.226.233}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_replica}"
-PRIMARY_HOST="${PRIMARY_HOST:-api.testcore.ru}"
+PRIMARY_HOST="${PRIMARY_HOST:-api.sprosly.com}"
 PRIMARY_PORT="${PRIMARY_PORT:-5432}"
 REPL_USER="${REPL_USER:-replicator}"
 SLOT_NAME="${SLOT_NAME:-replica_1}"

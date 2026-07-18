@@ -26,7 +26,7 @@
 #   - Switch DB_HOST in Lockbox (that's Phase 2 — manual via yc CLI;
 #     after R10 Phase 0-B PR-C the DSN is composed from components,
 #     so failover means swapping the component, not the composed URL)
-#   - Restart app stack on api.testcore.ru (Phase 2)
+#   - Restart app stack on api.sprosly.com (Phase 2)
 #   - Re-bootstrap old primary as new replica (Phase 3 — failback.sh)
 #   - Adjust prometheus / firewall / TLS certs (Phase 4)
 
@@ -137,10 +137,10 @@ echo "       DSN is composed from components — failover = swap the"
 echo "       component, not the composed URL."
 echo "       (yc lockbox secret add-version --payload …)"
 echo "    b) Adjust pg_hba on new primary to accept app traffic from"
-echo "       api.testcore.ru (62.217.181.157)"
+echo "       api.sprosly.com (62.217.181.157)"
 echo "    c) Adjust pg-firewall iptables on db-replica VPS to allow"
 echo "       app traffic, not just old replication CIDR"
-echo "    d) Restart api/worker containers on api.testcore.ru so they"
+echo "    d) Restart api/worker containers on api.sprosly.com so they"
 echo "       re-compose DATABASE_URL from the new DB_HOST at startup"
 echo
 echo "  Phase 3 — When old primary is recoverable:"

@@ -127,7 +127,7 @@ scrape_configs:
     relabel_configs:
       - source_labels: [__address__]
         target_label: instance
-        replacement: "api.testcore.ru"
+        replacement: "api.sprosly.com"
 
   # cAdvisor — per-container start_time / cpu / mem (#203 alerts).
   - job_name: "cadvisor"
@@ -152,7 +152,6 @@ scrape_configs:
       module: [https]
     static_configs:
       - targets:
-          - "https://api.testcore.ru"
           - "https://skusystem.ru"
           # MIGR-1 #424 Phase 3: sprosly.com hosts (one SAN cert on the
           # frontend + the expanded api cert). skusystem.ru stays probed
