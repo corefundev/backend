@@ -43,7 +43,7 @@ def wired(monkeypatch):
     """Fake registry (public get_registry) + pinned FRONTEND_URL."""
     import src.clients.registry as registry
     monkeypatch.setattr(registry, "get_registry", lambda: _Reg())
-    monkeypatch.setenv("FRONTEND_URL", "https://skusystem.ru")
+    monkeypatch.setenv("FRONTEND_URL", "https://sprosly.com")
 
 
 _ABANDONED_RECONCILE = "прервано обновлением сервиса"
@@ -88,12 +88,12 @@ def test_markers_match_the_actual_reconcile_writers():
 # ── 2. email wording ────────────────────────────────────────────────
 
 def test_email_abandoned_has_retrigger_and_no_csv_advice(monkeypatch):
-    monkeypatch.setenv("FRONTEND_URL", "https://skusystem.ru")
+    monkeypatch.setenv("FRONTEND_URL", "https://sprosly.com")
     subject, body = _render_failed("acme", _ABANDONED_RECONCILE)
     assert subject == "⚠ Обучение модели было прервано"
     assert "снято автоматически" in body
     assert "запустите обучение ещё раз" in body.lower()
-    assert "https://skusystem.ru/app/training" in body
+    assert "https://sprosly.com/app/training" in body
     # the data-validation advice must be absent — it is noise here
     assert "CSV" not in body
     assert "30 дней" not in body
@@ -102,7 +102,7 @@ def test_email_abandoned_has_retrigger_and_no_csv_advice(monkeypatch):
 
 def test_email_validation_template_unchanged(monkeypatch):
     # PIN: the non-infra path renders the exact pre-#272 template.
-    monkeypatch.setenv("FRONTEND_URL", "https://skusystem.ru")
+    monkeypatch.setenv("FRONTEND_URL", "https://sprosly.com")
     subject, body = _render_failed("acme", _VALIDATION_ERROR)
     assert subject == "⚠ Обучение модели не удалось"
     assert body == "\n".join([
@@ -116,11 +116,11 @@ def test_email_validation_template_unchanged(monkeypatch):
         "Что попробовать:",
         "  • Проверить, что в загруженном CSV нет пропусков в колонках date / sales",
         "  • Убедиться что период данных не меньше 30 дней",
-        "  • Запустить обучение ещё раз: https://skusystem.ru/app/training",
+        "  • Запустить обучение ещё раз: https://sprosly.com/app/training",
         "",
         "Если ошибка повторяется — напишите в поддержку, приложив текст выше.",
         "",
-        "— SKU Forecasting",
+        "— Sprosly",
     ])
 
 
@@ -158,7 +158,7 @@ def test_telegram_abandoned_has_retrigger_and_no_error_snippet(wired, monkeypatc
     assert chat_id == 42
     assert "прервано обновлением сервиса" in text
     assert "снято автоматически" in text
-    assert "https://skusystem.ru/app/training" in text
+    assert "https://sprosly.com/app/training" in text
     # raw infra error is internal noise — must not reach the tenant
     assert "abandoned" not in text
     assert "Ошибка обучения" not in text
@@ -173,7 +173,7 @@ def test_telegram_validation_template_unchanged(wired, monkeypatch):
         "<b>⚠ Ошибка обучения</b>\n\n"
         "Аккаунт: <code>acme</code>\n"
         f"<code>{_VALIDATION_ERROR}</code>\n\n"
-        "Подробности и повтор: https://skusystem.ru/app/training"
+        "Подробности и повтор: https://sprosly.com/app/training"
     ))
 
 

@@ -141,7 +141,7 @@ def _client_telegram(client_id: str) -> tuple[Optional[int], bool]:
 
 
 def _frontend_base_url() -> str:
-    return os.environ.get("FRONTEND_URL", "https://skusystem.ru").rstrip("/")
+    return os.environ.get("FRONTEND_URL", "https://sprosly.com").rstrip("/")
 
 
 def _format_pct(v: Optional[float], digits: int = 1) -> str:
@@ -450,7 +450,7 @@ def handle_update(update: dict) -> None:
             send_message(
                 chat_id,
                 "Привет! Чтобы привязать этот Telegram к вашему аккаунту, "
-                "откройте в SKU Forecasting раздел «Настройки» и нажмите "
+                "откройте в Sprosly раздел «Настройки» и нажмите "
                 "«Привязать Telegram».",
             )
             return

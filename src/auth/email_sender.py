@@ -26,7 +26,7 @@ Required env per provider
         EMAIL_PROVIDER=resend
         RESEND_API_KEY=re_...
         EMAIL_FROM=noreply@yourdomain.example       (must be verified in Resend)
-        EMAIL_FROM_NAME=SKU Forecasting             (optional)
+        EMAIL_FROM_NAME=Sprosly                     (optional)
 
     SMTP:
         EMAIL_PROVIDER=smtp
@@ -36,7 +36,7 @@ Required env per provider
         SMTP_PASSWORD=...
         SMTP_USE_TLS=1
         EMAIL_FROM=noreply@yourdomain.example
-        EMAIL_FROM_NAME=SKU Forecasting       (display name, optional)
+        EMAIL_FROM_NAME=Sprosly               (display name, optional)
         EMAIL_REPLY_TO=support@yourdomain.example   (optional)
         EMAIL_UNSUBSCRIBE=unsubscribe@yourdomain.example  (optional; defaults to EMAIL_FROM)
 
@@ -127,7 +127,7 @@ class ResendEmailSender:
                  from_name: str | None = None):
         self.api_key   = api_key   or os.environ.get("RESEND_API_KEY")
         self.from_addr = from_addr or os.environ.get("EMAIL_FROM")
-        self.from_name = from_name or os.environ.get("EMAIL_FROM_NAME", "")
+        self.from_name = from_name or os.environ.get("EMAIL_FROM_NAME", "Sprosly")
         if not self.api_key:
             raise RuntimeError("RESEND_API_KEY not set")
         if not self.from_addr:
@@ -195,7 +195,7 @@ class SmtpEmailSender:
         self.password   = os.environ.get("SMTP_PASSWORD")
         self.use_tls    = os.environ.get("SMTP_USE_TLS", "1") == "1"
         self.from_addr  = os.environ.get("EMAIL_FROM")
-        self.from_name  = os.environ.get("EMAIL_FROM_NAME", "")
+        self.from_name  = os.environ.get("EMAIL_FROM_NAME", "Sprosly")
         self.reply_to   = os.environ.get("EMAIL_REPLY_TO")
         # mail.ru/yandex 2024+ require List-Unsubscribe on automated mail
         # even when it's transactional (OTP, password reset). The mailbox
@@ -283,7 +283,7 @@ def render_link_email(*, url: str, ttl_minutes: int) -> tuple[str, str, str]:
     """AUTH-1 #445 — one-time RESET link mail (email confirmation is
     code-based — render_otp_email). Same multipart contract: text and
     HTML must carry the same information (anti-phishing parity)."""
-    subject = "Сброс пароля — SKU Forecasting"
+    subject = "Сброс пароля — Sprosly"
     intro   = ("Вы запросили сброс пароля. Нажмите кнопку и задайте "
                "новый пароль:")
     button  = "Задать новый пароль"
@@ -295,7 +295,7 @@ def render_link_email(*, url: str, ttl_minutes: int) -> tuple[str, str, str]:
         f"{url}\n\n"
         f"Ссылка действительна {ttl_minutes} минут и работает один раз.\n\n"
         f"{note}\n\n"
-        f"С уважением,\nКоманда SKU Forecasting"
+        f"С уважением,\nКоманда Sprosly"
     )
     html_body = f"""<!doctype html>
 <html lang="ru">
@@ -305,7 +305,7 @@ def render_link_email(*, url: str, ttl_minutes: int) -> tuple[str, str, str]:
   </head>
   <body style="margin:0;padding:32px 16px;background:#f6f7f9;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:#1b2436;">
     <div style="max-width:440px;margin:0 auto;background:#ffffff;border:1px solid #e4e8ef;border-radius:8px;padding:32px;">
-      <div style="font-weight:700;font-size:15px;color:#2463eb;margin-bottom:20px;">SKU Forecasting</div>
+      <div style="font-weight:700;font-size:15px;color:#2463eb;margin-bottom:20px;">Sprosly</div>
       <p style="font-size:14px;line-height:1.5;margin:0 0 20px;">{intro}</p>
       <p style="margin:0 0 20px;">
         <a href="{url}" style="display:inline-block;background:#2463eb;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">{button}</a>
@@ -334,11 +334,11 @@ def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str,
     # AUTH-4 #448: код шлётся только на подтверждение регистрации —
     # OTP-вход снесён (вход = пароль; сброс = ссылка).
     assert purpose == "signup", f"unexpected OTP purpose: {purpose}"
-    subject = "Подтверждение регистрации в SKU Forecasting"
+    subject = "Подтверждение регистрации в Sprosly"
     intro   = "Введите этот временный код подтверждения, чтобы продолжить:"
     note    = (
         "Проигнорируйте это письмо, если вы не пытались "
-        "зарегистрироваться в SKU Forecasting."
+        "зарегистрироваться в Sprosly."
     )
 
     text_body = (
@@ -347,7 +347,7 @@ def render_otp_email(*, code: str, purpose: str, ttl_minutes: int) -> tuple[str,
         f"Код действителен {ttl_minutes} минут.\n\n"
         f"{note}\n\n"
         f"С уважением,\n"
-        f"Команда SKU Forecasting"
+        f"Команда Sprosly"
     )
     html_body = _render_otp_html(code=code, intro=intro, note=note, ttl_minutes=ttl_minutes)
     return subject, text_body, html_body
@@ -367,7 +367,7 @@ def _render_otp_html(*, code: str, intro: str, note: str, ttl_minutes: int) -> s
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>SKU Forecasting</title>
+    <title>Sprosly</title>
   </head>
   <body style="margin:0;padding:0;background:#F8FAFC;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#020817;-webkit-font-smoothing:antialiased;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F8FAFC;">
@@ -377,7 +377,7 @@ def _render_otp_html(*, code: str, intro: str, note: str, ttl_minutes: int) -> s
             <tr>
               <td style="padding:32px 32px 28px 32px;">
                 <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;color:#020817;margin-bottom:28px;">
-                  SKU Forecasting
+                  Sprosly
                 </div>
                 <div style="font-size:14px;line-height:20px;color:#64748B;margin-bottom:12px;">
                   {intro}
@@ -391,16 +391,16 @@ def _render_otp_html(*, code: str, intro: str, note: str, ttl_minutes: int) -> s
                 </div>
                 <div style="font-size:13px;line-height:18px;color:#64748B;">
                   С уважением,<br>
-                  Команда SKU Forecasting
+                  Команда Sprosly
                 </div>
                 <div style="height:1px;background:#E2E8F0;margin:28px 0 20px 0;"></div>
                 <div style="font-size:13px;font-weight:600;color:#020817;margin-bottom:8px;">
-                  SKU Forecasting
+                  Sprosly
                 </div>
                 <div style="font-size:12px;line-height:18px;">
-                  <a href="https://skusystem.ru/" style="color:#64748B;text-decoration:underline;">Веб-кабинет</a>
+                  <a href="https://sprosly.com/" style="color:#64748B;text-decoration:underline;">Веб-кабинет</a>
                   &nbsp;·&nbsp;
-                  <a href="https://skusystem.ru/plans" style="color:#64748B;text-decoration:underline;">Тарифы</a>
+                  <a href="https://sprosly.com/plans" style="color:#64748B;text-decoration:underline;">Тарифы</a>
                   &nbsp;·&nbsp;
                   <a href="mailto:dochub.org@gmail.com" style="color:#64748B;text-decoration:underline;">Поддержка</a>
                 </div>

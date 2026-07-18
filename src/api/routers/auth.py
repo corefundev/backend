@@ -829,10 +829,11 @@ def _captcha_after_fails_or_400(ip: str, canonical: Optional[str],
 
 
 def _refresh_cookie_kwargs() -> dict:
-    """Кросс-сайтовая пара FE(skusystem.ru)↔API(api.testcore.ru) требует
-    SameSite=None+Secure; после переезда на общий домен (MIGR-1 #424,
-    api.<домен>) вернём Lax через env. Path=/auth — кука ходит только на
-    auth-эндпоинты, не на каждый API-запрос."""
+    """Пара FE(sprosly.com)↔API(api.sprosly.com) — исторически кросс-
+    сайтовая (skusystem.ru↔api.testcore.ru), поэтому SameSite=None+Secure;
+    после полного переезда на общий домен (MIGR-1 #424) вернём Lax через
+    env. Path=/auth — кука ходит только на auth-эндпоинты, не на каждый
+    API-запрос."""
     return {
         "httponly": True,
         "secure": os.environ.get("REFRESH_COOKIE_SECURE", "1") not in ("0", "false"),
