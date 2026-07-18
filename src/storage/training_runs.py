@@ -63,6 +63,10 @@ class TrainingRunRecord:
     # (bench-parity math). NULL = pre-#464 run / no measurable demand.
     wmape_order_7:  Optional[float] = None
     wmape_order_14: Optional[float] = None
+    # DS-2 #467: seasonal-naive WMAPE the promotion gate (#227) scores on
+    # the same walk-forward windows — «точнее наивного на N%» in the UI.
+    # NULL = pre-DS-2 run / gate skipped or errored.
+    baseline_wmape: Optional[float] = None
     model_path:    Optional[str]   = None
     mlflow_run_id: Optional[str]   = None
     error:         Optional[str]   = None
@@ -79,7 +83,7 @@ class PostgresTrainingRunsRegistry:
         "status", "job_id", "started_at", "ended_at", "elapsed_sec",
         "n_skus", "n_features", "n_rows",
         "wmape", "mase", "mase_seasonal", "smape",
-        "wmape_order_7", "wmape_order_14",
+        "wmape_order_7", "wmape_order_14", "baseline_wmape",
         "model_path", "mlflow_run_id", "error",
         "mlflow_logging_error", "gate_passed",
     }
@@ -280,6 +284,7 @@ class PostgresTrainingRunsRegistry:
             mase_seasonal=row.get("mase_seasonal"),
             wmape_order_7=row.get("wmape_order_7"),
             wmape_order_14=row.get("wmape_order_14"),
+            baseline_wmape=row.get("baseline_wmape"),
             gate_passed=row.get("gate_passed"),
             smape=row.get("smape"),
             model_path=row.get("model_path"),

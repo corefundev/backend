@@ -76,6 +76,14 @@ class DatasetsRegistry:
     def list_files(self, dataset_id: str,
                    include_removed: bool = False) -> list[dict]: ...
 
+    def set_file_merge_stats(self, dataset_id: str, upload_id: str,
+                             added: int, replaced: int) -> None:
+        """DS-2 #467: persist the per-file merge delta measured when this
+        upload's append materialized («+N · заменено M» in the files
+        table). Best-effort cosmetics — the per-version merge_report
+        stays the authoritative aggregate."""
+        ...
+
     def add_version(self, v: DatasetVersion) -> None:
         """Insert the version row and bump datasets.current_version."""
         ...
@@ -172,8 +180,8 @@ class PostgresDatasetsRegistry(DatasetsRegistry):
 
     def list_files(self, dataset_id: str,
                    include_removed: bool = False) -> list[dict]:
-        q = ("SELECT upload_id, added_at, removed_at FROM sku_dataset_files "
-             "WHERE dataset_id = %s")
+        q = ("SELECT upload_id, added_at, removed_at, merge_added, "
+             "merge_replaced FROM sku_dataset_files WHERE dataset_id = %s")
         if not include_removed:
             q += " AND removed_at IS NULL"
         q += " ORDER BY added_at"
@@ -183,8 +191,18 @@ class PostgresDatasetsRegistry(DatasetsRegistry):
                      "added_at": a.isoformat() if hasattr(a, "isoformat") else a,
                      "removed_at": (r.isoformat()
                                     if r is not None and hasattr(r, "isoformat")
-                                    else r)}
-                    for u, a, r in cur.fetchall()]
+                                    else r),
+                     "merge_added": ma, "merge_replaced": mr}
+                    for u, a, r, ma, mr in cur.fetchall()]
+
+    def set_file_merge_stats(self, dataset_id: str, upload_id: str,
+                             added: int, replaced: int) -> None:
+        with self._conn() as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE sku_dataset_files SET merge_added = %s, "
+                "merge_replaced = %s WHERE dataset_id = %s "
+                "AND upload_id = %s AND removed_at IS NULL",
+                (int(added), int(replaced), dataset_id, upload_id))
 
     def add_version(self, v: DatasetVersion) -> None:
         with self._conn() as c, c.cursor() as cur:
@@ -295,7 +313,20 @@ class LocalFileDatasetsRegistry(DatasetsRegistry):
         rows = list(self._load()["files"].get(dataset_id, {}).values())
         if not include_removed:
             rows = [r for r in rows if r["removed_at"] is None]
+        for r in rows:                       # pre-DS-2 rows lack the keys
+            r.setdefault("merge_added", None)
+            r.setdefault("merge_replaced", None)
         return sorted(rows, key=lambda r: r["added_at"])
+
+    def set_file_merge_stats(self, dataset_id: str, upload_id: str,
+                             added: int, replaced: int) -> None:
+        with self._lock:
+            d = self._load()
+            row = d["files"].get(dataset_id, {}).get(upload_id)
+            if row is None or row.get("removed_at") is not None:
+                return
+            row["merge_added"], row["merge_replaced"] = int(added), int(replaced)
+            self._save(d)
 
     def add_version(self, v: DatasetVersion) -> None:
         with self._lock:

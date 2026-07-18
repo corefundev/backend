@@ -267,6 +267,11 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         )
         verdict = evaluate_gate(champion, challenger, baseline, tolerance=tolerance)
         agg["gate_passed"] = float(verdict.passed)
+        # DS-2 #467: persist the naive baseline the gate already computed —
+        # the dataset model card shows «точнее наивного на N%» from it.
+        _bl = float(getattr(baseline, "wmape_global", float("nan")))
+        if _bl == _bl:  # not NaN
+            agg["baseline_wmape"] = _bl
         if verdict.passed:
             logger.info("#227 gate PASSED: %s", verdict.as_dict())
             return verdict, False
