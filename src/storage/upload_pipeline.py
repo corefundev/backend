@@ -447,12 +447,21 @@ def run_process(
     manifest = result.manifest or {}
     row_count = manifest.get("row_count")
     sku_count = manifest.get("sku_count")
+
+    def _mdate(key: str):
+        # манифест пишет str(Timestamp) — "2026-06-01 00:00:00"; в DATE
+        # уходит календарная часть.
+        v = manifest.get(key)
+        return str(v)[:10] if v else None
+
     try:
         return registry.update_status(
             upload_id, ur.PROCESSED,
             processed_key=processed_key,
             row_count=int(row_count) if row_count is not None else None,
             sku_count=int(sku_count) if sku_count is not None else None,
+            date_min=_mdate("date_min"),
+            date_max=_mdate("date_max"),
         )
     except KeyError:
         # AUD-9 (#361): the user DELETEd the upload while this job was

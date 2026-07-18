@@ -85,8 +85,8 @@ scrape_configs:
         replacement:   ssl-exporter:9219
     scrape_interval: 1m
 
-  # Postgres — replica VPS (db-replica.testcore.ru, default IP
-  # 212.8.226.233). Replica runs its own postgres-exporter sidecar
+  # Postgres — replica VPS (212.8.226.233; MIGR-2 #494 — только IP,
+  # DNS-зон в инфре нет). Replica runs its own postgres-exporter sidecar
   # (see docker/docker-compose.replica.yml). Replica-firewall sidecar
   # there restricts source IP to this primary, so anyone else gets
   # DROPed.
@@ -101,7 +101,7 @@ scrape_configs:
       - targets: ["postgres-replica.internal:9187"]
         labels:
           replica: "1"
-          host:    "db-replica.testcore.ru"
+          host:    "212.8.226.233"
     scrape_interval: 15s
     scrape_timeout:  10s
   # NOTE: minio scrape removed — production uses Beget S3, not MinIO.

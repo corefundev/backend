@@ -123,6 +123,10 @@ class UploadRecord:
     # worker auto-attaches after the user-triggered prep completes.
     # NULL = legacy flow (upload not aimed at a dataset).
     dataset_id: Optional[str] = None
+    # DS-2 tail (#467): период данных файла из sandbox-манифеста,
+    # персистится при завершении подготовки. NULL = pre-034 загрузка.
+    date_min: Optional[str] = None
+    date_max: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -141,6 +145,9 @@ def compute_sha256(data: bytes) -> str:
 # DP-4b (#324): prep columns persisted as JSONB — set via update_fields (no
 # status change) by the prep worker while the upload is at SCANNED_CLEAN.
 _PREP_COLUMNS = ("sniff_report", "mapping_proposal", "confirmed_mapping")
+# DS-2 tail (#467): plain (non-JSONB) columns update_fields may touch —
+# used by the date-range backfill; regular writes go through update_status.
+_PLAIN_FIELD_COLUMNS = ("date_min", "date_max")
 
 
 class UploadRegistry:
@@ -214,7 +221,8 @@ class PostgresUploadRegistry(UploadRegistry):
             raise ValueError(f"Unknown status: {new_status!r}")
 
         allowed_columns = {"scan_result", "error_message", "processed_key",
-                           "row_count", "sku_count", *_PREP_COLUMNS}
+                           "row_count", "sku_count", "date_min", "date_max",
+                           *_PREP_COLUMNS}
         bad = set(extra) - allowed_columns
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
@@ -255,7 +263,7 @@ class PostgresUploadRegistry(UploadRegistry):
         The prep worker attaches the sniff report / mapping proposal / confirmed
         mapping while the upload is still at SCANNED_CLEAN (a self-status
         transition is not a legal FSM edge)."""
-        bad = set(fields) - set(_PREP_COLUMNS)
+        bad = set(fields) - set(_PREP_COLUMNS) - set(_PLAIN_FIELD_COLUMNS)
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
         if not fields:
@@ -269,7 +277,9 @@ class PostgresUploadRegistry(UploadRegistry):
                 values: list = []
                 for k, v in fields.items():
                     set_parts.append(f"{k} = %s")
-                    values.append(self._extras.Json(v) if v is not None else None)
+                    values.append(self._extras.Json(v)
+                                  if k in _PREP_COLUMNS and v is not None
+                                  else v)
                 values.append(upload_id)
                 cur.execute(
                     f"UPDATE sku_uploads SET {', '.join(set_parts)} WHERE upload_id = %s",
@@ -335,6 +345,14 @@ class PostgresUploadRegistry(UploadRegistry):
             mapping_proposal=row.get("mapping_proposal"),
             confirmed_mapping=row.get("confirmed_mapping"),
             dataset_id=row.get("dataset_id"),
+            date_min=(row["date_min"].isoformat()
+                      if row.get("date_min") is not None
+                      and hasattr(row["date_min"], "isoformat")
+                      else row.get("date_min")),
+            date_max=(row["date_max"].isoformat()
+                      if row.get("date_max") is not None
+                      and hasattr(row["date_max"], "isoformat")
+                      else row.get("date_max")),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
         )
@@ -372,7 +390,8 @@ class LocalFileUploadRegistry(UploadRegistry):
         if new_status not in ALL_STATES:
             raise ValueError(f"Unknown status: {new_status!r}")
         allowed_columns = {"scan_result", "error_message", "processed_key",
-                           "row_count", "sku_count", *_PREP_COLUMNS}
+                           "row_count", "sku_count", "date_min", "date_max",
+                           *_PREP_COLUMNS}
         bad = set(extra) - allowed_columns
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
@@ -391,7 +410,7 @@ class LocalFileUploadRegistry(UploadRegistry):
         return UploadRecord(**row)
 
     def update_fields(self, upload_id: str, **fields) -> UploadRecord:
-        bad = set(fields) - set(_PREP_COLUMNS)
+        bad = set(fields) - set(_PREP_COLUMNS) - set(_PLAIN_FIELD_COLUMNS)
         if bad:
             raise ValueError(f"Cannot update columns: {bad}")
         data = self._load()

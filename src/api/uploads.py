@@ -73,6 +73,9 @@ class UploadStatusResponse(BaseModel):
     # DS-2 #467: target dataset (NULL = legacy flow) — «История
     # подготовок» shows the dataset column from it.
     dataset_id: Optional[str] = None
+    # DS-2 tail #467: период данных файла (из sandbox-манифеста).
+    date_min: Optional[str] = None
+    date_max: Optional[str] = None
     created_at: str
     updated_at: str
 
