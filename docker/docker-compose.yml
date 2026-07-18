@@ -151,8 +151,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     logging: *log-rotation
-    mem_limit: 768m
-    cpus: 1.5
+    # #74: 16 GiB host — headroom for CSV exports / concurrent requests
+    # (the old 768m had near-zero margin over baseline RSS).
+    mem_limit: 1536m
+    cpus: 2.0
     security_opt:                 # R11-#65
       - no-new-privileges:true
     cap_drop:
@@ -196,8 +198,12 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.worker
     logging: *log-rotation
-    mem_limit: 1500m   # training: lightgbm + pandas frames can spike
-    cpus: 2.0
+    # #74: host upgraded to 8 vCPU / 16 GiB (2026-07-19) — hybrid/ensemble
+    # final fits and post-training forecast generation OOMed in 1.5g.
+    # Training stays single-in-flight; 4g gives the ensemble h28 path
+    # ~2.5x its measured peak.
+    mem_limit: 4g
+    cpus: 4.0
     security_opt:                 # R11-#65
       - no-new-privileges:true
     cap_drop:
@@ -287,7 +293,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.worker
     logging: *log-rotation
-    mem_limit: 768m   # sandbox parsing — large CSV/parquet → spike
+    mem_limit: 1g   # sandbox parsing — large CSV/parquet → spike
     cpus: 1.0
     security_opt:                 # R11-#65 (sock already gone via #66)
       - no-new-privileges:true
@@ -530,7 +536,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.postgres
     image: docker-postgres:custom
-    mem_limit: 1500m   # shared_buffers + work_mem for ~10 concurrent
+    mem_limit: 3g   # #74: 16 GiB host; тюнинг shared_buffers/params — отдельной задачей
     cpus: 1.5
     ports:
       - "5432:5432"
@@ -1198,7 +1204,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.prometheus
-    mem_limit: 512m    # R5-M9
+    mem_limit: 768m  # больше таргетов после MIGR-1/2    # R5-M9
     cpus: 1.0        # R5-M9
     ports:
       - "9090:9090"
