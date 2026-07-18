@@ -516,6 +516,15 @@ def test_train_py_uses_declarative_plan_defaults_not_user_set_flags():
         "train.py reintroduced hand-listed user_set_* flags — use the "
         "declarative _has_nested gate instead (#96)"
     )
-    assert "plan_defaults" in train_py and "_has_nested(client_cfg" in train_py, (
-        "train.py must gate plan defaults via _has_nested on the client override"
+    # Модель-аудит H1 (2026-07-19): единый источник план-дефолтов переехал
+    # в config_manager.apply_plan_defaults — train.py обязан ДЕЛЕГИРОВАТЬ,
+    # а декларативный _has_nested-гейт (#96) обязан жить в самом хелпере.
+    assert "apply_plan_defaults" in train_py, (
+        "train.py must delegate plan defaults to config_manager.apply_plan_defaults"
+    )
+    cm_py = (Path(__file__).resolve().parents[2]
+             / "src" / "clients" / "config_manager.py").read_text()
+    assert "_has_nested(client_cfg" in cm_py and "plan_default_entries" in cm_py, (
+        "config_manager.apply_plan_defaults must gate via _has_nested on the "
+        "client override (#96 invariant, relocated)"
     )

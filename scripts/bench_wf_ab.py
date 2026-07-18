@@ -530,7 +530,7 @@ class _BandCalibratedMIMO:
         return raw
 
 
-def run_arm(arm_name: str, base_df, config: dict,
+def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
             model_factory: Optional[Callable[[], Any]] = None,
             raw_df=None,
             category_map: Optional[dict] = None) -> dict:
@@ -722,6 +722,15 @@ def run_arm(arm_name: str, base_df, config: dict,
         combined = reallocate_volume(combined, split_points, sku_col, mode=_va)
         per_sku = compute_metrics_per_sku(combined, sku_col)
         agg = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col)
+    if dump_dir:
+        # модель-аудит: per-row (sku,date,actual,pred,horizon_step,band)
+        # для анализа всплесков и per-SKU распределений вне харнесса.
+        os.makedirs(dump_dir, exist_ok=True)
+        _dump = combined.copy()
+        _dump["band"] = _dump[sku_col].map(band_by_sku)
+        _dump_path = os.path.join(dump_dir, f"combined_{arm_name}.csv")
+        _dump.to_csv(_dump_path, index=False)
+        print(json.dumps({"dump": _dump_path, "rows": int(len(_dump))}))
     return {
         "arm": arm_name, "spec": spec, "n_features": len(feature_cols),
         "wmape_global": round(float(agg.get("wmape_global", float("nan"))), 5),
@@ -746,6 +755,9 @@ def main(argv: Optional[list] = None) -> int:
                         default=os.environ.get("BENCH_CATEGORY_PATH"))
     parser.add_argument("--horizon", type=int, default=None,
                         help="переопределить model.horizon (напр. 28 — #460 прогон 3)")
+    parser.add_argument("--dump-combined", default=None,
+                        help="каталог для per-row CSV по каждому плечу "
+                             "(модель-аудит: всплески, per-SKU)")
     parser.add_argument("--n-splits", type=int, default=None,
                         help="переопределить validation.n_splits (H28-1 #468: "
                              "двух-периодный стенд = 2)")
@@ -797,7 +809,8 @@ def main(argv: Optional[list] = None) -> int:
 
     results = []
     for arm in arms:
-        out = run_arm(arm, df, config, raw_df=raw_df, category_map=cat_map)
+        out = run_arm(arm, df, config, dump_dir=args.dump_combined,
+                      raw_df=raw_df, category_map=cat_map)
         results.append(out)
         print(json.dumps(out, ensure_ascii=False), flush=True)
 

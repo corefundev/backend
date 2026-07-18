@@ -686,7 +686,12 @@ def predict(
         )
 
     try:
-        config   = _get_cfg(CONFIG_PATH)
+        # Модель-аудит H1: /predict строил фичи по СИСТЕМНОМУ конфигу —
+        # без клиентских override и план-дефолтов (FX у платных) → mismatch
+        # с feature_cols модели → тихий SeasonalNaive-фолбэк.
+        from src.clients.config_manager import get_config_manager as _gcm
+        config   = _gcm(CONFIG_PATH).get_effective_serving(
+            client_id, get_registry())
         requested_horizon = req.horizon or config["model"]["horizon"]
         horizon, clipped  = clip_horizon_to_plan(record, requested_horizon)
         service  = _get_or_load_service(client_id, load_factory=load_service_for_client)

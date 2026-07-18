@@ -52,10 +52,16 @@ def test_no_plan_tier_reenables_market():
     assert "features.market" not in plans and '"market"' not in plans, (
         "a plan tier silently re-enables market features"
     )
-    tr = Path("src/pipeline/train.py").read_text()
-    start = tr.index("plan_defaults = [")
-    end = tr.index("]", start)
-    assert "market" not in tr[start:end]
+    # Модель-аудит H1 (2026-07-19): список план-дефолтов переехал в
+    # config_manager.plan_default_entries — проверяем СЕМАНТИЧЕСКИ, по
+    # фактическим target-ключам, а не по подстроке файла.
+    from src.clients.config_manager import plan_default_entries
+    from src.plans.plans import get_plan_spec
+    for plan in ("free", "start", "business"):
+        targets = [t for _, t, _ in plan_default_entries(get_plan_spec(plan), plan)]
+        assert not any("market" in t for t in targets), (
+            f"plan tier {plan} silently re-enables market features"
+        )
 
 
 def test_serve_path_stays_backward_compatible():

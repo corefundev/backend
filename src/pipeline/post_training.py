@@ -73,7 +73,7 @@ def generate_and_store_forecasts(
     # user's chosen horizon (Settings → "Дней вперёд") lives there;
     # we cap it by the plan ceiling so a Free user can't sneak past
     # 7 days even if their config says 30.
-    config = get_config_manager(config_path).get_effective(client_id, registry)
+    config = get_config_manager(config_path).get_effective_serving(client_id, registry)
     user_horizon = int(config.get("model", {}).get("horizon", 0) or 0)
 
     if plan_max and plan_max > 0:
@@ -197,7 +197,7 @@ def detect_and_store_anomalies(
     user can sanity-check whether the model learned through noise.
     """
     registry = get_registry()
-    config = get_config_manager(config_path).get_effective(client_id, registry)
+    config = get_config_manager(config_path).get_effective_serving(client_id, registry)
     sku_col    = config["data"]["sku_col"]
     date_col   = config["data"]["date_col"]
     target_col = config["data"]["target_col"]

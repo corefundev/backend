@@ -149,6 +149,43 @@ def _get_nested(d: dict, dotted_key: str) -> Any:
     return cur
 
 
+# ── Plan-tier defaults (модель-аудит H1) ─────────────────────────────────
+#
+# До 2026-07-19 план-дефолты применялись ТОЛЬКО в train.py: платная
+# модель обучалась С FX-колонками, а serve-пути (post_training, /predict,
+# batch) собирали фичи по конфигу БЕЗ них → несовпадение feature_cols →
+# тихий фолбэк в SeasonalNaive (боевой случай: KeyError byn_rub_lag_1).
+# Единственный источник правды — этот список; train и ВСЕ serve-пути
+# обязаны звать apply_plan_defaults.
+
+def plan_default_entries(spec, plan: str) -> list[tuple[str, str, object]]:
+    """(gate dotted-key в client override, target dotted-key, значение)."""
+    return [
+        ("hpo",                             "hpo.enabled",     spec.hpo_n_trials > 0),
+        ("hpo",                             "hpo.n_trials",    spec.hpo_n_trials),
+        ("model.objective",                 "model.objective", spec.default_objective),
+        ("features.external_regressors_ru", "features.external_regressors_ru.enabled",
+                                            plan in {"start", "business"}),
+    ]
+
+
+def apply_plan_defaults(config: dict, record) -> None:
+    """Мутирует config на месте: тарифные дефолты, НЕ перекрывая явные
+    клиентские override (гейт по client config). record=None —
+    free-семантика. Fail-open с громким логом: обучение/serve важнее
+    дефолтов (тот же контракт, что был в train.py)."""
+    try:
+        from src.plans.plans import get_plan_spec
+        spec = get_plan_spec(record.plan if record else None)
+        plan = record.plan if record else "free"
+        client_cfg = (record.config or {}) if record else {}
+        for gate, target, value in plan_default_entries(spec, plan):
+            if not _has_nested(client_cfg, gate):
+                _set_nested(config, target, value)
+    except Exception as e:    # noqa: BLE001 — дефолты не должны ронять путь
+        logger.warning(f"Could not apply plan defaults: {e}")
+
+
 def _has_nested(d: dict, dotted_key: str) -> bool:
     """True if the full dotted path is present in nested dict `d`.
 
@@ -362,6 +399,16 @@ class ClientConfigManager:
         effective = deep_merge(base, override)
         logger.debug(f"Config for {client_id}: merged {len(override)} override keys")
         return effective
+
+
+    def get_effective_serving(self, client_id: str, registry=None) -> dict:
+        """get_effective + план-дефолты тарифа — конфиг, идентичный тому,
+        с которым модель ОБУЧАЛАСЬ (модель-аудит H1). Использовать во всех
+        serve-путях, строящих фичи."""
+        config = self.get_effective(client_id, registry)
+        record = registry.get(client_id) if registry is not None else None
+        apply_plan_defaults(config, record)
+        return config
 
     # ── CRUD for client overrides ─────────────────────────────
 
