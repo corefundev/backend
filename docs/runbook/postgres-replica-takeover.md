@@ -2,7 +2,7 @@
 
 ## Drill results — 2026-05-19 (R7-10)
 
-Measured via `scripts/dr_drill_replication.sh` on staging.testcore.ru
+Measured via `scripts/dr_drill_replication.sh` on 159.194.202.86 (staging VPS)
 with two throwaway `postgres:16-alpine` containers on a dedicated
 docker network. Workload: ~20 inserts/sec for 30s, primary killed
 at t=15s, replica promoted immediately.
@@ -48,7 +48,7 @@ no WAL loss on the primary side, BUT writes committed after the
 last `pg_last_wal_replay_lsn()` on replica ARE lost.
 
 **To reproduce:** run `bash scripts/dr_drill_replication.sh` on
-any Docker host (staging.testcore.ru recommended — not local
+any Docker host (159.194.202.86 (staging VPS) recommended — not local
 laptop). Throwaway containers, ~45 sec total runtime, auto-cleanup
 via EXIT trap.
 
@@ -64,19 +64,19 @@ via EXIT trap.
 
 ```bash
 # 1. Confirm primary is actually unreachable, not just slow.
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-postgres-1 pg_isready -U sku -t 5'
 # Expected on healthy primary: "accepting connections"
 # Expected on dead: timeout or "could not connect"
 
 # 2. Confirm replica is healthy + in_recovery.
-ssh -i ~/.ssh/id_ed25519_replica deploy@db-replica.testcore.ru \
+ssh -i ~/.ssh/id_ed25519_replica deploy@212.8.226.233 \
     'docker exec postgres-replica psql -U sku -d postgres -c "SELECT pg_is_in_recovery();"'
 # Expected: "t" (true — still a replica). If false, replica was
 # ALREADY promoted at some point; this runbook does not apply.
 
 # 3. Check replication lag (RPO floor for the failover).
-ssh -i ~/.ssh/id_ed25519_replica deploy@db-replica.testcore.ru \
+ssh -i ~/.ssh/id_ed25519_replica deploy@212.8.226.233 \
     'docker exec postgres-replica psql -U sku -d postgres -c \
      "SELECT pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(),
              EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) AS lag_sec;"'
@@ -99,7 +99,7 @@ bash scripts/promote_replica.sh
 #   5. INSERTs a probe row to verify writes work
 #   6. Prints next-step instructions
 #
-# After clean exit, db-replica.testcore.ru:5432 is the NEW PRIMARY
+# After clean exit, the replica VPS (212.8.226.233):5432 is the NEW PRIMARY
 # on timeline +1. This is irreversible.
 ```
 
@@ -117,15 +117,15 @@ recomposes the DSN on next bootstrap.
 #    submit the full payload, not a delta).
 SECRET=$(yc lockbox secret get --name sku-forecasting-secrets --format json | jq -r .id)
 yc lockbox payload get --id "$SECRET" --format json > /tmp/lb.json
-# Edit /tmp/lb.json: set DB_HOST=db-replica.testcore.ru and DB_PORT=5432
+# Edit /tmp/lb.json: set DB_HOST=the replica VPS (212.8.226.233) and DB_PORT=5432
 # (and DATABASE_URL_REPLICA equivalents to "" since the old primary is dead).
 yc lockbox secret add-version --id "$SECRET" --payload @/tmp/lb.json
 rm /tmp/lb.json
 
-# 2) SSH to api.testcore.ru, restart api + workers to re-bootstrap.
+# 2) SSH to the prod VPS (62.217.181.157), restart api + workers to re-bootstrap.
 #    `down + up -d` ensures vault_agent runs at process start and
 #    composes DATABASE_URL from the new DB_HOST.
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'cd /srv/backend && docker compose ... down api worker scan-worker process-worker && docker compose ... up -d api worker scan-worker process-worker'
 # (Replace ... with the full compose-file flag set from
 # project_vps_deploy.md.)
@@ -149,11 +149,11 @@ promoted replica.
 
 ```bash
 # 1. New primary accepting writes.
-curl -fsS https://api.testcore.ru/readyz | jq .
+curl -fsS https://api.sprosly.com/readyz | jq .
 # Expected: {"ready": true, "checks": {"redis": ..., "postgres": {"ok": true}}}
 
 # 2. App functional smoke.
-curl -fsS https://api.testcore.ru/healthz
+curl -fsS https://api.sprosly.com/healthz
 # Expected: {"status":"ok"}
 
 # 3. Audit chain still intact (no rows lost to RPO).
@@ -171,7 +171,7 @@ In `project_audit_remediation.md`, add a Round 7 entry:
 Trigger: <what alert / symptom>
 RPO: <lag_sec from triage step 3> seconds of writes lost
 Recovery time: <minutes from alert to /readyz=200>
-New primary: db-replica.testcore.ru (was replica before)
+New primary: the replica VPS (212.8.226.233) (was replica before)
 Outstanding: re-bootstrap old primary as replica (Phase 3),
              [other follow-ups]
 ```

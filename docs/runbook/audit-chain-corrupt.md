@@ -34,7 +34,7 @@ to stop.
 # 1. Re-run the verify to get the failing row id.
 gh workflow run audit-verify-cron.yml
 # Or directly:
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-api-1 python3 -c "
 from src.auth.vault_agent import bootstrap_secrets
 bootstrap_secrets()

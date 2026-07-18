@@ -64,7 +64,7 @@ dose-response: согласованное направление обеих до
 1.5GiB; OOM убьёт RQ-процесс клиентской тренировки, класс #93):
 
 ```sh
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157
 # 0. Очередь пуста? (правило: не гонять при живых тренировках)
 docker exec docker-postgres-1 psql -U sku -d sku_forecasting -tAc \
   "SELECT count(*) FROM sku_training_runs WHERE status IN ('queued','running');"

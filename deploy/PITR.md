@@ -167,7 +167,7 @@ postgres into prod (full failover-style).
 ### Verify WAL is being archived
 
 ```bash
-ssh deploy@api.testcore.ru
+ssh deploy@62.217.181.157
 docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c \
     'SELECT pg_walfile_name(pg_current_wal_lsn()), pg_switch_wal();'
 ```

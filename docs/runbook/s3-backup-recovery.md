@@ -21,7 +21,7 @@ from Lockbox — same passphrase decrypts either.
 
 ```bash
 # Pull mirror creds from Lockbox bootstrap before running restore.sh:
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-backup-1 /usr/local/bin/lockbox_bootstrap.sh sh -c "
         S3_ENDPOINT_URL=\"https://\$S3_MIRROR_ENDPOINT_URL\" \
         AWS_ACCESS_KEY_ID=\"\$S3_MIRROR_ACCESS_KEY_ID\" \
@@ -50,7 +50,7 @@ ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
 
 ```bash
 # 1. Confirm you actually need restore. Capture current state first:
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-postgres-1 pg_dumpall -U sku > /tmp/pre-restore-state.sql'
 # Even partial / corrupt — preserve evidence.
 
@@ -80,7 +80,7 @@ ssh ... 'docker exec docker-prometheus-1 wget -qO- http://docker-pushgateway-1:9
 
 ```bash
 # 1. Identify the target file in S3.
-ssh -i ~/.ssh/claude/deploy-key deploy@api.testcore.ru \
+ssh -i ~/.ssh/claude/deploy-key deploy@62.217.181.157 \
     'docker exec docker-backup-1 mc ls bak/762089886d76-zone-backup/backups/2026/05/ | tail -3'
 # Pick the right one. For 2026-05-18 02:10 UTC:
 #   bak/.../backups/2026-05-18/sku_forecasting_20260518T021003Z.dump.enc
@@ -119,8 +119,8 @@ ssh ... 'docker exec docker-postgres-1 psql -U sku -d sku_forecasting -c \
     "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10;"'
 
 # 2. App functional smoke.
-curl -fsS https://api.testcore.ru/readyz | jq .
-curl -fsS https://api.testcore.ru/healthz
+curl -fsS https://api.sprosly.com/readyz | jq .
+curl -fsS https://api.sprosly.com/healthz
 
 # 3. Audit chain still intact after restore.
 gh workflow run audit-verify-cron.yml
