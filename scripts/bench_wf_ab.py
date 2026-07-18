@@ -746,6 +746,9 @@ def main(argv: Optional[list] = None) -> int:
                         default=os.environ.get("BENCH_CATEGORY_PATH"))
     parser.add_argument("--horizon", type=int, default=None,
                         help="переопределить model.horizon (напр. 28 — #460 прогон 3)")
+    parser.add_argument("--n-splits", type=int, default=None,
+                        help="переопределить validation.n_splits (H28-1 #468: "
+                             "двух-периодный стенд = 2)")
     args = parser.parse_args(argv)
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
@@ -771,6 +774,8 @@ def main(argv: Optional[list] = None) -> int:
     config.setdefault("hpo", {})["enabled"] = False
     if args.horizon:
         config["model"]["horizon"] = int(args.horizon)
+    if args.n_splits:
+        config.setdefault("validation", {})["n_splits"] = int(args.n_splits)
 
     raw_df = load_data(args.data_path, config)
     cat_map = None
@@ -785,6 +790,7 @@ def main(argv: Optional[list] = None) -> int:
                              config["data"]["target_col"]),
         "source": args.data_path,
         "horizon": config["model"]["horizon"],
+        "n_splits": config.get("validation", {}).get("n_splits", 3),
         "n_splits": config.get("validation", {}).get("n_splits", 3),
         "arms": arms,
     }}, ensure_ascii=False), flush=True)
