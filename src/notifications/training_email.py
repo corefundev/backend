@@ -77,7 +77,7 @@ def _opted_in(client_id: str) -> bool:
 
 
 def _frontend_base_url() -> str:
-    return os.environ.get("FRONTEND_URL", "https://skusystem.ru").rstrip("/")
+    return os.environ.get("FRONTEND_URL", "https://sprosly.com").rstrip("/")
 
 
 def _render_finished(
@@ -133,7 +133,7 @@ def _render_finished(
         f"История запусков и подробности обучения:",
         f"  {base}/app/training",
         "",
-        "— SKU Forecasting",
+        "— Sprosly",
     ]
     return subject, "\n".join(body_lines)
 
@@ -160,7 +160,7 @@ def _render_failed(client_id: str, error: str) -> tuple[str, str]:
             "",
             "Если запуск снова прерывается — напишите в поддержку.",
             "",
-            "— SKU Forecasting",
+            "— Sprosly",
         ]
         return subject, "\n".join(body_lines)
     subject = "⚠ Обучение модели не удалось"
@@ -179,7 +179,7 @@ def _render_failed(client_id: str, error: str) -> tuple[str, str]:
         "",
         "Если ошибка повторяется — напишите в поддержку, приложив текст выше.",
         "",
-        "— SKU Forecasting",
+        "— Sprosly",
     ]
     return subject, "\n".join(body_lines)
 

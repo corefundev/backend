@@ -246,7 +246,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SKU Forecasting API",
+    title="Sprosly API",
     version="2.0.0",
     description="Multi-tenant demand forecasting — JWT, S3, Redis queue, fallback model",
     lifespan=lifespan,

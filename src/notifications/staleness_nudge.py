@@ -116,7 +116,7 @@ def _push(client_id: str, email: str | None, title: str, body: str) -> bool:
         try:
             from src.auth.email_sender import get_email_sender
             get_email_sender().send(
-                to=email, subject=f"SKU Forecasting — {title}", body=body)
+                to=email, subject=f"Sprosly — {title}", body=body)
             sent = True
         except Exception as e:    # noqa: BLE001 — push is best-effort
             logger.warning("staleness email to %s skipped: %s", client_id, e)
