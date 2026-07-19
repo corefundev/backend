@@ -1,6 +1,11 @@
 # SKU Forecasting System — Main Configuration v2.0
 
 data:
+  # MA-1 #519 (флип дефолта 2026-07-20, решение владельца): сетка каждого
+  # SKU продлевается до глобальной max-даты нулями (is_dead_tail) — оценка
+  # покрывает 100% товаро-дней окна; клиентские метрики честнее (и ниже),
+  # преимущество над наивным — выше (−23.5% WMAPE, −13.9% order14 на каноне).
+  extend_dead_tails: true
   date_col: date
   sku_col: sku
   target_col: sales
