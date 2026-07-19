@@ -99,3 +99,27 @@ def test_auth_dependency_invalid_cf_still_requires_auth(configured):
         asyncio.get_event_loop().run_until_complete(
             get_current_client(credentials=None, api_key=None,
                                cf_access="garbage"))
+
+
+def test_stale_bearer_with_valid_cf_falls_through_to_perimeter(configured):
+    # Боевой кейс 2026-07-20: протухший legacy-Bearer + валидная CF-подпись
+    # обязаны давать периметр-контекст, а не 401.
+    import asyncio
+    from types import SimpleNamespace
+    from src.auth.jwt_auth import get_current_client
+    stale = SimpleNamespace(credentials="not-a-jwt")
+    ctx = asyncio.get_event_loop().run_until_complete(
+        get_current_client(credentials=stale, api_key=None,
+                           cf_access=_token(configured)))
+    assert ctx.auth_method == "cf_access"
+
+
+def test_stale_bearer_without_cf_still_401(configured):
+    import asyncio
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from src.auth.jwt_auth import get_current_client
+    stale = SimpleNamespace(credentials="not-a-jwt")
+    with pytest.raises(HTTPException):
+        asyncio.get_event_loop().run_until_complete(
+            get_current_client(credentials=stale, api_key=None, cf_access=None))
