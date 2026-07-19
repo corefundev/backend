@@ -311,9 +311,11 @@ def run_prepare(
         proposal = propose_mapping(result.manifest.get("headers", []))
         fields = {"sniff_report": result.manifest, "mapping_proposal": proposal.to_dict()}
         if proposal.missing_required:
-            # system couldn't locate a required column → fail with a human hint
+            # system couldn't locate a required column → fail with a human hint.
+            # #347: переход — атомарным claim'ом; проигравший конкуренту no-op.
             registry.update_fields(upload_id, **fields)
-            registry.update_status(upload_id, ur.PROCESSING)
+            if registry.claim(upload_id, ur.SCANNED_CLEAN, ur.PROCESSING) is None:
+                return registry.get(upload_id) or record
             logger.info("prepare %s: missing required %s", upload_id, proposal.missing_required)
             return registry.update_status(
                 upload_id, ur.PROCESSING_FAIL,
@@ -341,17 +343,19 @@ def run_process(
     # sniff + auto-mapping; it enters from SCANNED_CLEAN and transitions to
     # PROCESSING. record.confirmed_mapping (set by run_prepare) is applied below.
     #
-    # Concurrency: this SCANNED_CLEAN→PROCESSING claim is single-winner only while
-    # sku-process runs a SINGLE replica (jobs serialize). Before scaling that
-    # worker >1, make the claim atomic (conditional UPDATE) — see #347.
-    if record.status != ur.SCANNED_CLEAN:
+    # #347: claim SCANNED_CLEAN→PROCESSING атомарный и single-winner
+    # (условный UPDATE по старому статусу) — двойной parse невозможен и
+    # при >1 реплике sku-process; проигравший тихо no-op'ится.
+    claimed = registry.claim(upload_id, ur.SCANNED_CLEAN, ur.PROCESSING)
+    if claimed is None:
+        record = registry.get(upload_id) or record
         logger.info(
-            "process skipped: upload %s is at %s (expected %s)",
-            upload_id, record.status, ur.SCANNED_CLEAN,
+            "process skipped: upload %s is at %s (claim lost or already "
+            "advanced past %s)", upload_id, record.status, ur.SCANNED_CLEAN,
         )
         return record
 
-    record = registry.update_status(upload_id, ur.PROCESSING)
+    record = claimed
 
     key = z.upload_key(record.client_id, upload_id, record.filename)
     quarantine = z.get_zone_backend(z.Zone.QUARANTINE)
