@@ -96,6 +96,12 @@ ARMS: dict[str, dict] = {
                           "per_sku_lags": True,
                           "lags": [1, 7, 14, 28, 56, 112, 224],
                           "rolling_windows": [7, 14, 28, 56, 112, 224]}},
+    # Вопрос владельца 2026-07-20: лаг-365 изолированно поверх победителя.
+    "mem365":        {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {
+                          "per_sku_lags": True,
+                          "lags": [1, 7, 14, 28, 56, 112, 224, 365],
+                          "rolling_windows": [7, 14, 28, 56, 112, 224]}},
     # Кандидат на флип дефолта (#418): lag-список НЕ трогаем — ровно тот
     # конфиг, что получит prod при включении флага (config.yaml до 365).
     "psl_default":   {"model": "mimo",     "statics": "fold_clean", "market": False,
