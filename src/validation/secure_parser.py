@@ -485,6 +485,26 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
         if opt in df.columns:
             df[opt] = _to_numeric(df[opt])
 
+    # MA-7/M3 (#525, аудит): транзакционные выгрузки несут НЕСКОЛЬКО строк
+    # одного (sku, date) — по чеку на строку. Раньше дубликаты молча
+    # выбрасывались ниже по конвейеру (loader keep='first', merge
+    # keep='last' — да ещё и по-разному) — спрос занижался В РАЗЫ.
+    # Канонический parquet агрегирует здесь, один раз и одинаково для
+    # всех потребителей: sales=sum, promo=max, stock/price=last
+    # (снимок конца дня).
+    dup_mask = df.duplicated(subset=[sku_col, date_col], keep=False)
+    if bool(dup_mask.any()):
+        agg_spec = {target_col: "sum"}
+        for opt in _OPTIONAL:
+            if opt in df.columns:
+                agg_spec[opt] = "max" if opt == "promo" else "last"
+        n_before = len(df)
+        df = (df.sort_values([sku_col, date_col])
+                .groupby([sku_col, date_col], as_index=False)
+                .agg(agg_spec))
+        print(f"NOTE aggregated {n_before - len(df)} duplicate "
+              f"(sku, date) rows by sum", flush=True)
+
     return df
 
 
