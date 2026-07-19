@@ -218,6 +218,10 @@ def walk_forward_validate(
         fold_metrics = compute_metrics_per_sku(fold_df, sku_col)
         fold_agg = aggregate_metrics(fold_metrics)
         fold_agg["fold"] = fold_idx
+        # MA-1 (#519): сколько клеток eval-окна реально попало в скоринг.
+        fold_agg["eval_cells_scored"] = int(len(fold_df))
+        fold_agg["eval_cells_expected"] = int(
+            train_df[sku_col].nunique() * horizon)
         fold_aggs.append(fold_agg)
         logger.info(
             f"Fold {fold_idx} | WMAPE={fold_agg['wmape_mean']:.3f} | MASE={fold_agg['mase_mean']:.3f}"
@@ -227,6 +231,12 @@ def walk_forward_validate(
     per_sku    = compute_metrics_per_sku(combined, sku_col)
     aggregated = aggregate_metrics(per_sku, raw_df=combined, sku_col=sku_col,
                                    date_col=date_col)
+    # MA-1 (#519): честность охвата — публикуем рядом с метриками.
+    _exp = sum(f.get("eval_cells_expected", 0) for f in fold_aggs)
+    _got = sum(f.get("eval_cells_scored", 0) for f in fold_aggs)
+    aggregated["eval_coverage"] = round(_got / _exp, 4) if _exp else None
+    if "is_dead_tail" in combined.columns:
+        aggregated["dead_tail_rows_scored"] = int(combined["is_dead_tail"].sum())
     logger.info(
         f"Walk-forward ({mode_label}) | "
         f"WMAPE_global={aggregated.get('wmape_global', float('nan')):.3f} · "
@@ -284,6 +294,9 @@ def _predict_direct_multi_step(
                 date_col:    d,
                 "actual":    float(t[target_col]),
                 "predicted": pred_by_date[d],
+                # MA-1 (#519): маркер сквозь скоринг — coverage и срез
+                # «мёртвые дни» в агрегатах (0, если фича-флаг выключен).
+                "is_dead_tail": int(t.get("is_dead_tail", 0) or 0),
             })
 
     return pd.DataFrame(out_rows)
