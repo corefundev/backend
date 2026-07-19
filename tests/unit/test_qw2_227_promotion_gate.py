@@ -41,6 +41,7 @@ def _reg(monkeypatch, champion_wmape):
     if champion_wmape is not None:
         runs = [SimpleNamespace(status="finished", wmape=champion_wmape,
                                 mase=1.0, mase_seasonal=1.1, gate_passed=None,
+                                eval_coverage=1.0,
                                 model_path="s3://m/model.pkl")]
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
@@ -108,8 +109,10 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
     import src.storage.training_runs as truns
     runs = [
         SimpleNamespace(status="finished", wmape=0.20, mase=0.8, mase_seasonal=1.0,
+                        eval_coverage=1.0,
                         gate_passed=False, model_path=None),          # blocked: no artifact
         SimpleNamespace(status="finished", wmape=0.45, mase=1.0, mase_seasonal=1.2,
+                        eval_coverage=1.0,
                         gate_passed=True, model_path="s3://m/model.pkl"),
     ]
     monkeypatch.setattr(truns, "get_training_runs_registry",
@@ -222,6 +225,23 @@ def test_247b_pre_honesty_era_champion_is_not_comparable(monkeypatch):
     assert blocked is False and verdict.passed is True   # promoted as first model
 
 
+def test_540_sparse_era_champion_is_not_comparable(monkeypatch):
+    # Prod case 2026-07-19 (run 8d858fb1): champion measured under the
+    # PRE-MA-1 sparse eval universe (era marker = eval_coverage is NULL,
+    # optically ~20% lower WMAPE) blocked a challenger that beat the naive
+    # floor by 24%. Cross-methodology comparison → first-model semantics.
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.4072, mase=0.5108,
+                            mase_seasonal=0.75, eval_coverage=None,
+                            gate_passed=True, model_path="s3://m/model.pkl")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    _baseline(monkeypatch, wmape=0.6768)
+    agg = {"wmape_global": 0.5117, "mase_global": 0.6721}   # beats naive
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
+    assert blocked is False and verdict.passed is True   # promoted as first model
+
+
 # ── #268: serving marker = artifact, not verdict (battle lesson 4) ────────────
 
 def test_268_promoted_first_model_with_fail_verdict_becomes_champion(monkeypatch):
@@ -229,7 +249,8 @@ def test_268_promoted_first_model_with_fail_verdict_becomes_champion(monkeypatch
     # MUST be the next run's champion, else "no champion" loops forever.
     import src.storage.training_runs as truns
     runs = [SimpleNamespace(status="finished", wmape=0.837, mase=17.0,
-                            mase_seasonal=0.9, gate_passed=False,
+                            mase_seasonal=0.9, eval_coverage=1.0,
+                            gate_passed=False,
                             model_path="s3://m/model.pkl")]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
@@ -244,7 +265,8 @@ def test_268_blocked_run_still_not_champion(monkeypatch):
     # blocked = no artifact — stays excluded (model_path None)
     import src.storage.training_runs as truns
     runs = [SimpleNamespace(status="finished", wmape=0.20, mase=0.8,
-                            mase_seasonal=1.0, gate_passed=False, model_path=None)]
+                            mase_seasonal=1.0, eval_coverage=1.0,
+                            gate_passed=False, model_path=None)]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
     _baseline(monkeypatch, wmape=0.90)

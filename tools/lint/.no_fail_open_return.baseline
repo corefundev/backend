@@ -32,9 +32,9 @@
 src/pipeline/task_queue.py:213  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
 src/pipeline/task_queue.py:220  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
 src/pipeline/task_queue.py:234  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
-src/pipeline/train.py:319  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
-src/pipeline/train.py:349  pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
-src/pipeline/train.py:249  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
+src/pipeline/train.py:326  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
+src/pipeline/train.py:356  pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
+src/pipeline/train.py:256  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
 src/pipeline/inference_utils.py:214  QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes
 src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
 src/pipeline/inference_utils.py:370  pre-R9 baseline (was :341, +29 QH-7 #440 event-ramp recompute block); triage in R10 — recursive forecast fallback

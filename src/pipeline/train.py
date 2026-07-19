@@ -229,20 +229,27 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         try:
             from src.storage.training_runs import FINISHED, get_training_runs_registry
             for r in get_training_runs_registry().list_for_client(client_id, limit=20):
-                # Era marker (#247 follow-up): mase_seasonal exists only for
-                # runs measured under the post-2026-06-28 HONEST methodology
-                # (#180 HPO holdout / #181 / #182). Pre-honesty champions carry
-                # metrics flattered by the old biases (HPO tuned on the
-                # reported window) — comparing an honest challenger against
-                # them blocks legitimate retrains forever. Such runs are
-                # treated as "no champion" (first-model semantics).
+                # Era markers: a champion metric is comparable ONLY when it
+                # was measured under the SAME evaluation methodology as the
+                # challenger; otherwise first-model semantics. Each ruler
+                # change adds a presence-marker (era fields are monotone in
+                # time, so requiring them here can never select a stale
+                # non-serving run over the actual serving artifact):
+                #   • mase_seasonal (#247b) — post-2026-06-28 honest
+                #     methodology (#180 HPO holdout / #181 / #182);
+                #   • eval_coverage (#540) — MA-1 #519 honest eval universe
+                #     (dead tails scored, 100% window coverage). Sparse-era
+                #     WMAPEs are optically ~20% lower; live case: challenger
+                #     0.512 beat naive 0.677 yet was blocked by a sparse-era
+                #     champion 0.407.
                 # #268: champion = newest run whose ARTIFACT exists (it is
                 # what actually serves) — NOT gate_passed: a promoted-first-
                 # model with an honest FAIL verdict must become the champion,
                 # else every next retrain sees "no champion" forever.
                 if (r.status == FINISHED and r.wmape is not None
                         and getattr(r, "model_path", None)
-                        and getattr(r, "mase_seasonal", None) is not None):
+                        and getattr(r, "mase_seasonal", None) is not None
+                        and getattr(r, "eval_coverage", None) is not None):
                     champion = SimpleNamespace(wmape_global=float(r.wmape),
                                                mase_global=float(r.mase or "nan"))
                     break
