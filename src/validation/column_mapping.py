@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 
 # ── Canonical schema ──────────────────────────────────────────────────────────
 REQUIRED_FIELDS = ("date", "sku", "sales")
-OPTIONAL_FIELDS = ("price", "promo", "stock")
+OPTIONAL_FIELDS = ("price", "promo", "stock", "category")
 CANONICAL_FIELDS = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
 
@@ -127,6 +127,23 @@ _SYNONYMS: Dict[str, List[str]] = {
         "quantity on hand", "qoh", "available", "available qty",
         "available to sell", "warehouse", "warehouse qty", "balance",
         "ending stock", "ending inventory", "remaining", "on hand qty",
+    ],
+    # #545: категория SKU → category_te (третья static-фича). 1С обычно
+    # несёт её как «группа»/«номенклатурная группа»; маркетплейсы — как
+    # «предмет»/«категория товара».
+    "category": [
+        # RU
+        "категория", "категория товара", "категория номенклатуры",
+        "группа", "группа товара", "группа товаров", "товарная группа",
+        "номенклатурная группа", "подгруппа", "раздел", "рубрика",
+        "предмет", "тип товара", "вид товара", "вид номенклатуры",
+        "направление", "сегмент", "коллекция", "линейка",
+        # EN
+        "category", "product category", "item category", "category name",
+        "group", "product group", "item group", "commodity group",
+        "department", "section", "class", "product class", "subcategory",
+        "sub category", "product type", "item type", "segment",
+        "collection", "product line", "family", "product family",
     ],
 }
 
