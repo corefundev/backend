@@ -14,16 +14,16 @@ data:
   min_rows: 30
 
 features:
-  # Daily lags. Includes long-term yearly/half-yearly references
-  # (180/365) — critical for direct multi-step forecasts that need
-  # to see "what happened a year ago this day" to learn seasonal
-  # cycles. Lags wider than the dataset's history get auto-dropped
-  # by feature engineering, so this list stays safe for short series.
-  lags: [1, 2, 3, 7, 14, 21, 28, 60, 90, 180, 365]
-  # Rolling stats over the same scale of windows. Each builds 4
-  # features (mean/std/max/min). 180-day window captures the
-  # half-yearly trend that helps with cross-season generalisation.
-  rolling_windows: [7, 14, 28, 60, 90, 180]
+  # Э1-замер 2026-07-20 (канон 1c-full, честная сетка, 3 фолда, подтверждён
+  # на 2 разбиениях, dose-response 5 доз): per-SKU семантика лагов (#418)
+  # + курированный список до 224 дней = WMAPE −6.9%, заказ-14 −15%,
+  # заказ-28 −21% к базе. Прежний богатый список (2,3,21,60,90,180,365)
+  # ИЗМЕРЕН ХУЖЕ (psl_default −0.6%) — лишние лаги оказались шумом; при
+  # per_sku_lags=false один короткий SKU обрезал память всему каталогу
+  # (#414). Менять состав — только через плечо в bench_wf_ab.
+  per_sku_lags: true
+  lags: [1, 7, 14, 28, 56, 112, 224]
+  rolling_windows: [7, 14, 28, 56, 112, 224]
   calendar: true
   price: true
   promo: true
