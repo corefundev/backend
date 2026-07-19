@@ -259,6 +259,10 @@ def _fill_time_gaps(
         # sales days (which were genuinely zero in the source).
         group["is_gap_day"] = ((~group.index.isin(original_dates)) & ~dead).astype("int8")
         group[target_col] = group[target_col].fillna(0)
+        # #545: категория — статичный атрибут SKU; строки, созданные
+        # reindex'ом (дыры/мёртвый хвост), наследуют её, а не NaN.
+        if "category" in group.columns:
+            group["category"] = group["category"].ffill().bfill()
         group.index.name = date_col
         group = group.reset_index()
 

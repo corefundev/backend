@@ -420,8 +420,13 @@ def run_training_pipeline(
         fold_static_recompute,
         merge_static_features,
     )
+    _cte_cfg = (config.get("features", {}) or {}).get("category_te", {}) or {}
+    _cat_col = config["data"].get("category_col")
+    _cte_m = float(_cte_cfg.get("smoothing", 20))
     static_map = compute_static_map(df, config["data"]["sku_col"],
-                                    config["data"]["target_col"])
+                                    config["data"]["target_col"],
+                                    category_col=_cat_col,
+                                    te_smoothing=_cte_m)
     df = merge_static_features(df, static_map, config["data"]["sku_col"])
 
     # AUD-6 (#358): walk-forward/HPO must NOT see this full-frame map — it
@@ -432,7 +437,9 @@ def run_training_pipeline(
     def _fold_statics(train_df: Any, test_df: Any) -> tuple:
         return fold_static_recompute(train_df, test_df,
                                      config["data"]["sku_col"],
-                                     config["data"]["target_col"])
+                                     config["data"]["target_col"],
+                                     category_col=_cat_col,
+                                     te_smoothing=_cte_m)
 
     feature_cols = get_feature_columns(df, config)
     storage.save_features(df)
