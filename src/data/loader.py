@@ -160,11 +160,17 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # 2. Duplicates
+    # 2. Duplicates — MA-7/M3 (#525): канонический parquet агрегирует
+    # дубликаты СУММОЙ ещё в sandbox-парсере; сюда они могут прийти только
+    # из легаси-данных или рукодельных фреймов. Дефенсивная семантика
+    # едина с datasets/merge: keep='last' (новее побеждает), и это
+    # СИГНАЛ аномалии данных, а не норма.
     dupes = df.duplicated(subset=[sku_col, date_col]).sum()
     if dupes > 0:
-        logger.warning(f"Dropping {dupes} duplicate (sku, date) rows")
-        df = df.drop_duplicates(subset=[sku_col, date_col])
+        logger.warning(
+            f"Dropping {dupes} duplicate (sku, date) rows (keep='last'; "
+            "canonical parquet aggregates by sum at prep — investigate source)")
+        df = df.drop_duplicates(subset=[sku_col, date_col], keep="last")
 
     # 3. Negative sales
     neg = (df[target_col] < 0).sum()
