@@ -88,9 +88,18 @@ def test_kolvo_abbreviation_normalized():
 # ── unmapped extras & conflicts ───────────────────────────────────────────────
 
 def test_unmapped_extra_column_reported():
-    p = _m(["дата", "артикул", "продажи", "Категория"])
-    assert "Категория" in p.unmapped_headers
+    # #545: «Категория» теперь КАНОНИЧЕСКОЕ поле (category_te) — примером
+    # немаппящейся колонки служит настоящий сирота.
+    p = _m(["дата", "артикул", "продажи", "Комментарий менеджера"])
+    assert "Комментарий менеджера" in p.unmapped_headers
     assert p.mapping["date"] and p.mapping["sku"] and p.mapping["sales"]
+
+
+def test_category_column_is_auto_mapped():
+    for header in ("Категория", "Номенклатурная группа", "товарная группа",
+                   "Product Group"):
+        p = _m(["дата", "артикул", "продажи", header])
+        assert p.mapping["category"] == header, header
 
 
 def test_duplicate_candidates_assigned_once():
