@@ -96,3 +96,42 @@ def test_postgres_command_keeps_archive_settings():
         assert setting in text, (
             f"postgres command must keep `{setting}` after R5-19 edit"
         )
+
+
+def test_349_wal_archive_retry_is_bounded():
+    """#349: transient S3 blip must not page CRITICAL, but the retry loop
+    must be STRICTLY bounded — an unbounded loop would wedge postgres's
+    archiver on a real outage instead of failing closed."""
+    from pathlib import Path
+    sh = Path("scripts/wal_archive.sh").read_text()
+    assert "max_attempts=3" in sh
+    assert 'if [ "$attempt" -ge "$max_attempts" ]; then' in sh
+    assert "exit 1" in sh, "a real outage must still fail closed to postgres"
+    assert "exit 0" in sh
+    # ни одного unbounded-паттерна вокруг mc cp
+    assert "until mc" not in sh and "while ! mc" not in sh
+
+
+def test_349_wal_archive_retry_behavior(tmp_path, monkeypatch):
+    """Функционально: 2 транзиентных фейла → exit 0 (postgres не видит
+    сбоя); 3 фейла подряд → exit 1 (fail-closed)."""
+    import os
+    import subprocess
+    wal = tmp_path / "seg"
+    wal.write_text("x")
+    counter = tmp_path / "count"
+    for fails, expected_rc in ((2, 0), (3, 1)):
+        counter.write_text("0")
+        mc = tmp_path / "mc"
+        mc.write_text(
+            "#!/bin/sh\n"
+            f"n=$(cat {counter}); n=$((n+1)); echo $n > {counter}\n"
+            f"[ $n -le {fails} ] && exit 1\n"
+            "exit 0\n")
+        mc.chmod(0o755)
+        env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
+                   S3_BACKUP_BUCKET="b")
+        r = subprocess.run(
+            ["sh", "scripts/wal_archive.sh", str(wal), "seg"],
+            env=env, capture_output=True, timeout=60)
+        assert r.returncode == expected_rc, (fails, r.stderr)
