@@ -171,7 +171,8 @@ def notify_training_finished(
     wmape:         Optional[float] = None,
     mase:          Optional[float] = None,
     mase_seasonal: Optional[float] = None,
-    wmape_order_14: Optional[float] = None,
+    order_wmape: Optional[float] = None,
+    order_window: Optional[int] = None,
     gate_passed:   Optional[bool]  = None,
     gate_blocked:  Optional[bool]  = None,
 ) -> None:
@@ -199,8 +200,9 @@ def notify_training_finished(
             + f"Аккаунт: <code>{client_id}</code>\n"
             f"Длительность: {_format_duration(duration_sec)}\n"
             f"SKU: {n_skus if n_skus is not None else '—'}\n"
-            + (f"Точность для заказа (14 дн): <b>{max(0.0, (1 - wmape_order_14)) * 100:.1f}%</b>\n"
-               if isinstance(wmape_order_14, float) else "")
+            + (f"Точность для заказа ({order_window} дн): "
+               f"<b>{max(0.0, (1 - order_wmape)) * 100:.1f}%</b>\n"
+               if isinstance(order_wmape, float) and order_window else "")
             + f"WMAPE: <b>{_format_pct(wmape)}</b> (чем меньше, тем точнее)\n"
             f"MASE: <b>{_format_num(mase)}</b> (&lt; 1 — лучше «как вчера»)\n"
             f"MASE сезонный: <b>{_format_num(mase_seasonal)}</b> (&lt; 1 — лучше «как неделю назад»)\n\n"

@@ -268,7 +268,8 @@ def _record_run_finished(
                 mase=metrics.get("mase_global",  metrics.get("mase_mean")),
                 mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
                 smape=metrics.get("smape_global", metrics.get("smape_mean")),
-                # HZ-1 #464: «точность для заказа» — WMAPE суммы окна 7/14.
+                # HZ-1 #464: «точность для заказа» — WMAPE суммы окна 7/14
+                # (MA-4 #522: ключ отсутствует, если окно не влезло в горизонт).
                 wmape_order_7=metrics.get("wmape_order_7"),
                 wmape_order_14=metrics.get("wmape_order_14"),
                 # DS-2 #467: naive baseline from the promotion gate.
@@ -327,16 +328,7 @@ def _emit_training_inbox_row(client_id, run_id, notif_args) -> None:
                 dedup_key=f"training:{run_id}" if run_id else None,
             )
         else:
-            wm = notif_args.get("wmape")
-            ow = notif_args.get("wmape_order_14")
-            # HZ-1 #464: lead with the buyer's number — «точность для
-            # заказа» (100−WMAPE of the 14-day order sum); daily WMAPE stays
-            # for continuity.
-            parts = []
-            if isinstance(ow, float):
-                parts.append(f"Точность для заказа (14 дн): {max(0.0, (1 - ow)) * 100:.1f}%")
-            if isinstance(wm, float):
-                parts.append(f"WMAPE {wm:.3f}")
+            parts = _finished_summary_parts(notif_args)
             emit_notification(
                 client_id, type="training_finished", severity="success",
                 title="Обучение модели завершено",
@@ -345,6 +337,48 @@ def _emit_training_inbox_row(client_id, run_id, notif_args) -> None:
             )
     except Exception as inbox_err:    # noqa: BLE001 — best-effort emitter
         logger.info("inbox notification skipped: %s", inbox_err)
+
+
+def _finished_notif_args(client_id: str, result: dict) -> dict:
+    """Аргументы уведомлений об успехе. MA-4 #522: пара (order_wmape,
+    order_window) — лучшее ДОСТУПНОЕ окно (14 → 7 → нет), метка окна
+    едет вместе с числом."""
+    metrics = result.get("metrics") or {}
+    return dict(
+        client_id=client_id,
+        duration_sec=result.get("elapsed_sec"),
+        n_skus=result.get("n_skus"),
+        wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
+        mase=metrics.get("mase_global",  metrics.get("mase_mean")),
+        mase_seasonal=metrics.get("mase_seasonal_global",
+                                  metrics.get("mase_seasonal_mean")),
+        order_wmape=(metrics.get("wmape_order_14")
+                     if metrics.get("wmape_order_14") is not None
+                     else metrics.get("wmape_order_7")),
+        order_window=(14 if metrics.get("wmape_order_14") is not None
+                      else (7 if metrics.get("wmape_order_7") is not None
+                            else None)),
+        gate_passed=(result.get("gate") or {}).get("passed"),
+        gate_blocked=(
+            (result.get("gate") or {}).get("passed") is False
+            and not result.get("model_path")
+        ),
+    )
+
+
+def _finished_summary_parts(notif_args: dict) -> list:
+    """HZ-1 #464 / MA-4 #522: сводка успеха — «точность для заказа»
+    с меткой ФАКТИЧЕСКОГО окна (14→7→нет) + дневной WMAPE."""
+    wm = notif_args.get("wmape")
+    ow = notif_args.get("order_wmape")
+    own = notif_args.get("order_window")
+    parts = []
+    if isinstance(ow, float) and own:
+        parts.append(f"Точность для заказа ({own} дн): "
+                     f"{max(0.0, (1 - ow)) * 100:.1f}%")
+    if isinstance(wm, float):
+        parts.append(f"WMAPE {wm:.3f}")
+    return parts
 
 
 def _notify_finished_idempotent(
@@ -361,21 +395,7 @@ def _notify_finished_idempotent(
     failure falls through to send — duplicate is better than miss.
     No run_id → no guard (legacy jobs preserve pre-R5 behaviour).
     """
-    metrics = result.get("metrics") or {}
-    notif_args = dict(
-        client_id=client_id,
-        duration_sec=result.get("elapsed_sec"),
-        n_skus=result.get("n_skus"),
-        wmape=metrics.get("wmape_global", metrics.get("wmape_mean")),
-        mase=metrics.get("mase_global",  metrics.get("mase_mean")),
-        mase_seasonal=metrics.get("mase_seasonal_global", metrics.get("mase_seasonal_mean")),
-        wmape_order_14=metrics.get("wmape_order_14"),
-        gate_passed=(result.get("gate") or {}).get("passed"),
-        gate_blocked=(
-            (result.get("gate") or {}).get("passed") is False
-            and not result.get("model_path")
-        ),
-    )
+    notif_args = _finished_notif_args(client_id, result)
 
     should_notify = True
     if run_id:
