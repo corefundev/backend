@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import logging
 import os
 import uuid
@@ -156,6 +157,14 @@ class UploadRegistry:
     def update_status(
         self, upload_id: str, new_status: str, **extra
     ) -> UploadRecord: ...
+    def claim(
+        self, upload_id: str, from_status: str, to_status: str
+    ) -> Optional[UploadRecord]:
+        """#347: атомарный single-winner переход from→to. Ровно один
+        конкурирующий вызов получает запись (условный UPDATE по старому
+        статусу); остальные — None и обязаны no-op'нуться. Обязателен
+        для claim'ов рабочих воркеров ПЕРЕД масштабированием >1 реплики."""
+        ...
     def update_fields(self, upload_id: str, **fields) -> UploadRecord:
         """Persist prep columns WITHOUT a status transition (DP-4b #324)."""
         ...
@@ -257,6 +266,28 @@ class PostgresUploadRegistry(UploadRegistry):
             conn.commit()
         logger.info(f"upload {upload_id}: {row['status']} → {new_status}")
         return self._row_to_record(dict(updated))
+
+    def claim(
+        self, upload_id: str, from_status: str, to_status: str
+    ) -> Optional[UploadRecord]:
+        _assert_transition(from_status, to_status)
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                # Единственный победитель: условие по СТАРОМУ статусу в самом
+                # UPDATE — никакого окна между проверкой и переходом.
+                cur.execute(
+                    "UPDATE sku_uploads SET status = %s, updated_at = NOW() "
+                    "WHERE upload_id = %s AND status = %s RETURNING *",
+                    (to_status, upload_id, from_status),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            logger.info("upload %s: claim %s→%s lost (already advanced)",
+                        upload_id, from_status, to_status)
+            return None
+        logger.info(f"upload {upload_id}: {from_status} → {to_status} (claimed)")
+        return self._row_to_record(dict(row))
 
     def update_fields(self, upload_id: str, **fields) -> UploadRecord:
         """DP-4b (#324): persist prep JSONB columns WITHOUT a status change.
@@ -360,6 +391,9 @@ class PostgresUploadRegistry(UploadRegistry):
 
 # ── Local file fallback (dev only) ────────────────────────────────────────────
 
+_LOCAL_CLAIM_LOCK = threading.Lock()
+
+
 class LocalFileUploadRegistry(UploadRegistry):
     """JSON-file registry for running without Postgres."""
 
@@ -407,6 +441,23 @@ class LocalFileUploadRegistry(UploadRegistry):
             row[k] = v
         self._save(data)
         logger.info(f"upload {upload_id}: → {new_status}")
+        return UploadRecord(**row)
+
+    def claim(
+        self, upload_id: str, from_status: str, to_status: str
+    ) -> Optional[UploadRecord]:
+        _assert_transition(from_status, to_status)
+        with _LOCAL_CLAIM_LOCK:
+            data = self._load()
+            if upload_id not in data:
+                raise KeyError(f"upload_id {upload_id!r} not found")
+            row = data[upload_id]
+            if row["status"] != from_status:
+                return None
+            row["status"] = to_status
+            row["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._save(data)
+        logger.info(f"upload {upload_id}: {from_status} → {to_status} (claimed)")
         return UploadRecord(**row)
 
     def update_fields(self, upload_id: str, **fields) -> UploadRecord:
