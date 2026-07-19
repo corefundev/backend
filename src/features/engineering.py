@@ -279,6 +279,9 @@ def get_feature_columns(df: pd.DataFrame, config: dict) -> list[str]:
         config["data"]["sku_col"],
         config["data"]["target_col"],
         "price", "promo", "stock", "is_anomaly",
+        # #545: сырая строковая категория — источник для category_te,
+        # в фичи идёт только производная (numeric) колонка.
+        config["data"].get("category_col") or "category",
         # MA-1 (#519): маркер мёртвого хвоста — ТОЛЬКО для метрик/coverage;
         # как фича это утечка будущего («SKU больше не продастся»).
         "is_dead_tail",

@@ -10,10 +10,18 @@ data:
   sku_col: sku
   target_col: sales
   optional_cols: [price, promo, stock]
+  # #545: категория SKU (опциональная строковая колонка канона). Если
+  # колонки нет в датасете — category_te просто отсутствует (no-op).
+  category_col: category
   max_missing_ratio: 0.10
   min_rows: 30
 
 features:
+  # #545: категорийный target-encoding (третья static-фича, #307-контракт).
+  # smoothing замерен стендом (m=20; m=100 НЕ лучше) — менять только через
+  # плечо в bench_wf_ab.
+  category_te:
+    smoothing: 20
   # Э1-замер 2026-07-20 (канон 1c-full, честная сетка, 3 фолда, подтверждён
   # на 2 разбиениях, dose-response 5 доз): per-SKU семантика лагов (#418)
   # + курированный список до 224 дней = WMAPE −6.9%, заказ-14 −15%,

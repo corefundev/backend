@@ -365,6 +365,7 @@ def _read_excel(path: Path, max_rows: int, max_columns: int) -> pd.DataFrame:
 
 _REQUIRED = ["date", "sku", "sales"]
 _OPTIONAL = ["price", "promo", "stock"]
+_OPTIONAL_STR = ["category"]    # #545: строковые опциональные (не численные)
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:
@@ -423,7 +424,7 @@ def _apply_mapping(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     # a file the system had just said it mapped. Mirrors _validate's strip.
     df = df.rename(columns={c: str(c).strip() for c in df.columns})
     df = df.loc[:, ~df.columns.duplicated()]
-    schema = _REQUIRED + _OPTIONAL
+    schema = _REQUIRED + _OPTIONAL + _OPTIONAL_STR
     rename: "dict[str, str]" = {}
     for canonical, source in mapping.items():
         if canonical in schema and isinstance(source, str) and source in df.columns:
@@ -445,7 +446,8 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
         raise ValueError(f"missing required columns: {sorted(missing)}")
 
     # Formula check across ALL cells (required + optional).
-    scan_cols = list(expected) + [c for c in _OPTIONAL if c in df.columns]
+    scan_cols = (list(expected) + [c for c in _OPTIONAL if c in df.columns]
+                 + [c for c in _OPTIONAL_STR if c in df.columns])
     for col in scan_cols:
         bad_rows = df.index[df[col].map(_looks_like_formula)].tolist()
         if bad_rows:
@@ -484,6 +486,12 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
     for opt in _OPTIONAL:
         if opt in df.columns:
             df[opt] = _to_numeric(df[opt])
+    # #545: категория — строковая; чистим управляющие символы и длину
+    # (тот же санитайзер, что у sku), пустые → NaN (фича просто не встанет).
+    for opt in _OPTIONAL_STR:
+        if opt in df.columns:
+            c = df[opt].astype(str).str.strip().str.slice(0, 128)
+            df[opt] = c.where(c.ne("") & c.str.lower().ne("nan"), other=None)
 
     # MA-7/M3 (#525, аудит): транзакционные выгрузки несут НЕСКОЛЬКО строк
     # одного (sku, date) — по чеку на строку. Раньше дубликаты молча
@@ -498,6 +506,9 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
         for opt in _OPTIONAL:
             if opt in df.columns:
                 agg_spec[opt] = "max" if opt == "promo" else "last"
+        for opt in _OPTIONAL_STR:            # #545: категория — снимок конца дня
+            if opt in df.columns:
+                agg_spec[opt] = "last"
         n_before = len(df)
         df = (df.sort_values([sku_col, date_col])
                 .groupby([sku_col, date_col], as_index=False)
