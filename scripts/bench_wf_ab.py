@@ -814,6 +814,11 @@ def main(argv: Optional[list] = None) -> int:
                         default=os.environ.get("BENCH_CATEGORY_PATH"))
     parser.add_argument("--horizon", type=int, default=None,
                         help="переопределить model.horizon (напр. 28 — #460 прогон 3)")
+    parser.add_argument("--grid", choices=["sparse", "prod", "dead"],
+                        default="sparse",
+                        help="сетка ВСЕХ плеч: sparse=легаси (как грузит "
+                             "load_data), prod=validate_data, dead=validate+"
+                             "extend_dead_tails (новый канон MA-1)")
     parser.add_argument("--dump-combined", default=None,
                         help="каталог для per-row CSV по каждому плечу "
                              "(модель-аудит: всплески, per-SKU)")
@@ -849,6 +854,10 @@ def main(argv: Optional[list] = None) -> int:
         config.setdefault("validation", {})["n_splits"] = int(args.n_splits)
 
     raw_df = load_data(args.data_path, config)
+    if args.grid != "sparse":
+        from src.data.loader import validate_data as _vd
+        config.setdefault("data", {})["extend_dead_tails"] = (args.grid == "dead")
+        raw_df = _vd(raw_df, config)
     cat_map = None
     if args.category_path:
         import pandas as _pd
@@ -862,6 +871,7 @@ def main(argv: Optional[list] = None) -> int:
         "source": args.data_path,
         "horizon": config["model"]["horizon"],
         "n_splits": config.get("validation", {}).get("n_splits", 3),
+        "grid": args.grid,
         "arms": arms,
     }}, ensure_ascii=False), flush=True)
 
