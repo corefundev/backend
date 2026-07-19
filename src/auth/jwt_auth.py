@@ -135,6 +135,7 @@ def _ensure_secrets_loaded():
 # FastAPI security schemes
 _bearer    = HTTPBearer(auto_error=False)
 _api_key_h = APIKeyHeader(name="x-api-key", auto_error=False)
+_cf_access_h = APIKeyHeader(name="Cf-Access-Jwt-Assertion", auto_error=False)
 
 
 # ── Token creation ────────────────────────────────────────────
@@ -594,8 +595,10 @@ def require_client_access(client_id: str, auth: AuthContext) -> None:
 async def get_current_client(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
     api_key:     Optional[str]                          = Security(_api_key_h),
+    cf_access:   Optional[str]                          = Security(_cf_access_h),
 ) -> AuthContext:
-    """FastAPI dependency. Accepts either JWT Bearer or x-api-key."""
+    """FastAPI dependency. Accepts JWT Bearer, Cloudflare Access JWT
+    (ADM-ACCESS #551, config-gated) or x-api-key."""
     if credentials:
         payload = decode_access_token(credentials.credentials)
         return AuthContext(
@@ -604,6 +607,22 @@ async def get_current_client(
             auth_method = "jwt",
             jti         = payload.get("jti"),
         )
+
+    if cf_access:
+        # ADM-ACCESS (#551): запрос пришёл сквозь периметр CF Access
+        # (same-origin proxy admin-хоста). Личность = подписанный CF JWT;
+        # путь существует только при заданных CF_ACCESS_* (Lockbox).
+        from src.auth.cf_access import verify_access_jwt
+        email = verify_access_jwt(cf_access)
+        if email is not None:
+            logger.info("cf_access: admin perimeter identity %s", email)
+            return AuthContext(
+                client_id   = email,
+                roles       = ["admin", "forecast"],
+                auth_method = "cf_access",
+            )
+        # невалидный/неожиданный заголовок не даёт fallback-прав:
+        # но и не блокирует другие механизмы, если они предъявлены
 
     if api_key:
         _ensure_secrets_loaded()
