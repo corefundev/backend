@@ -32,8 +32,10 @@ def test_claim_single_winner_under_concurrency(tmp_path):
             wins.append(got)
 
     threads = [threading.Thread(target=racer) for _ in range(8)]
-    for th in threads: th.start()
-    for th in threads: th.join()
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
     assert len(wins) == 1, f"exactly one winner expected, got {len(wins)}"
     assert reg.get("u1").status == ur.PROCESSING
 
