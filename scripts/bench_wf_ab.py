@@ -166,6 +166,14 @@ ARMS: dict[str, dict] = {
     "dead_tails_on": {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "data_overrides": {"validate": True,
                                          "extend_dead_tails": True}},
+    # MA-3 #521: anomaly-веса как в проде (fold-aware), legacy vs guard —
+    # обе руки на прод-сетке (validate), чтобы мерить именно детектор.
+    "anomaly_legacy": {"model": "mimo",    "statics": "fold_clean", "market": False,
+                       "data_overrides": {"validate": True},
+                       "anomaly_weights": {"sparse_iqr_guard": False}},
+    "anomaly_fixed": {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "data_overrides": {"validate": True},
+                      "anomaly_weights": {"sparse_iqr_guard": True}},
     # #460 прогон 2: US-праздники для американских данных (M5) — снимает
     # RU-календарный гандикап базы; сравнивать с base на том же датасете.
     "holidays_us":   {"model": "mimo",     "statics": "fold_clean", "market": False,
@@ -644,6 +652,22 @@ def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
     # max date) — тот же hook, что anomaly-веса в prod (#183); в остальных
     # плечах sample_weight_fn=None (харнесс: веса выключены).
     sample_weight_fn = None
+    _aw = spec.get("anomaly_weights")
+    if _aw:
+        from src.data.anomaly_detection import SalesAnomalyDetector
+        _anom_cfg = config.get("anomaly_detection", {})
+
+        def _anomaly_weight_fn(tr):
+            det = SalesAnomalyDetector(
+                contamination=_anom_cfg.get("contamination", 0.05),
+                iqr_factor=_anom_cfg.get("iqr_factor", 3.0),
+                anomaly_weight=_anom_cfg.get("anomaly_weight", 0.1),
+                sparse_iqr_guard=_aw.get("sparse_iqr_guard", True),
+            )
+            _, w = det.fit_detect(tr, sku_col=sku_col, target_col=target_col)
+            return w
+
+        sample_weight_fn = _anomaly_weight_fn
     _rd_hl = spec.get("recency_half_life")
     if _rd_hl:
         from src.data.recency import recency_weights
