@@ -35,6 +35,11 @@ def _two_sku_example() -> pd.DataFrame:
         rows.append(("A", 0, step, 10.0, float(pred)))
     for step, pred in enumerate([7, 8, 7, 8], start=1):      # B: Σ=30 vs 40
         rows.append(("B", 0, step, 10.0, float(pred)))
+    # MA-4 #522: окно продукта = 7 дней; шаги 5-7 — точные попадания
+    # (нули в обе суммы не добавляют) — h_max=7, ключи снова пишутся.
+    for step in (5, 6, 7):
+        rows.append(("A", 0, step, 0.0, 0.0))
+        rows.append(("B", 0, step, 0.0, 0.0))
     return _frame(rows)
 
 
@@ -49,9 +54,9 @@ def test_hand_example_daily_030_order_0125():
     raw = _two_sku_example()
     agg = aggregate_metrics(_metrics_df(raw), raw_df=raw)
     assert abs(agg["wmape_global"] - 0.30) < 1e-9          # (14+10)/80
-    # h_max=4 → оба продуктовых окна усечены до полного горизонта
     assert abs(agg["wmape_order_7"] - 0.125) < 1e-9        # (0+10)/80
-    assert agg["wmape_order_14"] == agg["wmape_order_7"]
+    # MA-4 #522: h_max=7 < 14 — четырнадцатидневный ключ честно отсутствует
+    assert "wmape_order_14" not in agg
 
 
 def test_pure_timing_noise_cancels_to_zero():
@@ -105,6 +110,8 @@ def test_folds_do_not_bleed_into_each_other():
     живёт внутри фолда (дисциплина L-A7)."""
     rows = [("A", 0, 1, 10.0, 16.0),                       # +6 в фолде 0
             ("A", 1, 1, 10.0, 4.0)]                        # −6 в фолде 1
+    rows += [("A", f, s_, 0.0, 0.0)                        # добить окно до 7
+             for f in (0, 1) for s_ in range(2, 8)]
     raw = _frame(rows)
     agg = aggregate_metrics(_metrics_df(raw), raw_df=raw)
     assert abs(agg["wmape_order_7"] - 12.0 / 20.0) < 1e-9  # не 0!
@@ -169,8 +176,8 @@ def test_walk_forward_combined_carries_horizon_step():
     assert "horizon_step" in res.combined.columns
     steps = res.combined.groupby("fold")["horizon_step"].agg(["min", "max"])
     assert (steps["min"] == 1).all() and (steps["max"] <= 3).all()
-    # и продуктовые ключи доехали до agg
-    assert "wmape_order_7" in res.aggregated
+    # MA-4 #522: горизонт 3 короче окна 7 — ключи честно отсутствуют
+    assert "wmape_order_7" not in res.aggregated
 
 
 # ── проводка: run row, уведомления, миграция ─────────────────────────────
@@ -179,14 +186,17 @@ def test_task_queue_persists_and_fans_out():
     tq = Path("src/pipeline/task_queue.py").read_text()
     assert 'wmape_order_7=metrics.get("wmape_order_7")' in tq
     assert 'wmape_order_14=metrics.get("wmape_order_14")' in tq
-    assert 'wmape_order_14=metrics.get("wmape_order_14")' in tq.split("notif_args = dict(")[1]
+    # MA-4 #522: notif-аргументы собираются хелпером с парой окно+число
+    helper = tq.split("def _finished_notif_args(")[1]
+    assert "order_wmape=" in helper and "order_window=" in helper
 
 
 def test_both_senders_accept_the_kwarg_and_render_the_number():
     from src.notifications.training_email import notify_training_finished as e
     from src.notifications.telegram import notify_training_finished as t
     for fn in (e, t):
-        assert "wmape_order_14" in inspect.signature(fn).parameters
+        sig = inspect.signature(fn).parameters             # MA-4 #522
+        assert "order_wmape" in sig and "order_window" in sig
     for p in ("src/notifications/training_email.py",
               "src/notifications/telegram.py"):
         assert "Точность для заказа" in Path(p).read_text(), p
@@ -195,10 +205,14 @@ def test_both_senders_accept_the_kwarg_and_render_the_number():
 def test_email_renders_percentage_not_wmape():
     from src.notifications.training_email import _render_finished
     _, body = _render_finished("acme", 60.0, 5, 0.459, 1.0,
-                               wmape_order_14=0.235)
+                               order_wmape=0.235, order_window=14)
     assert "Точность для заказа (14 дн): 76.5%" in body
+    # MA-4 #522: короткий горизонт — метка окна едет вместе с числом
+    _, body7 = _render_finished("acme", 60.0, 5, 0.459, 1.0,
+                                order_wmape=0.3, order_window=7)
+    assert "Точность для заказа (7 дн): 70.0%" in body7
     _, body_none = _render_finished("acme", 60.0, 5, 0.459, 1.0)
-    assert "Точность для заказа (14 дн): —" in body_none
+    assert "Точность для заказа: —" in body_none
 
 
 def test_registry_and_migration():

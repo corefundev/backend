@@ -290,9 +290,10 @@ def _fill_order_accuracy(agg: dict, raw_df: pd.DataFrame,
     bench_wf_ab.decompose/order_sum БИТ-В-БИТ (числа кабинета обязаны
     сходиться со стендовыми): группировка (sku, fold), окно =
     horizon_step ≤ w, WMAPE по СУММАМ групп. Окна — продуктовые 7 и 14
-    дней (усечённые горизонтом, если он короче: min(w, H) — как на
-    стенде). Требует колонку horizon_step (walk_forward штампует с
-    HZ-1); её нет у рукодельных raw_df — тогда ключи не пишутся.
+    дней. MA-4 (#522): при горизонте КОРОЧЕ окна ключ НЕ пишется —
+    «wmape_order_14», посчитанный по 7 дням, лгал бы подписи (клиентские
+    тексты печатают «(14 дн)»). Требует колонку horizon_step
+    (walk_forward штампует с HZ-1); нет колонки — ключи не пишутся.
     Best-effort как соседний #433-helper: сбой не трогает headline."""
     try:
         if "horizon_step" not in raw_df.columns:
@@ -301,7 +302,11 @@ def _fill_order_accuracy(agg: dict, raw_df: pd.DataFrame,
         fold = ["fold"] if "fold" in d.columns else []
         h_max = int(d["horizon_step"].max())
         for w in (7, 14):
-            sub = d[d["horizon_step"] <= min(w, h_max)]
+            if h_max < w:
+                # MA-4 (#522): окно не помещается в горизонт — честнее
+                # промолчать, чем подписать усечённое число полным окном.
+                continue
+            sub = d[d["horizon_step"] <= w]
             sums = sub.groupby(fold + [sku_col], observed=True).agg(
                 a=(actual_col, "sum"), p=(pred_col, "sum"))
             denom = float(sums["a"].abs().sum())
