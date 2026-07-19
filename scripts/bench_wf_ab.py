@@ -166,6 +166,12 @@ ARMS: dict[str, dict] = {
     "dead_tails_on": {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "data_overrides": {"validate": True,
                                          "extend_dead_tails": True}},
+    # MA-1: наивные пары для честных дельт на тех же сетках.
+    "snaive_grid":   {"model": "snaive",   "statics": "fold_clean", "market": False,
+                      "data_overrides": {"validate": True}},
+    "snaive_dead":   {"model": "snaive",   "statics": "fold_clean", "market": False,
+                      "data_overrides": {"validate": True,
+                                         "extend_dead_tails": True}},
     # MA-3 #521: anomaly-веса как в проде (fold-aware), legacy vs guard —
     # обе руки на прод-сетке (validate), чтобы мерить именно детектор.
     "anomaly_legacy": {"model": "mimo",    "statics": "fold_clean", "market": False,
@@ -787,6 +793,9 @@ def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
         "wmape_mean":   round(float(agg.get("wmape_mean", float("nan"))), 5),
         "mase_global":  round(float(agg.get("mase_global", float("nan"))), 5),
         "elapsed_s":    round(time.time() - t0, 1),
+        # MA-1 #519: честность охвата — в отчёт плеча.
+        "eval_coverage": agg.get("eval_coverage"),
+        "dead_tail_rows_scored": agg.get("dead_tail_rows_scored"),
         "decomposition": decompose(combined, split_points, band_by_sku, sku_col),
     }
 
