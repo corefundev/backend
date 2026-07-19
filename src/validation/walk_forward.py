@@ -171,14 +171,34 @@ def walk_forward_validate(
         )
 
         # Ensemble: per-SKU blend weights from a recent training window.
+        # MA-7/M2 (#525, аудит): фолды обязаны мерить ТОТ ЖЕ бленд, что
+        # сервится, — clean-holdout (#152), как в финальном фите. Legacy
+        # pseudo-holdout — только если clean выключен конфигом или не
+        # собрался (короткая история); паритет с train.py:blend_clean_holdout.
         if hasattr(fold_model, "compute_blend_weights"):
-            fold_model.compute_blend_weights(
-                df_full=train_df,
-                sku_col=sku_col,
-                date_col=date_col,
-                target_col=target_col,
-                lookback_days=blend_lookback,
-            )
+            _clean_ok = False
+            if (bool(config.get("model", {}).get("blend_clean_holdout", True))
+                    and hasattr(fold_model, "compute_blend_weights_clean")):
+                _clean_ok = bool(fold_model.compute_blend_weights_clean(
+                    df_full=train_df,
+                    X=train_df[feature_cols],
+                    y=train_df[target_col],
+                    sku_col=sku_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                    groups=train_df[sku_col],
+                    sample_weight=fold_weights,
+                    target_censor=fold_censor,
+                    lookback_days=blend_lookback,
+                ))
+            if not _clean_ok:
+                fold_model.compute_blend_weights(
+                    df_full=train_df,
+                    sku_col=sku_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                    lookback_days=blend_lookback,
+                )
 
         if direct:
             fold_df = _predict_direct_multi_step(
