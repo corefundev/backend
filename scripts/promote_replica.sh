@@ -8,7 +8,7 @@
 #   bash scripts/promote_replica.sh [--yes]
 #
 # What it does:
-#   1. ssh to db-replica.testcore.ru
+#   1. ssh to the replica VPS (212.8.226.233)
 #   2. Sanity-check: replica is in_recovery, wal_receiver streaming
 #      (or recently was — primary may already be dead)
 #   3. Record pre-promote LSN — this is your RPO floor
@@ -18,7 +18,7 @@
 #   7. Print next-step instructions for Phase 2/3
 #
 # After this script exits cleanly, the new primary is up at
-# db-replica.testcore.ru:5432 with timeline +1 from the old primary.
+# 212.8.226.233:5432 with timeline +1 from the old primary.
 # This is irreversible — the only way to "undo" is to redo the entire
 # original setup from scratch.
 #
@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-REPLICA_HOST="db-replica.testcore.ru"
+REPLICA_HOST="212.8.226.233"
 REPLICA_USER="deploy"
 REPLICA_SSH_KEY="${REPLICA_SSH_KEY:-$HOME/.ssh/id_ed25519_replica}"
 REPLICA_SSH_KH="${REPLICA_SSH_KH:-$HOME/.ssh/known_hosts}"
@@ -126,7 +126,7 @@ echo
 echo "[6/6] DONE — promote completed in ${DURATION}s"
 echo
 echo "═══════════════════════════════════════════════════════════════════"
-echo "  NEW PRIMARY: db-replica.testcore.ru:5432"
+echo "  NEW PRIMARY: 212.8.226.233:5432"
 echo
 echo "  Next steps (manual — see deploy/PROMOTE.md):"
 echo
@@ -149,6 +149,7 @@ echo
 echo "  Phase 4 — cleanup:"
 echo "    - prometheus.yml scrape jobs (postgres ↔ postgres-replica swap)"
 echo "    - drop old replication slot replica_1 on (now-replica) old primary"
-echo "    - re-issue TLS leaf cert with CN=db-replica.testcore.ru if using"
-echo "      sslmode=verify-full (or temporarily use verify-ca)"
+echo "    - re-issue TLS leaf cert with an IP SAN (212.8.226.233) or a"
+echo "      db-replica.sprosly.com SAN if using sslmode=verify-full"
+echo "      (or temporarily use verify-ca)"
 echo "═══════════════════════════════════════════════════════════════════"

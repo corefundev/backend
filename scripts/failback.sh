@@ -4,7 +4,7 @@
 # Phase 3 of the Postgres failover procedure (deploy/PROMOTE.md).
 # After scripts/promote_replica.sh has been run and the old primary is
 # back online, this script re-bootstraps the old primary VPS as a new
-# replica streaming from the new primary (db-replica.testcore.ru).
+# replica streaming from the new primary (212.8.226.233).
 #
 # Run from local laptop:
 #   bash scripts/failback.sh [--yes]
@@ -13,7 +13,7 @@
 #   1. ssh to old-primary VPS (prod, api.sprosly.com)
 #   2. Stop docker-postgres-1
 #   3. Move existing postgres_data volume aside as a backup
-#   4. pg_basebackup from new primary (db-replica.testcore.ru:5432)
+#   4. pg_basebackup from new primary (212.8.226.233:5432)
 #   5. Write standby.signal + primary_conninfo into the new data dir
 #   6. Start docker-postgres-1 as a replica
 #   7. Verify pg_stat_wal_receiver = streaming
@@ -41,7 +41,7 @@ OLD_PRIMARY_USER="deploy"
 OLD_PRIMARY_SSH_KEY="${OLD_PRIMARY_SSH_KEY:-$HOME/.ssh/claude/deploy-key}"
 OLD_PRIMARY_SSH_KH="${OLD_PRIMARY_SSH_KH:-$HOME/.ssh/claude/known_hosts}"
 
-NEW_PRIMARY_HOST="db-replica.testcore.ru"
+NEW_PRIMARY_HOST="212.8.226.233"
 NEW_PRIMARY_IP="212.8.226.233"
 
 ssh_old() { ssh -i "$OLD_PRIMARY_SSH_KEY" -o UserKnownHostsFile="$OLD_PRIMARY_SSH_KH" "$OLD_PRIMARY_USER@$OLD_PRIMARY_HOST" "$@"; }

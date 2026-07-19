@@ -73,7 +73,7 @@ jobs:
           curl -fsS --max-time 5 https://api.ipify.org || curl -fsS --max-time 5 https://ifconfig.me || echo "(probe failed)"
           echo
           echo "--- direct probe primary→replica:5432 (via host network) ---"
-          timeout 5 bash -c 'echo > /dev/tcp/db-replica.testcore.ru/5432 && echo OK || echo FAILED' \
+          timeout 5 bash -c 'echo > /dev/tcp/212.8.226.233/5432 && echo OK || echo FAILED' \
               || echo "(connect failed/timed out)"
 
           # Verify Lockbox-injected vars by running bootstrap_secrets()
