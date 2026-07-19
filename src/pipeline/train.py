@@ -379,6 +379,7 @@ def run_training_pipeline(
             contamination=anom_cfg.get("contamination", 0.05),
             iqr_factor=anom_cfg.get("iqr_factor", 3.0),
             anomaly_weight=anom_cfg.get("anomaly_weight", 0.1),
+            sparse_iqr_guard=anom_cfg.get("sparse_iqr_guard", True),
         )
 
     anomaly_enabled = anom_cfg.get("enabled", True)

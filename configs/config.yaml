@@ -154,6 +154,9 @@ anomaly_detection:
   contamination: 0.05
   iqr_factor: 3.0
   anomaly_weight: 0.1
+  # MA-3 #521: не флажить SKU с вырожденным IQR (sparse) — иначе каждая
+  # продажа intermittent-SKU получала вес 0.1 (аудит H2). false = легаси.
+  sparse_iqr_guard: true
 
 # B1 #319 — exponential recency sample-weights: 0.5 ** (age_days / half_life),
 # anchored to the train cutoff, composed multiplicatively with anomaly weights.
