@@ -6,16 +6,18 @@ Source-of-truth definitions for subscription plans.
 Three tiers, each with a public-facing model name (what the user sees) and
 a set of hard limits the API enforces.
 
-    ┌─────────┬─────────┬───────┬────────────┬─────────────────┬──────────────────┐
-    │ Plan    │ Model   │ SKUs  │ Horizon    │ Train cooldown  │ Train/month cap  │
-    ├─────────┼─────────┼───────┼────────────┼─────────────────┼──────────────────┤
-    │ free    │ Notus   │   5   │ 1 day      │ 48h             │ unlimited        │
-    │ start   │ Aether  │ 100   │ 7 days     │ —               │ 15               │
-    │ business│ Chronos │ —     │ 28 days *  │ —               │ unlimited        │
-    └─────────┴─────────┴───────┴────────────┴─────────────────┴──────────────────┘
+    ┌─────────┬─────────┬───────┬────────────┬─────────────────┐
+    │ Plan    │ Model   │ SKUs  │ Horizon    │ Train cooldown  │
+    ├─────────┼─────────┼───────┼────────────┼─────────────────┤
+    │ free    │ Notus   │  30   │ 7 days     │ 12h             │
+    │ start   │ Aether  │ 1500  │ 14 days    │ —               │
+    │ business│ Chronos │ —     │ 28 days *  │ —               │
+    └─────────┴─────────┴───────┴────────────┴─────────────────┘
 
-    * 28 is the model's own hard cap (see Pydantic horizon le=28 in api/main.py),
-      not a plan cap. "business" is "no plan-imposed limit".
+    Horizons per the revised business model (owner, 2026-07-19, #542):
+    the product grid is 1/7/14/28 order windows — no 30/90 anywhere.
+    * 28 for Business coincides with the model's own hard cap (Pydantic
+      horizon le=28 in api/main.py). No plan has monthly training caps.
 
 Config override keys (PUT/PATCH /clients/{id}/config):
     • free     — forbidden entirely (403)
@@ -133,9 +135,10 @@ _START_CONFIG_KEYS = frozenset({
 #     full catalog; less than 30 felt restrictive in beta.
 #   • Start 1500 SKUs — mid-market ceiling; covers most single-location
 #     stores and small chains.
-#   • Business — no cap; only the ML model's own horizon cap (28 daily
-#     steps in single-model; we extend to a year by chaining the rolling
-#     forecast, hence 365).
+#   • Business — no SKU cap; horizon 28 = the model's own hard cap
+#     (direct heads cover 28d; longer horizons were cut with the revised
+#     business model, #542 — accuracy past the order window is not a
+#     product promise).
 PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.FREE: PlanSpec(
         id=Plan.FREE,
@@ -156,7 +159,8 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         model_display_name="Aether",
         display_name="Start",
         max_skus=1500,
-        max_horizon_days=30,
+        # #542: сетка заказа 1/7/14/28 — Start получает 14-дневное окно.
+        max_horizon_days=14,
         training_cooldown_hours=UNLIMITED,
         # Monthly training limits removed 2026-06-02 — the per-month cap
         # was an early idea that didn't pan out. No plan caps monthly
@@ -176,13 +180,10 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         model_display_name="Chronos",
         display_name="Business",
         max_skus=UNLIMITED,
-        # was 365; tightened — accuracy past 90d is meh. #215: the long
-        # horizon is a PLANNING shape/level signal (trend+seasonality+
-        # calendar), not weather-accurate daily numbers — weather skill is
-        # ~7-10d and Stage-0 measured ≈0 lift on a mixed catalog anyway;
-        # direct heads cover 28d, beyond is the honest recursive tail (#224)
-        # with widening Mondrian intervals (#219).
-        max_horizon_days=90,
+        # #542 (was 365→90→28): the revised business model's grid tops out
+        # at the 28-day order window = the model's own direct-head cap;
+        # nothing beyond is promised or served.
+        max_horizon_days=28,
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
         default_objective="hybrid",    # #384: band-роутинг; HPO тюнит MIMO-прокси

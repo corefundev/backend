@@ -61,10 +61,10 @@ def test_plan_limits_snapshot():
     # retail. Free cooldown lowered to 12h to let beta testers iterate.
     assert free.max_skus == 30 and free.max_horizon_days == 7
     assert free.training_cooldown_hours == 12
-    assert start.max_skus == 1500 and start.max_horizon_days == 30
+    assert start.max_skus == 1500 and start.max_horizon_days == 14
     # Monthly training limits removed 2026-06-02; counter machinery torn
     # down #73 — no plan caps monthly runs, no per_month field remains.
-    assert biz.max_skus is None and biz.max_horizon_days == 90
+    assert biz.max_skus is None and biz.max_horizon_days == 28
 
 
 def test_all_specs_as_dicts_shape():
@@ -92,19 +92,19 @@ def test_horizon_free_no_clip_when_already_within():
     assert h == 7 and clipped is False
 
 
-def test_horizon_start_clips_to_30():
+def test_horizon_start_clips_to_14():
     h, clipped = clip_horizon_to_plan(_rec(plan="start"), 365)
-    assert h == 30 and clipped is True
+    assert h == 14 and clipped is True
 
 
-def test_horizon_business_clips_to_90():
+def test_horizon_business_clips_to_28():
     h, clipped = clip_horizon_to_plan(_rec(plan="business"), 365)
-    assert h == 90 and clipped is True
+    assert h == 28 and clipped is True
 
 
 def test_horizon_business_no_clip_when_within():
-    h, clipped = clip_horizon_to_plan(_rec(plan="business"), 60)
-    assert h == 60 and clipped is False
+    h, clipped = clip_horizon_to_plan(_rec(plan="business"), 21)
+    assert h == 21 and clipped is False
 
 
 # ── SKU cap ──────────────────────────────────────────────────────────────────
@@ -175,17 +175,18 @@ def test_business_allows_anything():
 # ── Horizon cap on config-write (R13-2) ──────────────────────────────────────
 
 def test_horizon_write_start_over_plan_rejected():
-    # Start max is 30; training would build 90 per-step models → resource-DoS.
+    # Start max is 14 (#542); an over-plan horizon would build extra
+    # per-step models → resource-DoS.
     with pytest.raises(PlanLimitExceeded, match="horizon"):
-        assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 90}})
+        assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 28}})
 
 
 def test_horizon_write_start_at_limit_ok():
-    assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 30}})  # no raise
+    assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 14}})  # no raise
 
 
 def test_horizon_write_business_at_limit_ok():
-    assert_horizon_within_plan(_rec(plan="business"), {"model": {"horizon": 90}})  # no raise
+    assert_horizon_within_plan(_rec(plan="business"), {"model": {"horizon": 28}})  # no raise
 
 
 def test_horizon_write_free_over_plan_rejected():
@@ -206,7 +207,7 @@ def test_horizon_write_non_numeric_deferred_to_value_check():
 def test_horizon_write_exposes_limit_and_actual():
     with pytest.raises(PlanLimitExceeded) as ei:
         assert_horizon_within_plan(_rec(plan="start"), {"model": {"horizon": 45}})
-    assert ei.value.limit == 30 and ei.value.actual == 45
+    assert ei.value.limit == 14 and ei.value.actual == 45
 
 
 # ── Quota: cooldown ────────────────────────────────────────────────────────
