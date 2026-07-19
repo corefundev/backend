@@ -600,13 +600,31 @@ async def get_current_client(
     """FastAPI dependency. Accepts JWT Bearer, Cloudflare Access JWT
     (ADM-ACCESS #551, config-gated) or x-api-key."""
     if credentials:
-        payload = decode_access_token(credentials.credentials)
-        return AuthContext(
-            client_id   = payload.get("client_id", payload.get("sub", "unknown")),
-            roles       = payload.get("roles", ["forecast"]),
-            auth_method = "jwt",
-            jti         = payload.get("jti"),
-        )
+        try:
+            payload = decode_access_token(credentials.credentials)
+            return AuthContext(
+                client_id   = payload.get("client_id", payload.get("sub", "unknown")),
+                roles       = payload.get("roles", ["forecast"]),
+                auth_method = "jwt",
+                jti         = payload.get("jti"),
+            )
+        except HTTPException:
+            # ADM-ACCESS (#551): протухший/битый Bearer НЕ должен ронять
+            # запрос, у которого есть валидная личность периметра CF —
+            # иначе залежавшийся legacy-токен блокирует консоль (боевой
+            # reload-цикл 2026-07-20). Fail-closed сохранён: без валидной
+            # CF-подписи исходный 401 поднимается как раньше.
+            if cf_access:
+                from src.auth.cf_access import verify_access_jwt
+                email = verify_access_jwt(cf_access)
+                if email is not None:
+                    logger.info("cf_access: perimeter identity %s (stale Bearer ignored)", email)
+                    return AuthContext(
+                        client_id   = email,
+                        roles       = ["admin", "forecast"],
+                        auth_method = "cf_access",
+                    )
+            raise
 
     if cf_access:
         # ADM-ACCESS (#551): запрос пришёл сквозь периметр CF Access
