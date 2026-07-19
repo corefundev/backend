@@ -279,6 +279,9 @@ def get_feature_columns(df: pd.DataFrame, config: dict) -> list[str]:
         config["data"]["sku_col"],
         config["data"]["target_col"],
         "price", "promo", "stock", "is_anomaly",
+        # MA-1 (#519): маркер мёртвого хвоста — ТОЛЬКО для метрик/coverage;
+        # как фича это утечка будущего («SKU больше не продастся»).
+        "is_dead_tail",
     }
     # `is_gap_day` is emitted by data/loader._fill_time_gaps so the
     # model CAN distinguish imputed-zero rows from real-zero sales,

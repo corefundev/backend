@@ -157,6 +157,15 @@ ARMS: dict[str, dict] = {
     # пол. Смысл плеча: измерить, НАСКОЛЬКО движок бьёт наивку на том же
     # датасете/метрике (M5-литература: хороший ML ≈ 10-25% MASE над snaive).
     "snaive":        {"model": "snaive",   "statics": "fold_clean", "market": False},
+    # MA-1 #519: прод-сетка (validate_data: gap-fill как в проде) и
+    # честная вселенная (продление мёртвых хвостов до глобального max).
+    # Канонический base исторически мерился на sparse-сетке — эти плечи
+    # квантифицируют оба разрыва.
+    "grid_filled":   {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "data_overrides": {"validate": True}},
+    "dead_tails_on": {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "data_overrides": {"validate": True,
+                                         "extend_dead_tails": True}},
     # #460 прогон 2: US-праздники для американских данных (M5) — снимает
     # RU-календарный гандикап базы; сравнивать с base на том же датасете.
     "holidays_us":   {"model": "mimo",     "statics": "fold_clean", "market": False,
@@ -549,6 +558,23 @@ def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
     sku_col, date_col, target_col = (config["data"]["sku_col"],
                                      config["data"]["date_col"],
                                      config["data"]["target_col"])
+    data_overrides = spec.get("data_overrides")
+    if data_overrides:
+        if raw_df is None:
+            raise ValueError(
+                f"arm {arm_name!r} needs raw_df (data_overrides rebuild)")
+        from src.data.loader import validate_data as _validate
+        import copy as _copy
+        config = _copy.deepcopy(config)
+        for k, v in data_overrides.items():
+            if k != "validate":
+                config.setdefault("data", {})[k] = v
+        raw_df = _validate(raw_df.copy(), config)
+        # фрейм пересобирается ниже веткой features_overrides либо тут
+        if not spec.get("features_overrides"):
+            from src.features.engineering import build_features as _bf
+            base_df = _bf(raw_df.copy(), config)
+
     feat_overrides = spec.get("features_overrides")
     if feat_overrides:
         if raw_df is None:
@@ -802,7 +828,6 @@ def main(argv: Optional[list] = None) -> int:
                              config["data"]["target_col"]),
         "source": args.data_path,
         "horizon": config["model"]["horizon"],
-        "n_splits": config.get("validation", {}).get("n_splits", 3),
         "n_splits": config.get("validation", {}).get("n_splits", 3),
         "arms": arms,
     }}, ensure_ascii=False), flush=True)

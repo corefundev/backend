@@ -179,8 +179,17 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             f"Target missing ratio {miss_ratio:.2%} exceeds threshold {max_missing:.2%}"
         )
 
-    # 5. Continuity check — fill gaps with zero sales
-    df = _fill_time_gaps(df, date_col, sku_col, target_col)
+    # 5. Continuity check — fill gaps with zero sales.
+    # MA-1 (#519, аудит F1): при data.extend_dead_tails каждая SKU-сетка
+    # продлевается до ГЛОБАЛЬНОЙ max-даты фрейма нулями с маркером
+    # is_dead_tail — дни после последней продажи (снятие с ассортимента)
+    # перестают выпадать из обучения и, главное, из walk-forward-оценки
+    # (перепрогноз на «мёртвые» дни раньше не штрафовался вовсе).
+    extend_to = None
+    if config.get("data", {}).get("extend_dead_tails", False):
+        extend_to = pd.Timestamp(df[date_col].max())
+    df = _fill_time_gaps(df, date_col, sku_col, target_col,
+                         extend_to=extend_to)
 
     # 6. Fill missing optional-column values with sensible defaults.
     # L-A11 (#186): this runs AFTER _fill_time_gaps on purpose. Gap-fill
@@ -202,6 +211,7 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 def _fill_time_gaps(
     df: pd.DataFrame, date_col: str, sku_col: str, target_col: str,
     warn_gap_ratio: float = 0.10,
+    extend_to: "pd.Timestamp | None" = None,
 ) -> pd.DataFrame:
     """
     Ensure every SKU has a continuous daily time series.
@@ -225,15 +235,23 @@ def _fill_time_gaps(
     """
     filled = []
     for sku, group in df.groupby(sku_col):
-        full_idx = pd.date_range(group[date_col].min(), group[date_col].max(), freq="D")
+        own_max = group[date_col].max()
+        end = max(own_max, extend_to) if extend_to is not None else own_max
+        full_idx = pd.date_range(group[date_col].min(), end, freq="D")
         original_dates = set(group[date_col])
         group = group.set_index(date_col).reindex(full_idx).copy()
         group[sku_col] = sku
+        # MA-1: хвост ПОСЛЕ последней продажи SKU — отдельный маркер
+        # (метрика/кавередж; в фичи НЕ попадает — знание «больше не
+        # продастся» недоступно на serve). is_gap_day остаётся про
+        # дыры ВНУТРИ собственного диапазона.
+        dead = group.index > own_max
+        group["is_dead_tail"] = dead.astype("int8")
         # Mark imputed rows BEFORE filling the target. A row's date
         # was missing iff it wasn't in the original input — checking
         # `target.isna()` after-the-fact would also flag real zero
         # sales days (which were genuinely zero in the source).
-        group["is_gap_day"] = (~group.index.isin(original_dates)).astype("int8")
+        group["is_gap_day"] = ((~group.index.isin(original_dates)) & ~dead).astype("int8")
         group[target_col] = group[target_col].fillna(0)
         group.index.name = date_col
         group = group.reset_index()
