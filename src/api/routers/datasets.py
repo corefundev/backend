@@ -99,6 +99,10 @@ def _model_blocks(client_id: str) -> Optional[dict]:
                 "wmape_order_14": r.wmape_order_14,
                 "baseline_wmape": r.baseline_wmape,
                 "improvement_vs_naive": improvement,
+                # MA-2 #520: честная подача — типичный SKU и хвост боли.
+                "wmape_median": r.wmape_median,
+                "wmape_p90": r.wmape_p90,
+                "eval_coverage": r.eval_coverage,
             }
         return out
     except Exception as e:    # noqa: BLE001 — degrade, don't 5xx

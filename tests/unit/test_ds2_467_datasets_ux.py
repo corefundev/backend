@@ -170,7 +170,8 @@ def _run(ds, version, wmape=0.30, baseline=0.40, **kw):
     base = dict(status="finished", model_path="m.pkl", dataset_id=ds,
                 dataset_version=version, wmape=wmape,
                 wmape_order_7=0.2, wmape_order_14=0.15,
-                baseline_wmape=baseline, ended_at="2026-07-18T00:00:00")
+                baseline_wmape=baseline, ended_at="2026-07-18T00:00:00",
+                wmape_median=0.31, wmape_p90=0.6, eval_coverage=0.97)
     base.update(kw)
     return SimpleNamespace(**base)
 

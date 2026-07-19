@@ -67,6 +67,12 @@ class TrainingRunRecord:
     # the same walk-forward windows — «точнее наивного на N%» in the UI.
     # NULL = pre-DS-2 run / gate skipped or errored.
     baseline_wmape: Optional[float] = None
+    # MA-2 #520 (аудит F3): распределение per-SKU рядом с объёмным
+    # headline — медиана (типичный товар) и p90 (хвост боли);
+    # MA-1 #519: eval_coverage — доля клеток окна, попавших в скоринг.
+    wmape_median:  Optional[float] = None
+    wmape_p90:     Optional[float] = None
+    eval_coverage: Optional[float] = None
     model_path:    Optional[str]   = None
     mlflow_run_id: Optional[str]   = None
     error:         Optional[str]   = None
@@ -84,6 +90,7 @@ class PostgresTrainingRunsRegistry:
         "n_skus", "n_features", "n_rows",
         "wmape", "mase", "mase_seasonal", "smape",
         "wmape_order_7", "wmape_order_14", "baseline_wmape",
+        "wmape_median", "wmape_p90", "eval_coverage",
         "model_path", "mlflow_run_id", "error",
         "mlflow_logging_error", "gate_passed",
     }
@@ -285,6 +292,9 @@ class PostgresTrainingRunsRegistry:
             wmape_order_7=row.get("wmape_order_7"),
             wmape_order_14=row.get("wmape_order_14"),
             baseline_wmape=row.get("baseline_wmape"),
+            wmape_median=row.get("wmape_median"),
+            wmape_p90=row.get("wmape_p90"),
+            eval_coverage=row.get("eval_coverage"),
             gate_passed=row.get("gate_passed"),
             smape=row.get("smape"),
             model_path=row.get("model_path"),
