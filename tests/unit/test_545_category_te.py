@@ -5,7 +5,6 @@ WMAPE 2026-07-19): Bayesian smoothing to the TRAIN global mean (m=20),
 unknown SKU/category → global mean, fold-clean recompute, graceful
 absence when the dataset carries no category column.
 """
-import numpy as np
 import pandas as pd
 import pytest
 
