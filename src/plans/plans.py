@@ -171,7 +171,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         predict_requests_per_hour=5000,  # R2-10
         config_allowed_keys=_START_CONFIG_KEYS,
         hpo_n_trials=15,               # short HPO — adds ~2 min per training
-        default_objective="hybrid",    # #384: band-роутинг ансамбль↔MIMO (доминирует чистый ансамбль)
+        default_objective="ensemble",  # MA-5 2026-07-20: на каноне mem224 ансамбль бьёт hybrid по заказным (−2.3…−2.7%) при меньшем времени; #384-роутинг устарел вместе со старой линейкой
         price_label="",
         datasets_limit=3,
     ),
@@ -186,7 +186,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         max_horizon_days=28,
         training_cooldown_hours=UNLIMITED,
         hpo_n_trials=30,               # full HPO — adds ~5 min per training
-        default_objective="hybrid",    # #384: band-роутинг; HPO тюнит MIMO-прокси
+        default_objective="ensemble",  # MA-5 2026-07-20: на каноне mem224 ансамбль бьёт hybrid по заказным (−2.3…−2.7%) при меньшем времени; #384-роутинг устарел вместе со старой линейкой
         predict_requests_per_hour=UNLIMITED,  # R2-10: enterprise has its own SRE
         config_allowed_keys=None,  # all keys
         price_label="",
