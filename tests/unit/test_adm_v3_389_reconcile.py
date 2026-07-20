@@ -46,7 +46,7 @@ def test_reconcile_heals_and_audits_actor(monkeypatch):
     events = []
     monkeypatch.setattr(tr, "record_event", lambda **kw: events.append(kw))
     monkeypatch.setattr(
-        "src.pipeline.reconcile_runs.reconcile_abandoned_runs", lambda: 3)
+        "src.pipeline.reconcile_runs.reconcile_abandoned_runs", lambda *a, **k: 3)
     out = tr.admin_training_reconcile(_http(), auth=_auth())
     assert out == {"healed": 3}
     e = events[0]
