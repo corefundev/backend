@@ -507,7 +507,7 @@ def admin_training_reconcile(
     auth.require_role("admin")
     try:
         from src.pipeline.reconcile_runs import reconcile_abandoned_runs
-        healed = reconcile_abandoned_runs()
+        healed = reconcile_abandoned_runs(context="admin")
     except Exception as e:    # noqa: BLE001 — surfaced as 503, not swallowed
         logger.error("manual reconcile failed: %s", e)
         raise HTTPException(

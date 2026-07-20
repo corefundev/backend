@@ -668,6 +668,14 @@ def enqueue_training(
             # job.meta["client_id"] in get_job_status / poll_job.
             meta={"client_id": client_id},
         )
+        # #557: job_id ОБЯЗАН жить в строке рана — единственный способ
+        # для reconcile отличить живой ран от брошенного (боевой случай:
+        # кнопка Reconcile убила живое обучение, у строки не было handle).
+        try:
+            from src.storage.training_runs import get_training_runs_registry
+            get_training_runs_registry().update(run_id, job_id=job.id)
+        except Exception as e:    # noqa: BLE001 — персист handle best-effort
+            logger.warning("could not persist job_id for run %s: %s", run_id, e)
         logger.info(f"Training job enqueued: job_id={job.id} client={client_id}")
         return job.id
 

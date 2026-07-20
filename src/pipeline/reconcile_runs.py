@@ -38,26 +38,41 @@ _ERROR_TEXT = (
 )
 
 
-def _job_is_dead(job_id: str | None) -> bool:
-    """True when the RQ job for this run demonstrably no longer runs."""
+def _job_is_dead(job_id: str | None, *, context: str = "boot") -> bool:
+    """True when the RQ job for this run demonstrably no longer runs.
+
+    #557: смерть должна быть ДОКАЗАННОЙ (боевой случай: кнопка Reconcile
+    убила живое обучение — у строки не было job_id).
+    - job_id отсутствует: на boot-е worker'а живых джобов не бывает по
+      определению → dead; в admin-контексте проверить нечем → НЕ убивать.
+    - NoSuchJobError → dead (Redis его потерял/GC).
+    - Прочие ошибки (сеть/Redis) → недоказуемо → НЕ убивать (fail-safe);
+      следующий запуск дочистит.
+    """
     if not job_id:
-        # No job handle at all (legacy/sync rows) — a 'running' row with no
-        # job cannot be owned by any worker at OUR startup moment.
-        return True
+        return context == "boot"
     try:
         from rq.job import Job
         from src.pipeline.task_queue import get_redis_connection
         job = Job.fetch(job_id, connection=get_redis_connection())
-    except Exception as e:    # noqa: BLE001 — NoSuchJobError et al.
-        logger.info("reconcile: job %s not fetchable (%s) — treating as dead",
-                    job_id, e)
-        return True
+    except Exception as e:    # noqa: BLE001
+        from rq.exceptions import NoSuchJobError
+        if isinstance(e, NoSuchJobError):
+            logger.info("reconcile: job %s gone from Redis — dead", job_id)
+            return True
+        logger.warning("reconcile: job %s liveness UNPROVABLE (%s) — skipping",
+                       job_id, e)
+        return False
     status = str(job.get_status(refresh=True) or "").lower()
     return status in _DEAD_JOB_STATUSES
 
 
-def reconcile_abandoned_runs() -> int:
-    """Heal orphaned 'running' rows; returns how many were healed."""
+def reconcile_abandoned_runs(context: str = "boot") -> int:
+    """Heal orphaned 'running' rows; returns how many were healed.
+
+    context='boot' — старт worker'а (живых джобов нет: строка без job_id
+    считается мёртвой); context='admin' — кнопка консоли (убивать только
+    ДОКАЗАННО мёртвое)."""
     from datetime import datetime, timezone
 
     from src.storage.training_runs import get_training_runs_registry
@@ -66,7 +81,7 @@ def reconcile_abandoned_runs() -> int:
     stale = reg.list_running()
     healed = 0
     for rec in stale:
-        if not _job_is_dead(rec.job_id):
+        if not _job_is_dead(rec.job_id, context=context):
             logger.info("reconcile: run %s job %s still alive — skipping",
                         rec.run_id, rec.job_id)
             continue
