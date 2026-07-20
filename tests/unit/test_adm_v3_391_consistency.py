@@ -58,8 +58,13 @@ class _Zone:
         self.deletes.append(key)
 
 
-def _wire(monkeypatch, zones: dict, clients=("acme",)):
+def _wire(monkeypatch, zones: dict, clients=("acme",), dataset_ids=()):
     monkeypatch.setattr(z, "get_zone_backend", lambda zone: zones[zone])
+    # #405: чекер сверяет keyspace датасетов с их реестром
+    monkeypatch.setattr(
+        "src.storage.datasets.get_datasets_registry",
+        lambda: SimpleNamespace(list_for_client=lambda cid: [
+            SimpleNamespace(dataset_id=d) for d in dataset_ids]))
     monkeypatch.setattr(
         "src.clients.registry.get_registry",
         lambda: SimpleNamespace(list_clients=lambda: [
@@ -158,3 +163,22 @@ def test_bad_threshold_is_422():
         up_api.admin_data_consistency_check(
             _http(), quarantine_stale_days=0, auth=_auth())
     assert ei.value.status_code == 422
+
+
+def test_405_known_dataset_keyspace_is_not_orphan(monkeypatch):
+    zones = {z.Zone.UNTRUSTED: _Zone(), z.Zone.QUARANTINE: _Zone(),
+             z.Zone.PROCESSED: _Zone([
+                 "acme/datasets/d1/v0001/data.parquet",
+                 "acme/datasets/d1/manifest.json"])}
+    _wire(monkeypatch, zones, dataset_ids=("d1",))
+    out = up_api.admin_data_consistency_check(_http(), auth=_auth())
+    assert out["counts"]["orphans"] == 0, out["orphans"]
+
+
+def test_405_unknown_dataset_keyspace_is_orphan(monkeypatch):
+    zones = {z.Zone.UNTRUSTED: _Zone(), z.Zone.QUARANTINE: _Zone(),
+             z.Zone.PROCESSED: _Zone(["acme/datasets/ghostds/v0001/data.parquet"])}
+    _wire(monkeypatch, zones, dataset_ids=("d1",))
+    out = up_api.admin_data_consistency_check(_http(), auth=_auth())
+    assert out["counts"]["orphans"] == 1
+    assert out["orphans"][0]["reason"] == "dataset keyspace, unknown dataset_id"

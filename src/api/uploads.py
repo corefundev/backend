@@ -321,10 +321,25 @@ def admin_data_consistency_check(
             if len(rows) == _CONSISTENCY_MAX_ROWS_PER_CLIENT:
                 report["truncated_rows"].append(cid)
             by_id = {r.upload_id: r for r in rows}
+            # #405: PROCESSED легально несёт keyspace датасетов
+            # ({cid}/datasets/<did>/… — материализации DS-1);им владеет
+            # реестр датасетов, не sku_uploads. Сверяем честно: ключ
+            # неизвестного датасета — по-прежнему сирота.
+            from src.storage.datasets import get_datasets_registry
+            dataset_ids = {d.dataset_id
+                           for d in get_datasets_registry().list_for_client(cid)}
             for zone in (z.Zone.UNTRUSTED, z.Zone.QUARANTINE, z.Zone.PROCESSED):
                 backend = z.get_zone_backend(zone)
                 for key in backend.list_keys(f"{cid}/"):
                     parts = key.split("/")
+                    if (zone is z.Zone.PROCESSED and len(parts) >= 3
+                            and parts[1] == "datasets"):
+                        if parts[2] in dataset_ids:
+                            continue
+                        report["orphans"].append(
+                            {"zone": zone.value, "key": key, "client_id": cid,
+                             "reason": "dataset keyspace, unknown dataset_id"})
+                        continue
                     uid = parts[1] if len(parts) >= 2 else None
                     rec = by_id.get(uid) if uid else None
                     if rec is None:

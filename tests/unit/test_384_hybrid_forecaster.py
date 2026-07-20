@@ -102,11 +102,14 @@ def test_wiring_attributes(fitted):
     assert hasattr(m, "nan_tolerant_lags")
 
 
-def test_paid_plans_default_hybrid():
+def test_paid_plans_default_ensemble():
+    # MA-5 (#554, 2026-07-20): платные тарифы по умолчанию — ensemble;
+    # hybrid остаётся поддерживаемой ЯВНОЙ опцией конфига (класс и его
+    # тесты в этом файле живы), но дефолтом больше не является.
     from src.plans.plans import PLAN_SPECS
     assert PLAN_SPECS["free"].default_objective == "mse"
-    assert PLAN_SPECS["start"].default_objective == "hybrid"
-    assert PLAN_SPECS["business"].default_objective == "hybrid"
+    assert PLAN_SPECS["start"].default_objective == "ensemble"
+    assert PLAN_SPECS["business"].default_objective == "ensemble"
 
 
 def test_bench_has_equivalence_arm():
