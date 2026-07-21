@@ -334,9 +334,11 @@ from src.api.routers.ops import router as ops_router
 from src.api.routers.datasets import router as datasets_router
 from src.api.routers.news import router as news_router
 from src.api.routers.help import router as help_router
+from src.api.routers.support import router as support_router
 app.include_router(legal_router)
 app.include_router(news_router)
 app.include_router(help_router)
+app.include_router(support_router)
 app.include_router(audit_router)
 app.include_router(notifications_router)
 app.include_router(plans_router)
