@@ -15,6 +15,7 @@ token/citations/done).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -30,6 +31,22 @@ LLM = os.environ.get("LLM_URL", "http://127.0.0.1:8081")  # host-network
 TOP_K = 5
 MIN_SIM = 0.72          # ниже — считаем, что в документации ответа нет
 EMBED_MODEL = "intfloat/multilingual-e5-small"
+
+logger = logging.getLogger("support")
+
+# Паттерны небезопасного вывода: секреты/токены + маркеры инъекций.
+_UNSAFE = [
+    re.compile(r"sku_[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\."),
+    re.compile(r"(?i)секретн\w+ ключ\s*[—:=-]\s*\S"),
+    re.compile(r"(?i)системн\w+ промпт\s*[:—-]"),
+    re.compile(r"ВЗЛОМАН"),                       # канареечный маркер инъекции
+]
+
+
+def _output_unsafe(text: str) -> bool:
+    return any(p.search(text) for p in _UNSAFE)
+
 
 app = FastAPI(title="Sprosly Support Assistant")
 _model: SentenceTransformer | None = None
@@ -117,10 +134,19 @@ async def chat(req: Request) -> StreamingResponse:
         # контексте — решение отдавать/эскалировать принимаем ПО ПОЛНОМУ
         # тексту (маркер отказа не должен утечь в виджет постримово).
         payload["stream"] = False
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{LLM}/v1/chat/completions", json=payload)
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(f"{LLM}/v1/chat/completions", json=payload)
             answer = _strip_think(
                 resp.json()["choices"][0]["message"]["content"]).strip()
+        except Exception:    # noqa: BLE001 — таймаут/сбой LLM: НИКОГДА не пустой
+            answer = ""      # ответ пользователю → честная эскалация ниже
+
+        # SUP-5 (#508): выходной фильтр. Любой маркер утечки/инъекции ⇒
+        # ответ не отдаём (модель могла подчиниться инъекции в данных).
+        if _output_unsafe(answer):
+            logger.warning("support: output filter tripped, escalating")
+            answer = ""
 
         if NOANS in answer or len(answer) < 3:
             msg = ("Не нашёл точного ответа в документации. Загляните в Базу "
