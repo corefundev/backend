@@ -1,0 +1,6 @@
+fastapi==0.135.0
+uvicorn==0.34.0
+psycopg2-binary==2.9.11
+sentence-transformers==5.1.2
+torch==2.9.1
+httpx==0.28.1
