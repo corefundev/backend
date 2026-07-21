@@ -1,0 +1,5 @@
+# SUP-1 ingest — CPU-only, версии пиновые (как в основном requirements).
+sentence-transformers==5.1.2
+torch==2.9.1
+psycopg2-binary==2.9.11
+requests==2.32.5
