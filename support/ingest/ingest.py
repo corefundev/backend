@@ -19,58 +19,26 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
 from pathlib import Path
 
 import psycopg2
-import requests
 
-API = os.environ.get("SPROSLY_API", "https://api.sprosly.com")
 EMBED_MODEL = "intfloat/multilingual-e5-small"
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
 
 
-def fetch_live_docs() -> list[dict]:
-    docs: list[dict] = []
-    cats = requests.get(f"{API}/help/categories", timeout=30).json()["categories"]
-    for c in cats:
-        cat = requests.get(f"{API}/help/categories/{c['slug']}", timeout=30).json()
-        for a in cat.get("articles", []):
-            art = requests.get(f"{API}/help/articles/{a['slug']}", timeout=30).json()
-            docs.append({
-                "doc_id": f"help:{art['slug']}", "source": "help",
-                "title": art["title"], "url_path": f"/help/a/{art['slug']}",
-                "text": _html_to_text(art.get("body_html") or art.get("body_md") or ""),
-            })
-    news = requests.get(f"{API}/news", timeout=30).json()
-    for p in (news.get("posts") if isinstance(news, dict) else news) or []:
-        post = requests.get(f"{API}/news/{p['slug']}", timeout=30).json()
-        docs.append({
-            "doc_id": f"news:{post['slug']}", "source": "news",
-            "title": post["title"], "url_path": f"/news/{post['slug']}",
-            "text": _html_to_text(post.get("body_html") or post.get("body_md") or ""),
-        })
-    plans = requests.get(f"{API}/plans", timeout=30).json()["plans"]
-    lines = ["Тарифы Sprosly и их лимиты:"]
-    for p in plans:
-        lines.append(
-            f"- {p['display_name']} (модель {p['model_display_name']}): "
-            f"до {p['max_skus'] or 'неограниченно'} SKU, горизонт "
-            f"{p['max_horizon_days']} дней, датасетов {p.get('datasets_limit')}, "
-            f"пауза между обучениями "
-            f"{str(p['training_cooldown_hours']) + ' ч' if p['training_cooldown_hours'] else 'нет'}.")
-    docs.append({"doc_id": "plans:limits", "source": "plans",
-                 "title": "Тарифы и лимиты", "url_path": "/plans",
-                 "text": "\n".join(lines)})
-    return docs
-
-
-def _html_to_text(html: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", html)
-    return re.sub(r"\s+", " ", text).strip()
+def load_snapshot(path: Path) -> list[dict]:
+    """Живой корпус читается из снапшота (export_corpus.py готовит его
+    ТАМ, где доступен прод; supbot в прод не ходит — изоляция 152-ФЗ)."""
+    if not path.is_file():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data.get("docs", [])
 
 
 def load_kb_files(kb_dir: Path) -> list[dict]:
@@ -101,13 +69,14 @@ def chunk(text: str) -> list[str]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kb-dir", type=Path, default=Path("kb"))
+    ap.add_argument("--snapshot", type=Path, default=Path("corpus.json"))
     ap.add_argument("--db", default="postgresql://supbot:{pw}@127.0.0.1:5433/supbot")
     args = ap.parse_args()
     pw = os.environ.get("VECTORDB_PASSWORD")
     if not pw:
         sys.exit("VECTORDB_PASSWORD is required")
 
-    docs = fetch_live_docs()
+    docs = load_snapshot(args.snapshot)
     if args.kb_dir.is_dir():
         docs += load_kb_files(args.kb_dir)
     print(f"corpus: {len(docs)} docs")
