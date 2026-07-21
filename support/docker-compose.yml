@@ -1,0 +1,24 @@
+# supbot VPS — контур ассистента поддержки (эпик #503).
+# ВАЖНО: это НЕ прод-компоуз; сервисы изолированы от sku_forecasting.
+services:
+  vectordb:
+    image: pgvector/pgvector:pg16
+    container_name: supbot-vectordb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: supbot
+      POSTGRES_USER: supbot
+      POSTGRES_PASSWORD: ${VECTORDB_PASSWORD:?set in /srv/supbot/.env}
+    # только loopback — наружу порт не смотрит (UFW дополнительно deny)
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - vectordb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supbot -d supbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vectordb_data:
