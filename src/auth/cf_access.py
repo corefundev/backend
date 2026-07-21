@@ -75,6 +75,57 @@ def _jwks(team: str, *, force: bool = False) -> PyJWKClient:
         return _jwk_client
 
 
+def _maybe_notify_login(email: str, sub: str, iat: str) -> None:
+    """#562: один Telegram-алерт на сессию входа в админку. Дедуп через
+    Redis SETNX (TTL = длительность сессии CF); при недоступном Redis —
+    шлём (лучше лишний алерт, чем пропуск входа). Всё best-effort: сбой
+    нотификации НЕ влияет на аутентификацию."""
+    try:
+        import hashlib
+        key = "cf_login:" + hashlib.sha256(
+            f"{email}|{sub}|{iat}".encode()).hexdigest()[:32]
+        first = True
+        try:
+            from src.auth.jwt_auth import _redis_client
+            r = _redis_client()
+            if r is not None:
+                # SETNX + TTL 24ч: True только у ПЕРВОГО запроса сессии
+                first = bool(r.set(key, "1", nx=True, ex=86400))
+        except Exception as e:    # noqa: BLE001 — нет Redis → шлём
+            logger.info("cf_access: login dedup unavailable (%s) — notifying", e)
+        if not first:
+            return
+        _notify_admin_login(email)
+        try:
+            from src.audit import EVT_LOGIN, record_event
+            record_event(event_type=EVT_LOGIN,
+                         event_subtype="admin_perimeter_login",
+                         client_id=email, target_type="admin_session",
+                         target_id=email)
+        except Exception:    # noqa: BLE001 — аудит best-effort
+            pass
+    except Exception as e:    # noqa: BLE001 — tripwire не должен ломать вход
+        logger.warning("cf_access: login tripwire failed: %s", e)
+
+
+def _notify_admin_login(email: str) -> None:
+    """Ops-Telegram: вход в админку через периметр CF Access."""
+    tok = os.environ.get("TELEGRAM_ALERT_BOT_TOKEN") or ""
+    chat = os.environ.get("TELEGRAM_ALERT_CHAT_ID") or ""
+    if not tok or not chat:
+        return
+    import json as _json
+    import urllib.request as _rq
+    body = _json.dumps({
+        "chat_id": chat,
+        "text": f"🔑 Вход в админку (CF Access): {email}. "
+                "Не вы? Проверьте политику Access и активные сессии.",
+    }).encode()
+    req = _rq.Request(f"https://api.telegram.org/bot{tok}/sendMessage",
+                      data=body, headers={"Content-Type": "application/json"})
+    _rq.urlopen(req, timeout=3).read()
+
+
 def verify_access_jwt(token: str) -> Optional[str]:
     """Валидация Cf-Access-Jwt-Assertion.
 
@@ -106,6 +157,11 @@ def verify_access_jwt(token: str) -> Optional[str]:
                 # service-token без email не даёт админ-личность
                 logger.warning("cf_access: valid JWT without email claim rejected")
                 return None
+            # #562: tripwire входа в админку. CF-токен живёт всю сессию
+            # периметра — дедупим по стабильному идентификатору сессии
+            # (sub + iat), чтобы алерт был ОДИН на вход, а не на запрос.
+            _maybe_notify_login(email, str(claims.get("sub", "")),
+                                str(claims.get("iat", "")))
             return email
         except jwt.exceptions.PyJWKClientError:
             # неизвестный kid / сбой JWKS: одна принудительная перезагрузка

@@ -123,3 +123,35 @@ def test_stale_bearer_without_cf_still_401(configured):
     with pytest.raises(HTTPException):
         asyncio.get_event_loop().run_until_complete(
             get_current_client(credentials=stale, api_key=None, cf_access=None))
+
+
+# ── #562: tripwire входа в админку через периметр ─────────────────────────
+
+def test_562_first_login_notifies_then_dedups(configured, monkeypatch):
+    import src.auth.cf_access as cfa
+    sent = []
+    monkeypatch.setattr(cfa, "_notify_admin_login", lambda email: sent.append(email))
+
+    class _FakeRedis:
+        def __init__(self): self.keys = set()
+        def set(self, k, v, nx=False, ex=None):
+            if nx and k in self.keys:
+                return None
+            self.keys.add(k)
+            return True
+    fake = _FakeRedis()
+    monkeypatch.setattr("src.auth.jwt_auth._redis_client", lambda: fake)
+
+    tok = _token(configured)                       # одна сессия (стабильный iat/sub)
+    assert cfa.verify_access_jwt(tok) == "owner@example.com"
+    assert cfa.verify_access_jwt(tok) == "owner@example.com"
+    assert sent == ["owner@example.com"], "ровно один алерт на сессию"
+
+
+def test_562_notify_failure_does_not_break_auth(configured, monkeypatch):
+    import src.auth.cf_access as cfa
+    monkeypatch.setattr(cfa, "_notify_admin_login",
+                        lambda email: (_ for _ in ()).throw(RuntimeError("tg down")))
+    monkeypatch.setattr("src.auth.jwt_auth._redis_client", lambda: None)
+    # вход обязан пройти несмотря на сбой нотификации
+    assert cfa.verify_access_jwt(_token(configured)) == "owner@example.com"
