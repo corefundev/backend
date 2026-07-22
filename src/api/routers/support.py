@@ -68,3 +68,98 @@ async def support_chat(request: Request):
             yield (b'event: done\ndata: {"session_id":"","escalate":true}\n\n')
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── SUP-5 (#508): админ-эндпоинты (раздел «Ассистент» в консоли) ──────────
+#
+# Проксируют на бот с общим секретом (SUPBOT_ADMIN_SECRET, Lockbox), под
+# admin-гейтом консоли. reingest ещё и собирает СВЕЖИЙ снапшот корпуса из
+# наших реестров (бот в прод не ходит) и шлёт его боту.
+
+from src.auth.jwt_auth import AuthContext, get_current_client  # noqa: E402
+from fastapi import Depends  # noqa: E402
+
+_ADMIN_SECRET = os.environ.get("SUPBOT_ADMIN_SECRET", "")
+
+
+def _bot_admin_headers() -> dict:
+    return {"X-Supbot-Admin": _ADMIN_SECRET}
+
+
+@router.get("/admin/support/metrics")
+async def admin_support_metrics(
+    auth: AuthContext = Depends(get_current_client),
+) -> JSONResponse:
+    auth.require_role("admin")
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(f"{SUPBOT}/support/admin/metrics",
+                            headers=_bot_admin_headers())
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:    # noqa: BLE001 — бот недоступен ≠ 500 консоли
+        logger.warning("support metrics proxy failed: %s", e)
+        return JSONResponse({"detail": "assistant offline"}, status_code=503)
+
+
+def _build_corpus_snapshot() -> dict:
+    """SUP-1/5: свежий снапшот живого корпуса ИЗ РЕЕСТРОВ (in-process) —
+    статьи Помощи + Новости + тарифы. Тот же формат, что export_corpus.py."""
+    import re as _re
+
+    def _text(html: str) -> str:
+        return _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", html or "")).strip()
+
+    docs: list[dict] = []
+    try:
+        from src.storage.help_registry import get_help_registry
+        reg = get_help_registry()
+        for cat in reg.list_categories():
+            for a in reg.list_published(category_id=cat.id):
+                art = reg.get_article_by_slug(a.slug)
+                if art is None:
+                    continue
+                docs.append({"doc_id": f"help:{art.slug}", "source": "help",
+                             "title": art.title, "url_path": f"/help/a/{art.slug}",
+                             "text": _text(art.body_html or art.body_md)})
+    except Exception as e:    # noqa: BLE001 — источник best-effort
+        logger.warning("corpus: help export failed: %s", e)
+    try:
+        from src.storage.news_registry import get_news_registry
+        for p in get_news_registry().list_live(limit=50):
+            docs.append({"doc_id": f"news:{p.slug}", "source": "news",
+                         "title": p.title, "url_path": f"/news/{p.slug}",
+                         "text": _text(p.body_html or p.body_md)})
+    except Exception as e:    # noqa: BLE001
+        logger.warning("corpus: news export failed: %s", e)
+    try:
+        from src.plans.plans import all_specs_as_dicts
+        lines = ["Тарифы Sprosly и их лимиты:"]
+        for s in all_specs_as_dicts():
+            lines.append(
+                f"- {s['display_name']} (модель {s['model_display_name']}): "
+                f"до {s['max_skus'] or 'неограниченно'} SKU, горизонт "
+                f"{s['max_horizon_days']} дней, датасетов {s.get('datasets_limit')}, "
+                f"пауза {str(s['training_cooldown_hours']) + ' ч' if s['training_cooldown_hours'] else 'нет'}.")
+        docs.append({"doc_id": "plans:limits", "source": "plans",
+                     "title": "Тарифы и лимиты", "url_path": "/plans",
+                     "text": "\n".join(lines)})
+    except Exception as e:    # noqa: BLE001
+        logger.warning("corpus: plans export failed: %s", e)
+    return {"docs": docs}
+
+
+@router.post("/admin/support/reingest")
+async def admin_support_reingest(
+    auth: AuthContext = Depends(get_current_client),
+) -> JSONResponse:
+    auth.require_role("admin")
+    import json as _json
+    snapshot = _json.dumps(_build_corpus_snapshot(), ensure_ascii=False).encode()
+    try:
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.post(f"{SUPBOT}/support/admin/reingest",
+                             content=snapshot, headers=_bot_admin_headers())
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:    # noqa: BLE001
+        logger.warning("support reingest proxy failed: %s", e)
+        return JSONResponse({"detail": "assistant offline"}, status_code=503)

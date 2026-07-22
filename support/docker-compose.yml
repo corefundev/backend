@@ -56,9 +56,14 @@ services:
     environment:
       VECTORDB_PASSWORD: ${VECTORDB_PASSWORD:?}
       LLM_URL: http://127.0.0.1:8081
+      SUPBOT_ADMIN_SECRET: ${SUPBOT_ADMIN_SECRET:-}
+      DIALOG_RETENTION_DAYS: ${DIALOG_RETENTION_DAYS:-90}
     network_mode: host
     volumes:
       - ./models:/models
+      - ./ingest:/srv/supbot/ingest:ro
+      - ./kb:/srv/supbot/kb:ro
+      - ./corpus.json:/srv/supbot/corpus.json
     depends_on:
       - vectordb
       - llm
