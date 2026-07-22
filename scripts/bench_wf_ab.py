@@ -443,49 +443,68 @@ class _AutoTauMIMO:
         return np.clip(np.asarray(q[key], dtype=float), 0, None)
 
 
-def spike_coverage(combined, sku_col: str, order_window: int = 14) -> dict:
+def spike_coverage(combined, split_points, sku_col: str, history_df,
+                   date_col: str, target_col: str,
+                   order_window: int = 14) -> dict:
     """MA-6 #524a: покрытие всплесковых окон τ-заказом.
 
-    combined.predicted = τ-квантильный заказ на день (плечо qcov_*/autotau).
-    Для окна `order_window` группируем (sku,fold), берём Σфакт и Σзаказ.
-    Всплесковое окно SKU — Σфакт выше робастного порога его окон
-    (q75 + 1.5·IQR; фолбэк для коротких — top-терциль). Метрики:
+    combined.predicted = τ-квантильный заказ на день (плечо qcov_*/autotau);
+    для точечных плеч метрика — референс покрытия точкой.
+    Для окна `order_window` группируем eval-строки по (sku, fold): Σфакт и
+    Σзаказ. Порог всплеска per-SKU — по TRAIN-истории (строки строго до
+    первого сплита): rolling-суммы длиной order_window → q75 + 1.5·IQR
+    (замер на eval-окнах невозможен: их всего n_folds, всплеск сам
+    раздувает порог — пойман санити-тестом). SKU без ≥8 rolling-окон
+    истории пропускается (skipped_skus). Метрики:
       spike:  n, covered (Σзаказ>=Σфакт), coverage-доля, mean Σзаказ/Σфакт;
       calm:   n, coverage-доля, mean Σзаказ/Σфакт (цена запаса).
     """
     import numpy as np
     import pandas as pd
+    # 1) per-SKU порог из train-префикса
+    first_split = pd.Timestamp(split_points[0])
+    hist = history_df[history_df[date_col] < first_split]
+    thr_by_sku: dict = {}
+    for sku, g in hist.groupby(sku_col):
+        s = (g.sort_values(date_col)[target_col]
+             .rolling(order_window).sum().dropna())
+        if len(s) < 8:
+            continue
+        q25, q75 = np.quantile(s.to_numpy(dtype=float), [0.25, 0.75])
+        thr = q75 + 1.5 * (q75 - q25)
+        thr_by_sku[sku] = thr if np.isfinite(thr) and thr > 0 else np.inf
+    # 2) eval-окна против порога
     df = combined.copy()
-    if "horizon_step" not in df.columns:
-        return {}
+    split_by_fold = {i: pd.Timestamp(s) for i, s in enumerate(split_points)}
+    df["horizon_step"] = (
+        (df["date"] - df["fold"].map(split_by_fold)).dt.days.astype(int)
+    )
     sub = df[df["horizon_step"] <= order_window]
     win = sub.groupby([sku_col, "fold"]).agg(
         a=("actual", "sum"), p=("predicted", "sum")).reset_index()
     out_spike = {"n": 0, "covered": 0, "over_ratio_sum": 0.0}
     out_calm = {"n": 0, "covered": 0, "over_ratio_sum": 0.0}
-    for sku, g in win.groupby(sku_col):
-        a = g["a"].to_numpy(dtype=float)
-        if len(a) < 3:
-            thr = np.inf
-        else:
-            q25, q75 = np.quantile(a, [0.25, 0.75])
-            thr = q75 + 1.5 * (q75 - q25)
-            if not np.isfinite(thr) or thr <= q75:
-                thr = np.quantile(a, 2/3)
-        for _, row in g.iterrows():
-            af, pf = float(row["a"]), float(row["p"])
-            bucket = out_spike if af > thr and af > 0 else out_calm
-            bucket["n"] += 1
-            if pf >= af:
-                bucket["covered"] += 1
-            if af > 1e-9:
-                bucket["over_ratio_sum"] += pf / af
+    skipped = 0
+    for _, row in win.iterrows():
+        thr = thr_by_sku.get(row[sku_col])
+        if thr is None:
+            skipped += 1
+            continue
+        af, pf = float(row["a"]), float(row["p"])
+        bucket = out_spike if af > thr and af > 0 else out_calm
+        bucket["n"] += 1
+        if pf >= af:
+            bucket["covered"] += 1
+        if af > 1e-9:
+            bucket["over_ratio_sum"] += pf / af
+
     def _fin(b):
         n = b["n"]
         return {"windows": n,
                 "coverage": round(b["covered"] / n, 4) if n else None,
-                "mean_order_over_actual": round(b["over_ratio_sum"] / n, 4) if n else None}
-    return {"order_window": order_window,
+                "mean_order_over_actual":
+                    round(b["over_ratio_sum"] / n, 4) if n else None}
+    return {"order_window": order_window, "skipped_windows": skipped,
             "spike": _fin(out_spike), "calm": _fin(out_calm)}
 
 
@@ -923,6 +942,15 @@ def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
         "eval_coverage": agg.get("eval_coverage"),
         "dead_tail_rows_scored": agg.get("dead_tail_rows_scored"),
         "decomposition": decompose(combined, split_points, band_by_sku, sku_col),
+        # MA-6 #524a: спайк-покрытие заказных окон (для точечных плеч —
+        # референс, для qcov_*/autotau — целевая метрика); пороги — по
+        # train-префиксу base_df
+        "spike_coverage": {
+            str(w): spike_coverage(combined, split_points, sku_col,
+                                   history_df=base_df, date_col=date_col,
+                                   target_col=target_col, order_window=w)
+            for w in (14, 28)
+        },
     }
 
 
