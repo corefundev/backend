@@ -14,6 +14,7 @@ token/citations/done).
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -49,6 +50,55 @@ def _output_unsafe(text: str) -> bool:
 
 
 app = FastAPI(title="Sprosly Support Assistant")
+
+_ESC_MSG = ("Не нашёл точного ответа в документации. Загляните в Базу "
+            "знаний или напишите нам — подскажем.")
+# админ-эндпоинты бота доступны ТОЛЬКО проду (приватная сеть) и лишь с
+# общим секретом — второй слой поверх UFW/приватной сети.
+_ADMIN_SECRET = os.environ.get("SUPBOT_ADMIN_SECRET", "")
+_RETENTION_DAYS = int(os.environ.get("DIALOG_RETENTION_DAYS", "90"))
+
+
+def client_ip_hdr(req: Request) -> str:
+    """IP клиента: прод-прокси проставляет X-Forwarded-For; берём первый."""
+    xff = req.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return req.client.host if req.client else ""
+
+
+def _subnet(ip: str) -> str:
+    """/24 — минимизация ПДн (полный IP не храним)."""
+    parts = ip.split(".")
+    return ".".join(parts[:3]) + ".0/24" if len(parts) == 4 else ""
+
+
+def _journal(session_id: str, surface: str, question: str, answer: str,
+             escalated: bool, cites: list, subnet: str) -> None:
+    """SUP-5: запись диалога. Best-effort — журнал НЕ должен ронять ответ."""
+    import json as _json
+    try:
+        conn = psycopg2.connect(DB)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO dialogs (session_id, surface, question, answer, "
+                "escalated, citations, ip_subnet) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (session_id, surface, question[:2000], answer[:4000],
+                 escalated, _json.dumps(cites, ensure_ascii=False), subnet))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:    # noqa: BLE001 — журнал best-effort
+        logger.warning("support: journal failed: %s", e)
+
+
+def _require_admin(req: Request) -> None:
+    """Гейт админ-эндпоинтов: общий секрет от прода. Пусто/несовпадение → 403."""
+    from fastapi import HTTPException
+    got = req.headers.get("x-supbot-admin", "")
+    if not _ADMIN_SECRET or not hmac.compare_digest(got, _ADMIN_SECRET):
+        raise HTTPException(status_code=403, detail="forbidden")
 _model: SentenceTransformer | None = None
 
 
@@ -108,19 +158,16 @@ async def chat(req: Request) -> StreamingResponse:
     body = await req.json()
     message = str(body.get("message", ""))[:2000].strip()
     session_id = body.get("session_id") or uuid.uuid4().hex
+    surface = str(body.get("surface", "public"))[:16]
+    subnet = _subnet(client_ip_hdr(req))
 
+    # Ответ строится СИНХРОННО (LLM stream=False) — так и журналируем факт,
+    # и решаем отдать/эскалировать по ПОЛНОМУ тексту, и лишь потом стримим.
     hits = retrieve(message) if message else []
     strong = [h for h in hits if h["sim"] >= MIN_SIM]
+    answer, escalate, cites = _ESC_MSG, True, []
 
-    async def stream():
-        if not strong:
-            msg = ("Не нашёл ответа в документации. Загляните в Базу знаний "
-                   "или напишите нам — подскажем.")
-            for w in msg.split(" "):
-                yield _sse("token", {"delta": w + " "})
-            yield _sse("done", {"session_id": session_id, "escalate": True})
-            return
-
+    if strong:
         context = "\n\n".join(
             f"[{i+1}] {h['title']}\n{h['content'][:900]}"
             for i, h in enumerate(strong[:3]))
@@ -128,44 +175,35 @@ async def chat(req: Request) -> StreamingResponse:
         payload = {
             "messages": [{"role": "system", "content": SYSTEM},
                          {"role": "user", "content": prompt}],
-            "max_tokens": 400, "temperature": 0.2, "stream": True,
+            "max_tokens": 400, "temperature": 0.2, "stream": False,
         }
-        # Ответ буферизуется целиком: 1.7B склонна «изобретать» при слабом
-        # контексте — решение отдавать/эскалировать принимаем ПО ПОЛНОМУ
-        # тексту (маркер отказа не должен утечь в виджет постримово).
-        payload["stream"] = False
         try:
             async with httpx.AsyncClient(timeout=90) as client:
                 resp = await client.post(f"{LLM}/v1/chat/completions", json=payload)
-            answer = _strip_think(
+            llm = _strip_think(
                 resp.json()["choices"][0]["message"]["content"]).strip()
         except Exception:    # noqa: BLE001 — таймаут/сбой LLM: НИКОГДА не пустой
-            answer = ""      # ответ пользователю → честная эскалация ниже
-
-        # SUP-5 (#508): выходной фильтр. Любой маркер утечки/инъекции ⇒
-        # ответ не отдаём (модель могла подчиниться инъекции в данных).
-        if _output_unsafe(answer):
+            llm = ""
+        # SUP-5: выходной фильтр — маркер утечки/инъекции ⇒ не отдаём.
+        if _output_unsafe(llm):
             logger.warning("support: output filter tripped, escalating")
-            answer = ""
+            llm = ""
+        if NOANS not in llm and len(llm) >= 3:
+            answer, escalate = llm, False
+            seen = set()
+            for h in strong:
+                if h["url_path"] and h["url_path"] not in seen:
+                    seen.add(h["url_path"])
+                    cites.append({"title": h["title"][:80], "slug": _slug(h["url_path"])})
 
-        if NOANS in answer or len(answer) < 3:
-            msg = ("Не нашёл точного ответа в документации. Загляните в Базу "
-                   "знаний или напишите нам — подскажем.")
-            for w in msg.split(" "):
-                yield _sse("token", {"delta": w + " "})
-            yield _sse("done", {"session_id": session_id, "escalate": True})
-            return
+    _journal(session_id, surface, message, answer, escalate, cites, subnet)
 
+    async def stream():
         for w in re.findall(r"\S+\s*", answer):
             yield _sse("token", {"delta": w})
-        seen, cites = set(), []
-        for h in strong:
-            if h["url_path"] and h["url_path"] not in seen:
-                seen.add(h["url_path"])
-                cites.append({"title": h["title"][:80], "slug": _slug(h["url_path"])})
         if cites:
             yield _sse("citations", {"items": cites})
-        yield _sse("done", {"session_id": session_id, "escalate": False})
+        yield _sse("done", {"session_id": session_id, "escalate": escalate})
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -181,3 +219,66 @@ def _strip_think(s: str) -> str:
 def _slug(url_path: str) -> str:
     m = re.search(r"/help/a/([^/]+)", url_path)
     return m.group(1) if m else url_path.strip("/")
+
+
+@app.get("/support/admin/metrics")
+def admin_metrics(request: Request) -> JSONResponse:
+    """SUP-5 (#508): метрики для раздела «Ассистент» в консоли.
+    Топ-вопросы, доля эскалаций, объём, последние диалоги. Admin-only."""
+    _require_admin(request)
+    conn = psycopg2.connect(DB)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*), count(*) FILTER (WHERE escalated), "
+                    "count(DISTINCT session_id) FROM dialogs "
+                    "WHERE ts > now() - interval '30 days'")
+        total, escalated, sessions = cur.fetchone()
+        cur.execute("SELECT question, count(*) c FROM dialogs "
+                    "WHERE ts > now() - interval '30 days' "
+                    "GROUP BY question ORDER BY c DESC LIMIT 10")
+        top = [{"question": q, "count": c} for q, c in cur.fetchall()]
+        cur.execute("SELECT question, count(*) c FROM dialogs "
+                    "WHERE escalated AND ts > now() - interval '30 days' "
+                    "GROUP BY question ORDER BY c DESC LIMIT 10")
+        unanswered = [{"question": q, "count": c} for q, c in cur.fetchall()]
+        cur.execute("SELECT ts, surface, question, answer, escalated "
+                    "FROM dialogs ORDER BY ts DESC LIMIT 20")
+        recent = [{"ts": ts.isoformat(), "surface": s, "question": q,
+                   "answer": (a or "")[:400], "escalated": e}
+                  for ts, s, q, a, e in cur.fetchall()]
+    finally:
+        conn.close()
+    rate = round(escalated / total, 3) if total else 0.0
+    return JSONResponse({
+        "window_days": 30, "total": total, "sessions": sessions,
+        "escalated": escalated, "escalation_rate": rate,
+        "top_questions": top, "unanswered": unanswered, "recent": recent,
+        "retention_days": _RETENTION_DAYS})
+
+
+@app.post("/support/admin/reingest")
+async def admin_reingest(request: Request) -> JSONResponse:
+    """SUP-5 (#508): переинжест по кнопке из консоли. Прод присылает свежий
+    снапшот корпуса (бот в прод не ходит) → бот пишет его и запускает
+    ingest в подпроцессе. Возвращает результат прогона."""
+    _require_admin(request)
+    import subprocess
+    import sys
+    snap = await request.body()
+    if snap:
+        pathlib_write("/srv/supbot/corpus.json", snap)
+    try:
+        out = subprocess.run(
+            [sys.executable, "/srv/supbot/ingest/ingest.py",
+             "--kb-dir", "/srv/supbot/kb", "--snapshot", "/srv/supbot/corpus.json"],
+            env={**os.environ}, capture_output=True, text=True, timeout=600)
+        line = (out.stdout.strip().splitlines() or [""])[-1]
+        return JSONResponse({"ok": out.returncode == 0, "result": line,
+                             "error": out.stderr[-500:] if out.returncode else None})
+    except Exception as e:    # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)[:300]}, status_code=500)
+
+
+def pathlib_write(path: str, data: bytes) -> None:
+    with open(path, "wb") as f:
+        f.write(data)

@@ -27,3 +27,20 @@ CREATE TABLE IF NOT EXISTS kb_ingest_runs (
     chunks      INT,
     note        TEXT
 );
+
+-- SUP-5 (#508): журнал диалогов ассистента. Retention-политика (152-ФЗ):
+-- строки старше DIALOG_RETENTION_DAYS чистит cron (retention.py). Вопрос
+-- пользователя может содержать ПДн → упомянуто в /privacy, срок ограничен.
+CREATE TABLE IF NOT EXISTS dialogs (
+    id          BIGSERIAL PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    surface     TEXT,                    -- public | cabinet
+    question    TEXT NOT NULL,
+    answer      TEXT,
+    escalated   BOOLEAN NOT NULL DEFAULT false,
+    citations   JSONB,                   -- [{title,slug}]
+    ip_subnet   TEXT                     -- /24, не полный IP (минимизация ПДн)
+);
+CREATE INDEX IF NOT EXISTS dialogs_ts_idx ON dialogs (ts DESC);
+CREATE INDEX IF NOT EXISTS dialogs_escalated_idx ON dialogs (escalated) WHERE escalated;
