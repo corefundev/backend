@@ -142,6 +142,19 @@ ARMS: dict[str, dict] = {
                            "mid_quantile": 0.55},
     "mid_q60":            {"model": "mimo", "statics": "fold_clean", "market": False,
                            "mid_quantile": 0.60},
+    # MA-6 #524a: спайк-покрытие квантилью. τ-квантиль как заказ ВО ВСЕХ
+    # бандах; метрика spike_coverage меряет долю всплесковых окон, у
+    # которых Σ(τ-заказ) >= Σфакт, и цену пере-заказа на спокойных.
+    "qcov_base":          {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "spike_tau": 0.5},   # τ=0.5 = медиана (референс без запаса)
+    "qcov_70":            {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "spike_tau": 0.70},
+    "qcov_80":            {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "spike_tau": 0.80},
+    "qcov_90":            {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "spike_tau": 0.90},
+    "qcov_autotau":       {"model": "mimo", "statics": "fold_clean", "market": False,
+                           "spike_autotau": True},  # per-SKU τ по волатильности (CV)
     # QH-8 #441: value-weighted обучение. Метрика WMAPE_g взвешена
     # объёмом, лосс — нет: модель равно старается на копеечных и тяжёлых
     # строках. Вес ∝ |y| (полное выравнивание) и ∝ sqrt|y| (полдозы) —
@@ -382,6 +395,98 @@ class _MidQuantileMIMO:
             key = next(iter(q))                  # единственная голова τ
             return np.clip(np.asarray(q[key], dtype=float), 0, None)
         return np.asarray(self._m.predict(X), dtype=float)
+
+
+class _AutoTauMIMO:
+    """MA-6 #524a: per-SKU авто-τ по волатильности. Фитим квантильные
+    головы [0.7,0.8,0.9]; на predict каждый SKU получает τ по своему
+    tier волатильности (CV train-таргета): низкий CV→0.7, средний→0.8,
+    высокий→0.9. Идея — поднимать страховой запас там, где всплески, не
+    раздувая заказ на спокойных рядах."""
+    is_mimo = True
+    _TAUS = [0.7, 0.8, 0.9]
+
+    def __init__(self, config: dict, sku_col: str):
+        from src.models.mimo import MIMOForecaster
+        self._m = MIMOForecaster(config)
+        self._sku_col = sku_col
+        self._tau_by_sku: dict = {}
+        self._cut = (0.0, 0.0)
+
+    def fit(self, X, y, groups=None, sample_weight=None, target_censor=None):
+        import numpy as np
+        import pandas as pd
+        self._m.fit(X, y, groups=groups, sample_weight=sample_weight,
+                    target_censor=target_censor)
+        self._m.fit_quantiles(X, y, quantiles=self._TAUS, groups=groups,
+                              target_censor=target_censor)
+        # CV per SKU по train-таргету; терцильные пороги → tier → τ
+        s = pd.Series(np.asarray(y, dtype=float))
+        g = pd.Series(np.asarray(groups)) if groups is not None else None
+        if g is not None:
+            cv = s.groupby(g).apply(
+                lambda v: float(v.std() / v.mean()) if v.mean() > 1e-9 else 0.0)
+            self._cut = tuple(np.quantile(cv.to_numpy(), [1/3, 2/3]))
+            for sku, c in cv.items():
+                self._tau_by_sku[sku] = (
+                    0.9 if c > self._cut[1] else 0.8 if c > self._cut[0] else 0.7)
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        cols = getattr(X, "columns", [])
+        q = self._m.predict_quantiles(X)               # {0.7:.., 0.8:.., 0.9:..}
+        keys = {float(k): k for k in q}
+        sku = X[self._sku_col].iloc[0] if self._sku_col in cols and len(X) else None
+        tau = self._tau_by_sku.get(sku, 0.8)
+        key = keys.get(tau, next(iter(q)))
+        return np.clip(np.asarray(q[key], dtype=float), 0, None)
+
+
+def spike_coverage(combined, sku_col: str, order_window: int = 14) -> dict:
+    """MA-6 #524a: покрытие всплесковых окон τ-заказом.
+
+    combined.predicted = τ-квантильный заказ на день (плечо qcov_*/autotau).
+    Для окна `order_window` группируем (sku,fold), берём Σфакт и Σзаказ.
+    Всплесковое окно SKU — Σфакт выше робастного порога его окон
+    (q75 + 1.5·IQR; фолбэк для коротких — top-терциль). Метрики:
+      spike:  n, covered (Σзаказ>=Σфакт), coverage-доля, mean Σзаказ/Σфакт;
+      calm:   n, coverage-доля, mean Σзаказ/Σфакт (цена запаса).
+    """
+    import numpy as np
+    import pandas as pd
+    df = combined.copy()
+    if "horizon_step" not in df.columns:
+        return {}
+    sub = df[df["horizon_step"] <= order_window]
+    win = sub.groupby([sku_col, "fold"]).agg(
+        a=("actual", "sum"), p=("predicted", "sum")).reset_index()
+    out_spike = {"n": 0, "covered": 0, "over_ratio_sum": 0.0}
+    out_calm = {"n": 0, "covered": 0, "over_ratio_sum": 0.0}
+    for sku, g in win.groupby(sku_col):
+        a = g["a"].to_numpy(dtype=float)
+        if len(a) < 3:
+            thr = np.inf
+        else:
+            q25, q75 = np.quantile(a, [0.25, 0.75])
+            thr = q75 + 1.5 * (q75 - q25)
+            if not np.isfinite(thr) or thr <= q75:
+                thr = np.quantile(a, 2/3)
+        for _, row in g.iterrows():
+            af, pf = float(row["a"]), float(row["p"])
+            bucket = out_spike if af > thr and af > 0 else out_calm
+            bucket["n"] += 1
+            if pf >= af:
+                bucket["covered"] += 1
+            if af > 1e-9:
+                bucket["over_ratio_sum"] += pf / af
+    def _fin(b):
+        n = b["n"]
+        return {"windows": n,
+                "coverage": round(b["covered"] / n, 4) if n else None,
+                "mean_order_over_actual": round(b["over_ratio_sum"] / n, 4) if n else None}
+    return {"order_window": order_window,
+            "spike": _fin(out_spike), "calm": _fin(out_calm)}
 
 
 def reallocate_volume(combined, split_points, sku_col: str,
@@ -758,6 +863,14 @@ def run_arm(arm_name: str, base_df, config: dict, dump_dir=None,
                 _tau = float(spec["mid_quantile"])
                 model_factory = lambda: _MidQuantileMIMO(            # noqa: E731
                     arm_config, _tau)
+            elif spec.get("spike_tau") is not None:
+                # MA-6 #524a: τ-квантиль ВО ВСЕХ бандах (route 0,1,2)
+                _stau = float(spec["spike_tau"])
+                model_factory = lambda: _MidQuantileMIMO(            # noqa: E731
+                    arm_config, _stau, route_bands=(0, 1, 2))
+            elif spec.get("spike_autotau"):
+                model_factory = lambda: _AutoTauMIMO(                # noqa: E731
+                    arm_config, sku_col)
             else:
                 from src.models.mimo import MIMOForecaster
                 model_factory = lambda: MIMOForecaster(arm_config)   # noqa: E731
