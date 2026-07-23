@@ -73,7 +73,9 @@ free -m
 # 2. Контейнер с собственным капом, env+mounts воркера
 IMG=$(docker inspect docker-worker-1 --format '{{.Config.Image}}')
 NET=$(docker inspect docker-worker-1 --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-docker run -d --name bench --rm --memory=1200m --cpu-shares=256 --network "$NET" \
+# ⚠️ dead-вселенная (--grid dead, 1c-full): --memory=3g ОБЯЗАТЕЛЬНО — на
+# 1200m пик >1.27GiB даёт тихий OOM без Traceback (сгорел прогон 2026-07-23)
+docker run -d --name bench --rm --memory=3g --cpu-shares=256 --network "$NET" \
   $(docker inspect docker-worker-1 --format '{{range .Config.Env}}-e {{.}} {{end}}') \
   $(docker inspect docker-worker-1 --format '{{range .Mounts}}-v {{.Source}}:{{.Destination}}:ro {{end}}') \
   -e BENCH_CLIENT_ID=test \
