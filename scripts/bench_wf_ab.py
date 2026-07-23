@@ -435,11 +435,12 @@ class _AutoTauMIMO:
     def predict(self, X):
         import numpy as np
         cols = getattr(X, "columns", [])
-        q = self._m.predict_quantiles(X)               # {0.7:.., 0.8:.., 0.9:..}
-        keys = {float(k): k for k in q}
+        q = self._m.predict_quantiles(X)     # ключи вида 'p70'/'p80'/'p90'
         sku = X[self._sku_col].iloc[0] if self._sku_col in cols and len(X) else None
         tau = self._tau_by_sku.get(sku, 0.8)
-        key = keys.get(tau, next(iter(q)))
+        key = f"p{int(round(tau * 100))}"
+        if key not in q:
+            key = next(iter(q))              # фолбэк: единственная голова
         return np.clip(np.asarray(q[key], dtype=float), 0, None)
 
 
