@@ -501,6 +501,96 @@ def order_recommendations(
     }
 
 
+@router.get("/clients/{client_id}/explanation/{sku}")
+def get_explanation(
+    client_id: str,
+    sku: str,
+    dataset_id: Optional[str] = None,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """XP-1 #469: «почему такой прогноз» для SKU — top-4 клиентских групп
+    факторов (доля |вклада| + направление) и дифф с прошлой моделью.
+
+    Business-фича: остальные тарифы получают 403 — фронт рисует upsell-блок
+    (утверждённый эскиз). Вклады пересчитываются post-training'ом; модели,
+    обученные до XP-1, объяснений не имеют → 404 с честной причиной (уйдёт
+    после следующего обучения; on-demand пересчёт в API-процессе — это
+    worker-класс работы, сознательно НЕ делаем).
+    """
+    require_client_access(client_id, auth)
+    record = get_registry().get(client_id)
+    if (record.plan if record else None) != "business":
+        raise HTTPException(
+            403, detail="Объяснение прогноза доступно на тарифе Business")
+    if dataset_id is None:
+        dataset_id = _default_dataset_id(client_id)
+    from src.storage.backend import ClientStorage
+    storage = ClientStorage(client_id, dataset_id=dataset_id)
+    if not storage.explanations_exist():
+        raise HTTPException(
+            404, detail="Объяснения появятся после следующего обучения модели")
+    df = storage.load_explanations()
+    cur = df[df["sku"] == sku]
+    if cur.empty:
+        raise HTTPException(404, detail="Для этого SKU нет объяснения")
+
+    total_abs = float(cur["contribution"].abs().sum())
+    # порог «почти не влияет»: <2% суммарного |вклада|
+    eps = 0.02 * total_abs if total_abs > 0 else 0.0
+
+    def _direction(c: float) -> str:
+        if c > eps:
+            return "up"
+        if c < -eps:
+            return "down"
+        return "flat"
+
+    ranked = cur.reindex(
+        cur["contribution"].abs().sort_values(ascending=False).index)
+    factors = [{
+        "group": r["group"],
+        "direction": _direction(float(r["contribution"])),
+        "share": (round(abs(float(r["contribution"])) / total_abs, 4)
+                  if total_abs > 0 else 0.0),
+    } for _, r in ranked.head(4).iterrows()]
+
+    prediction_sum = float(cur["prediction_sum"].iloc[0])
+    change = None
+    if storage.explanations_prev_exist():
+        try:
+            prev = storage.load_explanations_prev()
+            p = prev[prev["sku"] == sku]
+            prev_sum = float(p["prediction_sum"].iloc[0]) if not p.empty else 0.0
+            if prev_sum > 0:
+                merged = (
+                    cur.set_index("group")["contribution"]
+                    .subtract(p.set_index("group")["contribution"],
+                              fill_value=0.0))
+                main = merged.abs().idxmax() if not merged.empty else None
+                change = {
+                    "pct": round(100.0 * (prediction_sum - prev_sum)
+                                 / prev_sum, 1),
+                    "main_group": main,
+                    "direction": ("up" if main is not None
+                                  and float(merged[main]) > 0 else "down"),
+                }
+        except Exception as e:    # noqa: BLE001 — дифф опционален, факторы важнее
+            logger.warning("explanation diff failed for %s/%s: %s",
+                           client_id, sku, e)
+
+    return {
+        "sku": sku,
+        "factors": factors,
+        "prediction_sum": round(prediction_sum, 2),
+        "heads": int(cur["heads"].iloc[0]),
+        "run_id": (str(cur["run_id"].iloc[0])
+                   if "run_id" in cur.columns else None),
+        "generated_at": (str(cur["generated_at"].iloc[0])
+                         if "generated_at" in cur.columns else None),
+        "change": change,
+    }
+
+
 @router.get("/clients/{client_id}/anomalies")
 def list_anomalies(
     client_id: str,

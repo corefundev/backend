@@ -36,7 +36,7 @@ _ROUTE_DECORATOR = re.compile(
 # Pre-split inventory: 44 routes (verified by `grep -c '^@app\.' `
 # on commit c00b0d8). Every extraction commit must preserve this
 # count exactly — no drops, no phantom additions.
-_EXPECTED_ROUTE_COUNT = 121  # +2 SUP-5 #508 (GET /admin/support/metrics, POST /admin/support/reingest); +2 SUP #507 (GET /support/health, POST /support/chat); +1 AZ-1 #465 (GET order-recommendations); 115 +1 DS-1 slice B (datasets train button); 109 +6 DS-1 #466 (datasets CRUD/attach/detach); 111 (после AUTH-1/2) −2 AUTH-4 #448:
+_EXPECTED_ROUTE_COUNT = 122  # +1 XP-1 #469 (GET explanation/{sku}); +2 SUP-5 #508 (GET /admin/support/metrics, POST /admin/support/reingest); +2 SUP #507 (GET /support/health, POST /support/chat); +1 AZ-1 #465 (GET order-recommendations); 115 +1 DS-1 slice B (datasets train button); 109 +6 DS-1 #466 (datasets CRUD/attach/detach); 111 (после AUTH-1/2) −2 AUTH-4 #448:
 # снесён OTP-вход (/auth/login, /auth/login/verify) — вход только паролем,
 # подтверждение регистрации кодом, сброс ссылкой.
 # /auth/login/password, /auth/password/reset-request, /auth/password/reset(+peek),
