@@ -279,6 +279,10 @@ class PostgresTrainingRunsRegistry:
             status=row["status"],
             job_id=row.get("job_id"),
             upload_id=row.get("upload_id"),
+            # #574: dataset_id/version существовали в БД, но терялись при
+            # маппинге — фронт не мог строить прайор ETA по датасету
+            dataset_id=row.get("dataset_id"),
+            dataset_version=row.get("dataset_version"),
             enqueued_at=_iso(row.get("enqueued_at")) or "",
             started_at=_iso(row.get("started_at")),
             ended_at=_iso(row.get("ended_at")),
