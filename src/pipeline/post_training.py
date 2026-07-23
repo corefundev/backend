@@ -181,6 +181,64 @@ def generate_and_store_forecasts(
     )
 
 
+def generate_and_store_explanations(
+    client_id:   str,
+    data_path:   str,
+    model_path:  str | None,
+    config_path: str,
+    run_id:      str,
+    dataset_id:  str | None = None,
+) -> None:
+    """XP-1 #469: пересчитать объяснения прогнозов свежеобученной модели и
+    записать в explain/explanations.parquet (прежние ротируются в _prev —
+    источник диффа «прогноз вырос из-за X»). Зеркало
+    generate_and_store_forecasts: тот же load-model-then-pin-features путь.
+    Горизонт объяснений = direct-головы модели, капнутые план-потолком:
+    рекурсивный хвост честно не объясняем."""
+    if not model_path:
+        logger.info("skip explanations: no model_path in result")
+        return
+    registry = get_registry()
+    record = registry.get(client_id)
+    plan_spec = get_plan_spec(record.plan if record else None)
+    config = get_config_manager(config_path).get_effective_serving(
+        client_id, registry)
+
+    storage = ClientStorage(client_id, dataset_id=dataset_id)
+    if not storage.model_exists():
+        logger.info("skip explanations: model not found for client=%s",
+                    client_id)
+        return
+    model = storage.load_model()
+
+    df = load_data(data_path, config)
+    df = validate_data(df, config)
+    _lags, _rw = serve_feature_set(model)
+    df = build_features(
+        df, config, pin_lags=_lags or None, pin_rolling=_rw,
+        drop_warmup=False,
+    )
+    from src.features.market import apply_model_market
+    df = apply_model_market(model, df, config["data"]["date_col"])
+    from src.features.static_features import apply_model_static
+    df = apply_model_static(model, df, config["data"]["sku_col"])
+
+    plan_max = plan_spec.max_horizon_days
+    horizon = plan_max if plan_max and plan_max > 0 else None
+
+    from src.explain import build_explanations
+    ex = build_explanations(
+        model, df, config, horizon=horizon, max_skus=plan_spec.max_skus)
+    if ex.empty:
+        logger.warning("explanations: 0 rows for client=%s", client_id)
+        return
+    ex["run_id"] = run_id
+    ex["generated_at"] = pd.Timestamp.utcnow().isoformat()
+    storage.save_explanations(ex)
+    logger.info("explanations: client=%s skus=%d rows=%d",
+                client_id, ex["sku"].nunique(), len(ex))
+
+
 def detect_and_store_anomalies(
     client_id:   str,
     data_path:   str,

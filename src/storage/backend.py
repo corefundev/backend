@@ -406,6 +406,10 @@ class ClientStorage:
     PREDS_KEY      = "{client_id}/predictions/{date}.parquet"
     METRICS_KEY    = "{client_id}/metrics/per_sku.csv"
     DRIFT_KEY      = "{client_id}/metrics/drift.parquet"
+    # XP-1 #469: объяснения прогнозов текущей модели + снапшот прошлой
+    # (для диффа «прогноз вырос из-за X» — ротация при каждой записи)
+    EXPLAIN_KEY      = "{client_id}/explain/explanations.parquet"
+    EXPLAIN_PREV_KEY = "{client_id}/explain/explanations_prev.parquet"
 
     def __init__(self, client_id: str, backend: StorageBackend | None = None,
                  dataset_id: str | None = None):
@@ -457,6 +461,31 @@ class ClientStorage:
 
     def load_features(self) -> pd.DataFrame:
         return self.backend.load_dataframe(self._k(self.FEATURES_KEY))
+
+    # ── Explanations (XP-1 #469) ─────────────────────────────────────────────
+
+    def save_explanations(self, df: pd.DataFrame) -> None:
+        """Записать объяснения ТЕКУЩЕЙ модели, отротировав прежние в _prev
+        (источник диффа «прогноз вырос из-за X»). Ротация ДО записи: при
+        падении записи прошлый снапшот не теряется."""
+        cur = self._k(self.EXPLAIN_KEY)
+        if self.backend.exists(cur):
+            self.backend.upload_bytes(
+                self.backend.download_bytes(cur),
+                self._k(self.EXPLAIN_PREV_KEY))
+        self.backend.save_dataframe(df, cur)
+
+    def load_explanations(self) -> pd.DataFrame:
+        return self.backend.load_dataframe(self._k(self.EXPLAIN_KEY))
+
+    def explanations_exist(self) -> bool:
+        return self.backend.exists(self._k(self.EXPLAIN_KEY))
+
+    def load_explanations_prev(self) -> pd.DataFrame:
+        return self.backend.load_dataframe(self._k(self.EXPLAIN_PREV_KEY))
+
+    def explanations_prev_exist(self) -> bool:
+        return self.backend.exists(self._k(self.EXPLAIN_PREV_KEY))
 
     # ── Predictions ───────────────────────────────────────────────────────────
 

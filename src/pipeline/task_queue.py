@@ -453,6 +453,7 @@ def _post_training_artifacts(
     """
     from src.pipeline.post_training import (
         detect_and_store_anomalies,
+        generate_and_store_explanations,
         generate_and_store_forecasts,
     )
 
@@ -477,6 +478,19 @@ def _post_training_artifacts(
         )
     except Exception as e:    # noqa: BLE001
         logger.warning("post-training anomaly detection failed: %s", e, exc_info=True)
+
+    # XP-1 #469: объяснения — best-effort, как и остальные артефакты
+    try:
+        generate_and_store_explanations(
+            client_id=client_id,
+            data_path=effective_data_path,
+            model_path=result.get("model_path"),
+            config_path=config_path,
+            run_id=run_id or "",
+            dataset_id=dataset_id,
+        )
+    except Exception as e:    # noqa: BLE001
+        logger.warning("post-training explanations failed: %s", e, exc_info=True)
 
 
 def _cleanup_merged(merged_cleanup: Optional[str]) -> None:
