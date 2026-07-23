@@ -51,7 +51,7 @@ src/features/engineering.py:129  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:137  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block)
 src/storage/upload_pipeline.py:182  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment] (was :178, +4 DS-2 #467 dataset_id)
 src/storage/upload_pipeline.py:212  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment] (was :208, +4 DS-2 #467 dataset_id)
-src/api/routers/inference.py:638  (+34 AZ-1 stock-read) (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
+src/api/routers/inference.py:728  (+90 XP-1 #469 explanation above) (+34 AZ-1 stock-read) (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
 src/storage/upload_pipeline.py:306  DP-4b #324 — run_prepare best-effort sniff: a sniff failure sets result=None and falls through to a CANONICAL parse (never blocks the upload); logged loudly, no state swallowed (was :302, +4 DS-2 #467 dataset_id)
 src/storage/upload_pipeline.py:429  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment] (was :344, +24 DP-4b run_prepare) (was :421, +4 DS-2 #467 dataset_id)
 src/storage/upload_pipeline.py:442  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment] (was :357, +24 DP-4b run_prepare) (was :434, +4 DS-2 #467 dataset_id)
@@ -100,3 +100,4 @@ src/pipeline/task_queue.py:691  #557 best-effort персист job_id: поте
 src/api/routers/support.py:124  SUP-5 #508 best-effort: источник корпуса (help) независим, падение логируется, снапшот собирается из остальных
 src/api/routers/support.py:132  SUP-5 #508 best-effort: источник корпуса (news) независим, падение логируется
 src/api/routers/support.py:146  SUP-5 #508 best-effort: источник корпуса (plans) независим, падение логируется
+src/api/routers/inference.py:577  XP-1 #469: дифф с прошлой моделью опционален — битый _prev-снапшот логируется и отдаёт change=null, факторы текущей модели важнее
