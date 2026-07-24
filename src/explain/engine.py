@@ -41,13 +41,19 @@ _GROUP_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Наличие на складе",
      ("stock", "is_oos", "oos_", "days_since_restock", "stockout_")),
     ("Праздники и события",
-     ("is_holiday", "days_to_holiday", "holidays", "event_ramp")),
+     ("is_holiday", "days_to_holiday", "days_since_holiday",
+      "is_pre_holiday", "is_post_holiday", "holidays", "event_ramp")),
     ("Сезонность и календарь",
      ("dayof", "month", "quarter", "year", "weekofyear", "is_weekend",
       "is_month_", "days_to_payday", "is_payday")),
-    ("Погода", ("temp_", "rain_", "is_cold_day", "is_hot_day", "is_rainy_day")),
+    ("Погода", ("temp_", "rain_", "precipitation", "wind_",
+                "is_cold_day", "is_hot_day", "is_rainy_day")),
     ("Профиль товара", ("category_te", "static_", "sku_te")),
-    ("Рынок", ("market_", "currency", "fx_")),
+    ("Рынок", ("market_", "currency", "fx_",
+               # FE currency selection #94: пары <ccy>_rub_*
+               "usd_rub", "eur_rub", "cny_rub", "byn_rub", "kzt_rub")),
+    # velocity_band — внутренняя сегментация SKU по скорости продаж
+    ("Профиль товара", ("velocity_band",)),
 ]
 _RAMP_SUFFIX = "_ramp"    # ny_ramp, feb23_ramp, mar8_ramp, may1_ramp …
 

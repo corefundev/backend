@@ -61,6 +61,14 @@ def test_every_engineering_feature_has_nonfallback_group():
         "event_ramp", "temp_lag1", "temp_range", "rain_roll7", "is_cold_day",
         "is_hot_day", "is_rainy_day", "category_te", "category_te_fallback",
         "market_total", "market_total_lag_1", "currency", "sku_share_lag_1",
+        # прод-инвентарь 2026-07-23 (модель 82 фичи, run 8eab1347): FX-пары,
+        # расширенная погода, соседние праздничные, velocity_band — эти 21
+        # фича УТЕКАЛИ в «Другое» (13% массы у живого SKU)
+        "precipitation_mm", "wind_speed_max",
+        "days_since_holiday", "is_pre_holiday", "is_post_holiday",
+        "usd_rub_lag_1", "usd_rub_change", "usd_rub_rolling_7",
+        "eur_rub_lag_1", "cny_rub_change", "byn_rub_rolling_7",
+        "kzt_rub_lag_1", "velocity_band",
     ]
     stray = [f for f in inventory if group_of(f) == FALLBACK_GROUP]
     assert not stray, f"фичи без группы: {stray}"
