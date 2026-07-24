@@ -181,7 +181,8 @@ def _forbid_dead_account(client_id: str) -> None:
     аккаунту (воскрешение доступа против воли отозвавшего данные),
     остальные — бессмысленны (доступ уже отрезан навсегда)."""
     rec = get_registry().get(client_id)
-    if rec is not None and (rec.status == "purged" or rec.deleted_at is not None):
+    if rec is not None and (getattr(rec, "status", None) == "purged"
+                            or getattr(rec, "deleted_at", None) is not None):
         raise HTTPException(
             status_code=409,
             detail="Аккаунт закрыт/стёрт — операция недоступна (tombstone)")
