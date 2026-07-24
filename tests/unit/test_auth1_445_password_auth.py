@@ -385,3 +385,27 @@ def test_581_verify_retries_on_cid_race(app_client, monkeypatch):
     assert r2.status_code == 200, r2.text
     assert re.fullmatch(r"[1-9]\d{5,}", r2.json()["client_id"])
     assert calls["n"] >= 2
+
+
+def test_581_contract_no_prod_caller_of_registry_delete():
+    """КОНТРАКТ #581: client_id никогда не переиспользуется — purged-строка
+    реестра = вечный tombstone. Прод-код не имеет права звать
+    ClientRegistry.delete (только тесты). Появился вызов — этот тест
+    заставит осознанно прийти к контракту в issue #581."""
+    import pathlib
+    import re as _re
+    src = pathlib.Path(__file__).resolve().parents[2] / "src"
+    offenders = []
+    for f in src.rglob("*.py"):
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        # ищем вызовы delete на клиентском реестре (не upload-реестрах)
+        for m in _re.finditer(r"(get_registry\(\)|client_registry|registry)\.delete\(", text):
+            line = text[:m.start()].count("\n") + 1
+            snippet = text.splitlines()[line - 1].strip()
+            # реестр загрузок (upload_pipeline) — другой delete, разрешён
+            if "upload" in snippet.lower() or "upload" in f.name.lower():
+                continue
+            offenders.append(f"{f.relative_to(src)}:{line}: {snippet}")
+    assert not offenders, (
+        "ClientRegistry.delete в прод-коде запрещён (контракт #581 — "
+        f"tombstone): {offenders}")
