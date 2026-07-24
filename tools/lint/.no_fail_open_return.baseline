@@ -101,3 +101,4 @@ src/api/routers/support.py:124  SUP-5 #508 best-effort: источник кор�
 src/api/routers/support.py:132  SUP-5 #508 best-effort: источник корпуса (news) независим, падение логируется
 src/api/routers/support.py:146  SUP-5 #508 best-effort: источник корпуса (plans) независим, падение логируется
 src/api/routers/inference.py:577  XP-1 #469: дифф с прошлой моделью опционален — битый _prev-снапшот логируется и отдаёт change=null, факторы текущей модели важнее
+src/api/routers/auth.py:824  #579 carry-over согласия: аккаунт уже создан, след чекбокса шага 1 в аудите есть; сбой дозаписи логируется error'ом, восстановление — ConsentGate при первом входе; регистрацию не роняем
