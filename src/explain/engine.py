@@ -89,7 +89,15 @@ def explain_anchor(model: Any, anchor: pd.DataFrame,
     """
     mimo = _primary_mimo(model)
     feats = list(mimo.feature_cols)
-    X = anchor[feats]
+    # Гард serve-path (inference_utils M4): best-effort фичи (FX при
+    # упавшем фетче ЦБ, погода) могут отсутствовать во фрейме — модель
+    # ждёт колонку. 0.0 = «нет сигнала», как в recursive_forecast;
+    # без гарда KeyError ронял объяснения ВСЕХ SKU (0 rows, 2026-07-23).
+    X = anchor.copy()
+    for c in feats:
+        if c not in X.columns:
+            X[c] = 0.0
+    X = X[feats]
     n_heads = len(mimo.models_)
     if horizon is not None:
         n_heads = max(1, min(n_heads, int(horizon)))
