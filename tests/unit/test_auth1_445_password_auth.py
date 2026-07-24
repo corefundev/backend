@@ -351,3 +351,37 @@ def test_581_collision_retries_and_widens():
 
     cid = _generate_unique_client_id("x@example.com", _FullRegistry())
     assert len(cid) >= 7 and cid.isdigit()
+
+
+def test_581_verify_retries_on_cid_race(app_client, monkeypatch):
+    """#581: конкурент занял выданный на шаге 1 цифровой ID → verify молча
+    перегенерирует и регистрирует, а не роняет пользователя 409-м."""
+    email = "race581@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+
+    import src.api.routers.auth as auth_mod
+    from src.clients.registry import ClientAlreadyExists
+    calls = {"n": 0}
+    real_get_registry = auth_mod.get_registry
+
+    class _RacyRegistry:
+        def __init__(self, inner): self._inner = inner
+        def __getattr__(self, name): return getattr(self._inner, name)
+        def register(self, rec):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ClientAlreadyExists("stolen by concurrent signup")
+            return self._inner.register(rec)
+
+    monkeypatch.setattr(auth_mod, "get_registry",
+                        lambda: _RacyRegistry(real_get_registry()))
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    assert re.fullmatch(r"[1-9]\d{5,}", r2.json()["client_id"])
+    assert calls["n"] >= 2

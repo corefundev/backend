@@ -753,7 +753,27 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     try:
         registry.register(record_)
     except ClientAlreadyExists:
-        raise HTTPException(status_code=409, detail="Email or client_id already in use")
+        # #581: авто-ID (цифровой) выдан на шаге 1, регистрируется здесь —
+        # за минуты между шагами конкурент мог занять то же число. Пользователь
+        # ID не выбирал → молча перегенерировать и повторить, а не 409.
+        # Формат ^[1-9]\d{5,}$ = авто (slug/выбранные руками не матчатся);
+        # email-дубликат даст ClientAlreadyExists и на новом ID → 409 как раньше.
+        import re as _re
+        retried = False
+        if _re.fullmatch(r"[1-9]\d{5,}", desired_cid or ""):
+            for _ in range(3):
+                fresh_cid = _generate_unique_client_id(canonical, registry)
+                record_.client_id = fresh_cid
+                try:
+                    registry.register(record_)
+                    desired_cid = fresh_cid
+                    retried = True
+                    break
+                except ClientAlreadyExists:
+                    continue
+        if not retried:
+            raise HTTPException(
+                status_code=409, detail="Email or client_id already in use")
 
     # record.id was already claimed atomically above (R11-M2); just clear
     # the auxiliary cid/display stashes (gated by that claim → no race).
