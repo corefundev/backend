@@ -778,6 +778,34 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         metadata={"plan": Plan.FREE.value, "method": "email_password"},
     )
 
+    # #579: согласие шага 1 писалось с client_id=None (клиента ещё не
+    # было) — consent-status ищет по РЕАЛЬНОМУ client_id и не находил →
+    # ConsentGate требовал повторного согласия у свежего пользователя.
+    # Теперь, когда клиент существует, дописываем consent-строку с его
+    # id (append-only; строка шага 1 остаётся как след чекбокса).
+    try:
+        from src.storage.legal import get_legal_store
+        _store = get_legal_store()
+        _doc_versions = {}
+        for _d in ("terms", "privacy", "consent"):
+            _doc = _store.get(_d)
+            if _doc is not None:
+                _doc_versions[_d] = _doc.version
+        record_event(
+            event_type=EVT_SIGNUP, event_subtype="consent_accepted",
+            client_id=desired_cid, actor_email=canonical,
+            ip=ip, user_agent=http_req.headers.get("user-agent"),
+            target_type="signup", target_id=desired_cid,
+            metadata={"email": canonical[:254],
+                      "doc_versions": _doc_versions,
+                      "carried_from_signup": True},
+            must_persist=True,
+        )
+    except Exception as e:    # noqa: BLE001 — аккаунт создан; согласие
+        # шага 1 в аудите есть, недописанная строка чинится ре-логином
+        # через ConsentGate; регистрацию не роняем
+        logger.error("signup verify: consent carry-over failed: %s", e)
+
     # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
     return SignupVerifyResponse(
         client_id=desired_cid,

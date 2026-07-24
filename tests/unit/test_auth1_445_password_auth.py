@@ -292,3 +292,34 @@ def test_signup_without_password_rejected(app_client):
         "accepted_terms": True,
     })
     assert r.status_code == 422
+
+
+def test_579_verify_records_consent_with_client_id(app_client, monkeypatch):
+    """#579: после создания клиента verify дописывает consent_accepted
+    С РЕАЛЬНЫМ client_id (шаг 1 писал client_id=None — consent-status не
+    находил запись и требовал повторного согласия у нового юзера)."""
+    import src.api.routers.auth as auth_mod
+    events: list[dict] = []
+    monkeypatch.setattr(auth_mod, "record_event",
+                        lambda **kw: events.append(kw))
+
+    email = "consent579@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    cid = r2.json()["client_id"]
+
+    consents = [e for e in events
+                if e.get("event_subtype") == "consent_accepted"]
+    # шаг 1 (client_id=None) + carry-over на verify (client_id=cid)
+    assert any(e.get("client_id") is None for e in consents)
+    carried = [e for e in consents if e.get("client_id") == cid]
+    assert carried, "verify должен дописать согласие с реальным client_id"
+    assert carried[-1]["metadata"].get("carried_from_signup") is True
+    assert "doc_versions" in carried[-1]["metadata"]
