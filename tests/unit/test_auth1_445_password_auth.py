@@ -323,3 +323,31 @@ def test_579_verify_records_consent_with_client_id(app_client, monkeypatch):
     assert carried, "verify должен дописать согласие с реальным client_id"
     assert carried[-1]["metadata"].get("carried_from_signup") is True
     assert "doc_versions" in carried[-1]["metadata"]
+
+
+def test_581_generated_client_id_is_six_digits(app_client):
+    """#581: авто-ID = 6 цифр (диктуется по телефону однозначно)."""
+    email = "sixdigits@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    cid = r2.json()["client_id"]
+    assert re.fullmatch(r"[1-9]\d{5}", cid), cid
+
+
+def test_581_collision_retries_and_widens():
+    from src.api.routers.auth import _generate_unique_client_id
+
+    class _FullRegistry:
+        """Все 6-значные заняты — генератор обязан расшириться, не зациклиться."""
+        def get(self, cid):
+            return None if len(cid) >= 7 else object()
+
+    cid = _generate_unique_client_id("x@example.com", _FullRegistry())
+    assert len(cid) >= 7 and cid.isdigit()

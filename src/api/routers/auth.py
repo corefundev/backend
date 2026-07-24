@@ -510,7 +510,7 @@ async def auth_signup(req: SignupRequest, http_req: Request):
 
     registry = get_registry()
     if client_id is None:
-        # та же генерация, что у OAuth-пути: слаг из email + уникальность
+        # та же генерация, что у OAuth-пути: 6 цифр + уникальность (#581)
         client_id = _generate_unique_client_id(email, registry)
 
     from src.auth.otp_store import otp_ttl, PURPOSE_SIGNUP
@@ -1324,31 +1324,27 @@ def _frontend_return_url() -> str:
 
 
 def _generate_unique_client_id(seed_email: str, registry) -> str:
-    """
-    Derive a client_id from an email's local part. Sanitize to our
-    allowed alphabet [a-z0-9-], strip leading/trailing dashes, ensure
-    length ≥ 3, and append a numeric suffix on collision.
-    """
-    local = seed_email.split("@", 1)[0].lower()
-    base  = "".join(c if (c.isalnum() or c == "-") else "-" for c in local)
-    base  = base.strip("-") or "user"
-    while "--" in base:
-        base = base.replace("--", "-")
-    if len(base) < 3:
-        base = (base + "user")[:8]
-    if len(base) > 50:
-        base = base[:50]
+    """#581 (решение владельца): client_id = 6 цифр.
 
-    candidate = base
-    suffix = 2
-    while registry.get(candidate) is not None:
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-        if suffix > 999:
-            # Pathological collision — fall back to random.
-            import secrets as _sec
-            candidate = f"{base}-{_sec.token_hex(3)}"
+    Прежний слаг из email («ily-andreevch») на слух в телефонной
+    поддержке — источник недопонимания; 6 цифр диктуются однозначно.
+    Диапазон 100000–999999 (без ведущего нуля — его теряют при
+    диктовке). Криптослучайно, unbiased (`secrets.randbelow`);
+    коллизия → новая попытка; веер коллизий (реестр когда-нибудь
+    заполнится) → честное расширение до 7+ цифр, не бесконечный цикл.
+    `seed_email` больше не участвует — параметр сохранён: сигнатуру
+    делят OAuth-путь и стабы тестов (#183).
+    """
+    import secrets
+    del seed_email    # намеренно: ID больше не выводится из почты
+    digits = 6
+    for attempt in range(200):
+        low = 10 ** (digits - 1)
+        candidate = str(low + secrets.randbelow(9 * low))
+        if registry.get(candidate) is None:
             break
+        if attempt and attempt % 20 == 0:
+            digits += 1    # плотность >90% на разряде — расширяемся
     return candidate
 
 
