@@ -233,12 +233,30 @@ def _load_processed_for_sku(
 # FastAPI runs it in the threadpool instead of blocking the event loop. (Connection
 # pooling is handled by pgbouncer in front of postgres; no app-level pool needed.)
 def _default_dataset_id(client_id: str):
-    """DS-1 #466: дефолтный (первый активный) датасет клиента; None —
-    датасетов нет или реестр недоступен (легаси-чтение без фильтра)."""
+    """DS-1 #466 / #469: дефолтный датасет клиента.
+
+    Приоритет — датасет ПОСЛЕДНЕГО promoted-обучения (там свежие прогнозы
+    и объяснения; «обучил → сразу вижу результат»), фолбэк — первый
+    активный по created_at. Прежний вариант (только created_at) после
+    удаления старого датасета показывал ПУСТУЮ страницу прогнозов при
+    только что успешном обучении соседнего. None — датасетов нет или
+    реестр недоступен (легаси-чтение без фильтра)."""
     try:
         from src.storage.datasets import get_datasets_registry
         ds_rows = get_datasets_registry().list_for_client(client_id)
-        return ds_rows[0].dataset_id if ds_rows else None
+        if not ds_rows:
+            return None
+        active_ids = {r.dataset_id for r in ds_rows}
+        try:
+            from src.storage.training_runs import get_training_runs_registry
+            for run in get_training_runs_registry().list_for_client(
+                    client_id, limit=20):
+                if (run.status == "finished" and run.model_path
+                        and run.dataset_id in active_ids):
+                    return run.dataset_id
+        except Exception as e:    # noqa: BLE001 — фолбэк на created_at
+            logger.warning("default-dataset run lookup failed: %s", e)
+        return ds_rows[0].dataset_id
     except Exception as e:    # noqa: BLE001 — деградация до легаси-чтения
         logger.warning("default-dataset resolve failed: %s", e)
         return None

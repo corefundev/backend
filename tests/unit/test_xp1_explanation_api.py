@@ -141,3 +141,67 @@ def test_prev_without_sku_keeps_change_none(monkeypatch):
     _wire(monkeypatch, plan="business", cur=_cur_frame(), prev=prev)
     out = inf.get_explanation("c1", "S1", auth=_auth())
     assert out["change"] is None
+
+
+# ── #469: дефолтный датасет = последнего promoted-обучения ────────────────
+
+def test_default_dataset_prefers_last_promoted_run(monkeypatch):
+    class _DS:
+        def __init__(self, i): self.dataset_id = i
+
+    class _DsReg:
+        def list_for_client(self, cid):
+            return [_DS("old"), _DS("fresh")]
+
+    class _Run:
+        def __init__(self, status, model_path, ds):
+            self.status, self.model_path, self.dataset_id = status, model_path, ds
+
+    class _RunReg:
+        def list_for_client(self, cid, limit=20):
+            return [_Run("failed", None, "fresh"),
+                    _Run("finished", "s3://m", "fresh"),
+                    _Run("finished", "s3://m", "old")]
+
+    import src.storage.datasets as dsm
+    import src.storage.training_runs as trm
+    monkeypatch.setattr(dsm, "get_datasets_registry", lambda: _DsReg())
+    monkeypatch.setattr(trm, "get_training_runs_registry", lambda: _RunReg())
+    assert inf._default_dataset_id("c1") == "fresh"
+
+
+def test_default_dataset_falls_back_to_created_order(monkeypatch):
+    class _DS:
+        def __init__(self, i): self.dataset_id = i
+
+    class _DsReg:
+        def list_for_client(self, cid): return [_DS("old"), _DS("fresh")]
+
+    class _RunReg:
+        def list_for_client(self, cid, limit=20): return []
+
+    import src.storage.datasets as dsm
+    import src.storage.training_runs as trm
+    monkeypatch.setattr(dsm, "get_datasets_registry", lambda: _DsReg())
+    monkeypatch.setattr(trm, "get_training_runs_registry", lambda: _RunReg())
+    assert inf._default_dataset_id("c1") == "old"
+
+
+def test_default_dataset_ignores_runs_of_deleted_datasets(monkeypatch):
+    class _DS:
+        def __init__(self, i): self.dataset_id = i
+
+    class _DsReg:
+        def list_for_client(self, cid): return [_DS("alive")]
+
+    class _Run:
+        status, model_path, dataset_id = "finished", "s3://m", "deleted-ds"
+
+    class _RunReg:
+        def list_for_client(self, cid, limit=20): return [_Run()]
+
+    import src.storage.datasets as dsm
+    import src.storage.training_runs as trm
+    monkeypatch.setattr(dsm, "get_datasets_registry", lambda: _DsReg())
+    monkeypatch.setattr(trm, "get_training_runs_registry", lambda: _RunReg())
+    assert inf._default_dataset_id("c1") == "alive"
