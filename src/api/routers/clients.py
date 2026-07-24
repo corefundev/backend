@@ -173,6 +173,21 @@ async def register_client(
     }
 
 
+
+def _forbid_dead_account(client_id: str) -> None:
+    """#579/#581: закрытый или стёртый аккаунт — терминальное состояние.
+    Операционные действия (ротация ключа, suspend, revoke) над ним
+    запрещены fail-closed: ротация сминтила бы ЖИВОЙ ключ мёртвому
+    аккаунту (воскрешение доступа против воли отозвавшего данные),
+    остальные — бессмысленны (доступ уже отрезан навсегда)."""
+    rec = get_registry().get(client_id)
+    if rec is not None and (getattr(rec, "status", None) == "purged"
+                            or getattr(rec, "deleted_at", None) is not None):
+        raise HTTPException(
+            status_code=409,
+            detail="Аккаунт закрыт/стёрт — операция недоступна (tombstone)")
+
+
 @router.post("/admin/clients/{client_id}/suspend")
 def admin_suspend_client(
     client_id: str,
@@ -182,6 +197,7 @@ def admin_suspend_client(
     """ADM-10 (#278): operator suspension — denies token issuance and all
     client-scoped access immediately (require_client_access); data intact."""
     auth.require_role("admin")
+    _forbid_dead_account(client_id)
     registry = get_registry()
     record = registry.get(client_id)
     if record is None:
@@ -232,6 +248,7 @@ def admin_revoke_sessions(
     аккаунт (утёкший токен, «выйдите меня со всех устройств»). Дергает тот
     же механизм #357, что suspend/close, но без смены статуса аккаунта."""
     auth.require_role("admin")
+    _forbid_dead_account(client_id)
     record = get_registry().get(client_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -314,6 +331,7 @@ async def rotate_api_key(
     their exp (1h by default).
     """
     require_client_access(client_id, auth)
+    _forbid_dead_account(client_id)
 
     # Audit R3-24 — per-client rate-limit so a compromised key or a
     # misbehaving script can't spam rotations (each call burns bcrypt
