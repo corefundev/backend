@@ -201,3 +201,18 @@ def test_save_explanations_rotates_prev(tmp_path, monkeypatch):
     assert storage.explanations_prev_exist()
     assert storage.load_explanations()["contribution"].iloc[0] == 2.0
     assert storage.load_explanations_prev()["contribution"].iloc[0] == 1.0
+
+
+def test_explain_survives_missing_besteffort_columns():
+    """FX/погода — best-effort: их колонки могут отсутствовать во фрейме
+    сервинга (упавший фетч ЦБ). Движок заполняет 0.0 (идиома serve-path),
+    а не роняет все SKU KeyError'ом — регресс 2026-07-23 (0 rows)."""
+    _lgb_or_skip()
+    from src.explain import explain_anchor
+    m, df = _fit_mimo("regression")
+    anchor = (df[df["sku"] == "S1"].sort_values("date").iloc[[-1]]
+              .drop(columns=["price_change"]))    # симулируем пропавшую фичу
+    ex = explain_anchor(m, anchor)
+    assert ex["heads"] == 3
+    assert ex["prediction"] >= 0
+    assert "Цена" in ex["groups"]                 # группа есть, вклад ≈ 0
