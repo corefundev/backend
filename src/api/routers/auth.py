@@ -510,7 +510,7 @@ async def auth_signup(req: SignupRequest, http_req: Request):
 
     registry = get_registry()
     if client_id is None:
-        # та же генерация, что у OAuth-пути: слаг из email + уникальность
+        # та же генерация, что у OAuth-пути: 6 цифр + уникальность (#581)
         client_id = _generate_unique_client_id(email, registry)
 
     from src.auth.otp_store import otp_ttl, PURPOSE_SIGNUP
@@ -753,7 +753,27 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
     try:
         registry.register(record_)
     except ClientAlreadyExists:
-        raise HTTPException(status_code=409, detail="Email or client_id already in use")
+        # #581: авто-ID (цифровой) выдан на шаге 1, регистрируется здесь —
+        # за минуты между шагами конкурент мог занять то же число. Пользователь
+        # ID не выбирал → молча перегенерировать и повторить, а не 409.
+        # Формат ^[1-9]\d{5,}$ = авто (slug/выбранные руками не матчатся);
+        # email-дубликат даст ClientAlreadyExists и на новом ID → 409 как раньше.
+        import re as _re
+        retried = False
+        if _re.fullmatch(r"[1-9]\d{5,}", desired_cid or ""):
+            for _ in range(3):
+                fresh_cid = _generate_unique_client_id(canonical, registry)
+                record_.client_id = fresh_cid
+                try:
+                    registry.register(record_)
+                    desired_cid = fresh_cid
+                    retried = True
+                    break
+                except ClientAlreadyExists:
+                    continue
+        if not retried:
+            raise HTTPException(
+                status_code=409, detail="Email or client_id already in use")
 
     # record.id was already claimed atomically above (R11-M2); just clear
     # the auxiliary cid/display stashes (gated by that claim → no race).
@@ -777,6 +797,34 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
         ip=ip, user_agent=http_req.headers.get("user-agent"),
         metadata={"plan": Plan.FREE.value, "method": "email_password"},
     )
+
+    # #579: согласие шага 1 писалось с client_id=None (клиента ещё не
+    # было) — consent-status ищет по РЕАЛЬНОМУ client_id и не находил →
+    # ConsentGate требовал повторного согласия у свежего пользователя.
+    # Теперь, когда клиент существует, дописываем consent-строку с его
+    # id (append-only; строка шага 1 остаётся как след чекбокса).
+    try:
+        from src.storage.legal import get_legal_store
+        _store = get_legal_store()
+        _doc_versions = {}
+        for _d in ("terms", "privacy", "consent"):
+            _doc = _store.get(_d)
+            if _doc is not None:
+                _doc_versions[_d] = _doc.version
+        record_event(
+            event_type=EVT_SIGNUP, event_subtype="consent_accepted",
+            client_id=desired_cid, actor_email=canonical,
+            ip=ip, user_agent=http_req.headers.get("user-agent"),
+            target_type="signup", target_id=desired_cid,
+            metadata={"email": canonical[:254],
+                      "doc_versions": _doc_versions,
+                      "carried_from_signup": True},
+            must_persist=True,
+        )
+    except Exception as e:    # noqa: BLE001 — аккаунт создан; согласие
+        # шага 1 в аудите есть, недописанная строка чинится ре-логином
+        # через ConsentGate; регистрацию не роняем
+        logger.error("signup verify: consent carry-over failed: %s", e)
 
     # Почта подтверждена; сессию НЕ выдаём — дальше вход паролем.
     return SignupVerifyResponse(
@@ -1296,31 +1344,27 @@ def _frontend_return_url() -> str:
 
 
 def _generate_unique_client_id(seed_email: str, registry) -> str:
-    """
-    Derive a client_id from an email's local part. Sanitize to our
-    allowed alphabet [a-z0-9-], strip leading/trailing dashes, ensure
-    length ≥ 3, and append a numeric suffix on collision.
-    """
-    local = seed_email.split("@", 1)[0].lower()
-    base  = "".join(c if (c.isalnum() or c == "-") else "-" for c in local)
-    base  = base.strip("-") or "user"
-    while "--" in base:
-        base = base.replace("--", "-")
-    if len(base) < 3:
-        base = (base + "user")[:8]
-    if len(base) > 50:
-        base = base[:50]
+    """#581 (решение владельца): client_id = 6 цифр.
 
-    candidate = base
-    suffix = 2
-    while registry.get(candidate) is not None:
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-        if suffix > 999:
-            # Pathological collision — fall back to random.
-            import secrets as _sec
-            candidate = f"{base}-{_sec.token_hex(3)}"
+    Прежний слаг из email («ily-andreevch») на слух в телефонной
+    поддержке — источник недопонимания; 6 цифр диктуются однозначно.
+    Диапазон 100000–999999 (без ведущего нуля — его теряют при
+    диктовке). Криптослучайно, unbiased (`secrets.randbelow`);
+    коллизия → новая попытка; веер коллизий (реестр когда-нибудь
+    заполнится) → честное расширение до 7+ цифр, не бесконечный цикл.
+    `seed_email` больше не участвует — параметр сохранён: сигнатуру
+    делят OAuth-путь и стабы тестов (#183).
+    """
+    import secrets
+    del seed_email    # намеренно: ID больше не выводится из почты
+    digits = 6
+    for attempt in range(200):
+        low = 10 ** (digits - 1)
+        candidate = str(low + secrets.randbelow(9 * low))
+        if registry.get(candidate) is None:
             break
+        if attempt and attempt % 20 == 0:
+            digits += 1    # плотность >90% на разряде — расширяемся
     return candidate
 
 

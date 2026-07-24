@@ -292,3 +292,120 @@ def test_signup_without_password_rejected(app_client):
         "accepted_terms": True,
     })
     assert r.status_code == 422
+
+
+def test_579_verify_records_consent_with_client_id(app_client, monkeypatch):
+    """#579: после создания клиента verify дописывает consent_accepted
+    С РЕАЛЬНЫМ client_id (шаг 1 писал client_id=None — consent-status не
+    находил запись и требовал повторного согласия у нового юзера)."""
+    import src.api.routers.auth as auth_mod
+    events: list[dict] = []
+    monkeypatch.setattr(auth_mod, "record_event",
+                        lambda **kw: events.append(kw))
+
+    email = "consent579@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    cid = r2.json()["client_id"]
+
+    consents = [e for e in events
+                if e.get("event_subtype") == "consent_accepted"]
+    # шаг 1 (client_id=None) + carry-over на verify (client_id=cid)
+    assert any(e.get("client_id") is None for e in consents)
+    carried = [e for e in consents if e.get("client_id") == cid]
+    assert carried, "verify должен дописать согласие с реальным client_id"
+    assert carried[-1]["metadata"].get("carried_from_signup") is True
+    assert "doc_versions" in carried[-1]["metadata"]
+
+
+def test_581_generated_client_id_is_six_digits(app_client):
+    """#581: авто-ID = 6 цифр (диктуется по телефону однозначно)."""
+    email = "sixdigits@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    cid = r2.json()["client_id"]
+    assert re.fullmatch(r"[1-9]\d{5}", cid), cid
+
+
+def test_581_collision_retries_and_widens():
+    from src.api.routers.auth import _generate_unique_client_id
+
+    class _FullRegistry:
+        """Все 6-значные заняты — генератор обязан расшириться, не зациклиться."""
+        def get(self, cid):
+            return None if len(cid) >= 7 else object()
+
+    cid = _generate_unique_client_id("x@example.com", _FullRegistry())
+    assert len(cid) >= 7 and cid.isdigit()
+
+
+def test_581_verify_retries_on_cid_race(app_client, monkeypatch):
+    """#581: конкурент занял выданный на шаге 1 цифровой ID → verify молча
+    перегенерирует и регистрирует, а не роняет пользователя 409-м."""
+    email = "race581@example.com"
+    r = app_client.post("/auth/signup", json={
+        "email": email, "password": "correct-horse-battery",
+        "accepted_terms": True,
+    })
+    assert r.status_code == 200, r.text
+    code = _extract_code(app_client.sent_mail[-1]["body"])
+
+    import src.api.routers.auth as auth_mod
+    from src.clients.registry import ClientAlreadyExists
+    calls = {"n": 0}
+    real_get_registry = auth_mod.get_registry
+
+    class _RacyRegistry:
+        def __init__(self, inner): self._inner = inner
+        def __getattr__(self, name): return getattr(self._inner, name)
+        def register(self, rec):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ClientAlreadyExists("stolen by concurrent signup")
+            return self._inner.register(rec)
+
+    monkeypatch.setattr(auth_mod, "get_registry",
+                        lambda: _RacyRegistry(real_get_registry()))
+    r2 = app_client.post("/auth/signup/verify",
+                         json={"email": email, "code": code})
+    assert r2.status_code == 200, r2.text
+    assert re.fullmatch(r"[1-9]\d{5,}", r2.json()["client_id"])
+    assert calls["n"] >= 2
+
+
+def test_581_contract_no_prod_caller_of_registry_delete():
+    """КОНТРАКТ #581: client_id никогда не переиспользуется — purged-строка
+    реестра = вечный tombstone. Прод-код не имеет права звать
+    ClientRegistry.delete (только тесты). Появился вызов — этот тест
+    заставит осознанно прийти к контракту в issue #581."""
+    import pathlib
+    import re as _re
+    src = pathlib.Path(__file__).resolve().parents[2] / "src"
+    offenders = []
+    for f in src.rglob("*.py"):
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        # ищем вызовы delete на клиентском реестре (не upload-реестрах)
+        for m in _re.finditer(r"(get_registry\(\)|client_registry|registry)\.delete\(", text):
+            line = text[:m.start()].count("\n") + 1
+            snippet = text.splitlines()[line - 1].strip()
+            # реестр загрузок (upload_pipeline) — другой delete, разрешён
+            if "upload" in snippet.lower() or "upload" in f.name.lower():
+                continue
+            offenders.append(f"{f.relative_to(src)}:{line}: {snippet}")
+    assert not offenders, (
+        "ClientRegistry.delete в прод-коде запрещён (контракт #581 — "
+        f"tombstone): {offenders}")
