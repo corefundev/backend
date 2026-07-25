@@ -157,6 +157,22 @@ class PostgresNotificationsRegistry:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
+    def get_for_client(self, client_id: str, notification_id: int):
+        """NC-9 #584: одно уведомление. Tenant-scoped: чужой id → None
+        (роутер отдаёт 404 — не раскрываем существование чужих id)."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, type, severity, title, body, created_at, read_at
+                    FROM sku_notifications
+                    WHERE client_id = %s AND id = %s
+                    """,
+                    (client_id, notification_id),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
     def unread_count(self, client_id: str) -> int:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(

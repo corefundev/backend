@@ -199,6 +199,29 @@ def list_notifications(
     return {"notifications": items, "count": len(items), "unread": unread}
 
 
+@router.get("/clients/{client_id}/notifications/{notification_id}")
+def get_notification(
+    client_id: str,
+    notification_id: int,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """NC-9 #584 v2: одно уведомление — своя страница «как новость».
+    Чужой/несуществующий id → 404 (одинаково, без утечки существования)."""
+    require_client_access(client_id, auth)
+    from src.storage.notifications import get_notifications_registry
+    try:
+        item = get_notifications_registry().get_for_client(
+            client_id, notification_id)
+    except Exception as e:    # noqa: BLE001 — CONTRACT-1: сбой ≠ «нет такого»
+        logger.warning("notification get failed: %s", e)
+        raise HTTPException(
+            503, detail="notifications temporarily unavailable"
+        ) from e
+    if item is None:
+        raise HTTPException(404, detail="Уведомление не найдено")
+    return item
+
+
 @router.post("/clients/{client_id}/notifications/read")
 def mark_notifications_read(
     client_id: str,
