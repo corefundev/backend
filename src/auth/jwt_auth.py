@@ -199,6 +199,34 @@ def create_access_token(client_id: str, roles: list[str] | None = None) -> str:
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def create_twofa_challenge_token(client_id: str) -> str:
+    """2FA-1 #587: короткоживущий (5 мин) токен «пароль прошёл, ждём
+    код». roles пуст + claim twofa=challenge; get_current_client такие
+    отвергает — сессией он стать не может, только /auth/2fa/verify."""
+    try:
+        import jwt as pyjwt
+    except ImportError:
+        raise RuntimeError("PyJWT not installed: pip install PyJWT")
+    import uuid
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": client_id, "client_id": client_id, "roles": [],
+        "twofa": "challenge",
+        "iat": now, "exp": now + timedelta(minutes=5),
+        "jti": uuid.uuid4().hex, "iss": JWT_ISSUER, "aud": JWT_AUDIENCE,
+    }
+    _ensure_secrets_loaded()
+    return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_twofa_challenge(token: str) -> str:
+    """client_id из живого challenge-токена; всё остальное → 401."""
+    payload = decode_access_token(token)
+    if payload.get("twofa") != "challenge":
+        raise HTTPException(status_code=401, detail="Не challenge-токен")
+    return payload.get("client_id") or payload.get("sub")
+
+
 def decode_access_token(token: str) -> dict:
     """Decode and validate a JWT. Raises HTTPException on failure.
 
@@ -602,6 +630,13 @@ async def get_current_client(
     if credentials:
         try:
             payload = decode_access_token(credentials.credentials)
+            # 2FA-1 #587 slice B: challenge-токен (пароль прошёл, код ещё
+            # нет) — НЕ сессия; без этого гарда он проходил бы как
+            # полноценный JWT с client_id (fail-closed)
+            if payload.get("twofa") == "challenge":
+                raise HTTPException(
+                    status_code=401,
+                    detail="Завершите вход: требуется код подтверждения")
             return AuthContext(
                 client_id   = payload.get("client_id", payload.get("sub", "unknown")),
                 roles       = payload.get("roles", ["forecast"]),

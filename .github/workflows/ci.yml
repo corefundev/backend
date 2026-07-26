@@ -26,33 +26,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install flake8
-      - run: |
-          # Style choice: this codebase column-aligns assignments,
-          # function-arg defaults, and dataclass fields — flake8 flags
-          # all of those as "multiple spaces" (E221/E251/E272). The
-          # alignment is intentional; ignoring those rules preserves
-          # the style.
-          # E402: module-level import below other code (used for
-          # vault_agent bootstrap that runs first).
-          # E301/E302/E303/E305: blank-line count rules — visually
-          # noisy, no semantic effect.
-          # E731: lambda assignment — sometimes intentional for terse
-          # callable factories.
-          # E401: multiple imports on one line — minor.
-          # E131/E127/E128: continuation-line indentation — complex
-          # to satisfy, no semantic effect.
-          # E261: comment-space — minor.
-          # F541: f-string without placeholders — sometimes used for
-          # uniform formatting in error templates.
-          # F401 (unused imports) and F841 (unused vars) STAY enforced
-          # — they catch real dead code.
-          # tests/ is linted with the SAME ignore set as src/ (QW2-B6
-          # #233) — the src-only scope let dead imports accumulate in
-          # tests (found twice during the quality campaign).
-          flake8 src/ tests/ \
-            --max-line-length=100 \
-            --extend-ignore=E203,W503,E501,E221,E251,E272,E402,E301,E302,E303,E305,E306,E731,E401,E131,E127,E128,E261,E222,E225,E231,E741,F541 \
-            --exclude=__pycache__,.venv
+      # Профиль линта — ЕДИНЫЙ источник в tools/ci/flake8.sh (его же
+      # гоняем локально перед пушем; дрейф двух копий уже бил CI — #589)
+      - run: bash tools/ci/flake8.sh
 
   # ── 1b. Lint (NFOR — no-fail-open-return) ────────────────
   # Custom AST linter that detects the exception-swallow → fail-open

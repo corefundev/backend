@@ -180,3 +180,121 @@ def test_registry_or_503_fail_closed(monkeypatch):
         tf._registry_or_503()
     assert e.value.status_code == 503
     twofa_mod.reset_for_tests()
+
+
+# ── slice B: challenge-токены и enforcement ──────────────────────────────
+
+def _jwt_env(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET_KEY", "unit-test-jwt-secret-key-0123456789abcdef")
+    monkeypatch.setenv("API_KEY", "unit-test-api-key-0123456789abcdef")
+    # секреты кэшируются модульно — сброс между тестами
+    import src.auth.jwt_auth as ja
+    if hasattr(ja, "reset_secrets_for_tests"):
+        ja.reset_secrets_for_tests()
+
+
+def test_challenge_token_is_not_a_session(monkeypatch):
+    """КОНТРАКТ #587: challenge (пароль прошёл, кода нет) не проходит
+    как сессия — get_current_client отвергает 401."""
+    _jwt_env(monkeypatch)
+    import asyncio
+    from src.auth.jwt_auth import (
+        create_twofa_challenge_token, decode_twofa_challenge, get_current_client)
+
+    tok = create_twofa_challenge_token("c1")
+    assert decode_twofa_challenge(tok) == "c1"
+
+    class _Cred:
+        credentials = tok
+        scheme = "Bearer"
+    with pytest.raises(HTTPException) as e:
+        asyncio.get_event_loop().run_until_complete(
+            get_current_client(credentials=_Cred(), api_key=None, cf_access=None))
+    assert e.value.status_code == 401
+
+
+def test_ordinary_token_is_not_a_challenge(monkeypatch):
+    _jwt_env(monkeypatch)
+    from src.auth.jwt_auth import create_access_token, decode_twofa_challenge
+    with pytest.raises(HTTPException) as e:
+        decode_twofa_challenge(create_access_token("c1"))
+    assert e.value.status_code == 401
+
+
+def test_login_returns_challenge_when_protected(monkeypatch):
+    """Пароль ок + 2FA включена → twofa_required, БЕЗ access_token и куки."""
+    _jwt_env(monkeypatch)
+    import src.api.routers.auth as am
+    import src.auth.twofa as twofa_mod
+
+    class _FakeReg2FA:
+        def status(self, cid):
+            return TwoFAStatus(True, False, False, 9)
+    monkeypatch.setattr(twofa_mod, "get_twofa_registry", lambda: _FakeReg2FA())
+
+    class _Rec:
+        client_id = "c1"
+        email = "u@example.com"
+        email_verified_at = "x"
+        deleted_at = None
+        suspended_at = None
+        password_hash = "$stub$"
+        status = "ready"
+    class _Reg:
+        def get_by_email(self, e): return _Rec()
+    monkeypatch.setattr(am, "get_registry", lambda: _Reg())
+    monkeypatch.setattr(am, "check_login_attempt", lambda ip: None)
+    monkeypatch.setattr(am, "_captcha_after_fails_or_400", lambda *a: None)
+    monkeypatch.setattr(am, "_assert_not_locked_out", lambda *a, **k: None)
+    monkeypatch.setattr(am, "record_event", lambda **k: None)
+    monkeypatch.setattr(am, "record_login_failure", lambda *a: None)
+    monkeypatch.setattr("src.auth.passwords.verify_password", lambda p, h: True)
+
+    class _Resp:
+        def set_cookie(self, *a, **k): raise AssertionError("кука до 2FA запрещена")
+        def delete_cookie(self, *a, **k): pass
+    out = am.auth_login_password(
+        am.LoginPasswordRequest(email="u@example.com", password="x" * 12),
+        _Req(), _Resp())
+    assert out.twofa_required is True
+    assert out.access_token == ""
+    assert out.challenge
+    assert out.twofa_methods == ["totp", "backup"]
+
+
+def test_login_fail_closed_when_2fa_status_unreadable(monkeypatch):
+    """КОНТРАКТ #587: сбой чтения 2FA-настроек = 503, не «пропустить»."""
+    _jwt_env(monkeypatch)
+    import src.api.routers.auth as am
+    import src.auth.twofa as twofa_mod
+
+    class _Boom:
+        def status(self, cid): raise RuntimeError("db down")
+    monkeypatch.setattr(twofa_mod, "get_twofa_registry", lambda: _Boom())
+
+    class _Rec:
+        client_id = "c1"
+        email = "u@example.com"
+        email_verified_at = "x"
+        deleted_at = None
+        suspended_at = None
+        password_hash = "$stub$"
+        status = "ready"
+    class _Reg:
+        def get_by_email(self, e): return _Rec()
+    monkeypatch.setattr(am, "get_registry", lambda: _Reg())
+    monkeypatch.setattr(am, "check_login_attempt", lambda ip: None)
+    monkeypatch.setattr(am, "_captcha_after_fails_or_400", lambda *a: None)
+    monkeypatch.setattr(am, "_assert_not_locked_out", lambda *a, **k: None)
+    monkeypatch.setattr(am, "record_event", lambda **k: None)
+    monkeypatch.setattr(am, "record_login_failure", lambda *a: None)
+    monkeypatch.setattr("src.auth.passwords.verify_password", lambda p, h: True)
+
+    class _Resp:
+        def set_cookie(self, *a, **k): pass
+        def delete_cookie(self, *a, **k): pass
+    with pytest.raises(HTTPException) as e:
+        am.auth_login_password(
+            am.LoginPasswordRequest(email="u@example.com", password="x" * 12),
+            _Req(), _Resp())
+    assert e.value.status_code == 503
