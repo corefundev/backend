@@ -233,8 +233,12 @@ def test_login_returns_challenge_when_protected(monkeypatch):
     monkeypatch.setattr(twofa_mod, "get_twofa_registry", lambda: _FakeReg2FA())
 
     class _Rec:
-        client_id = "c1"; email = "u@example.com"; email_verified_at = "x"
-        deleted_at = None; suspended_at = None; password_hash = "$stub$"
+        client_id = "c1"
+        email = "u@example.com"
+        email_verified_at = "x"
+        deleted_at = None
+        suspended_at = None
+        password_hash = "$stub$"
         status = "ready"
     class _Reg:
         def get_by_email(self, e): return _Rec()
@@ -269,8 +273,12 @@ def test_login_fail_closed_when_2fa_status_unreadable(monkeypatch):
     monkeypatch.setattr(twofa_mod, "get_twofa_registry", lambda: _Boom())
 
     class _Rec:
-        client_id = "c1"; email = "u@example.com"; email_verified_at = "x"
-        deleted_at = None; suspended_at = None; password_hash = "$stub$"
+        client_id = "c1"
+        email = "u@example.com"
+        email_verified_at = "x"
+        deleted_at = None
+        suspended_at = None
+        password_hash = "$stub$"
         status = "ready"
     class _Reg:
         def get_by_email(self, e): return _Rec()
