@@ -837,8 +837,13 @@ async def auth_signup_verify(req: VerifyOtpRequest, http_req: Request):
 
 class LoginVerifyResponse(BaseModel):
     client_id:    str
-    access_token: str
+    # 2FA-1 #587: при включённой 2FA пароль даёт НЕ сессию, а challenge —
+    # access_token тогда пуст, twofa_required=True
+    access_token: str = ""
     token_type:   str = "bearer"
+    twofa_required: bool = False
+    twofa_methods: list[str] = []
+    challenge: Optional[str] = None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -996,6 +1001,36 @@ def auth_login_password(req: LoginPasswordRequest, http_req: Request,
     # AUD-5 #357: единый гейт состояния аккаунта ПЕРЕД выдачей токена
     from src.auth.jwt_auth import assert_account_open
     assert_account_open(rec)
+
+    # ── 2FA-1 #587 slice B: включена 2FA → пароль даёт challenge, не сессию.
+    # Граница fail-closed: подсистема НЕ СКОНФИГУРИРОВАНА (dev/file-registry,
+    # нет DSN/ключа) = фича выключена, вход обычный; сконфигурирована, но
+    # чтение УПАЛО (БД лежит) = 503 — «пропустить без кода» недопустимо.
+    from src.auth.twofa import TwoFAUnavailable, get_twofa_registry
+    _tfa = None
+    try:
+        _tfa = get_twofa_registry().status(rec.client_id)
+    except TwoFAUnavailable:
+        logger.info("2fa subsystem not configured — feature off for login")
+    except Exception as e:    # noqa: BLE001 — контракт эпика: fail-closed
+        logger.error("2fa status read failed on login: %s", e)
+        LOGIN_PASSWORD_COUNT.labels(outcome="fail").inc()
+        raise HTTPException(503, detail="Вход временно недоступен — попробуйте ещё раз")
+    if _tfa is not None and _tfa.protected:
+        from src.auth.jwt_auth import create_twofa_challenge_token
+        methods = (["totp"] if _tfa.totp_enabled else []) \
+            + (["email"] if _tfa.email_enabled else []) \
+            + (["backup"] if _tfa.backup_left > 0 else [])
+        record_event(
+            event_type=EVT_LOGIN, event_subtype="twofa_challenge",
+            actor_email=canonical, client_id=rec.client_id,
+            ip=_ip, user_agent=_ua, metadata={"methods": methods},
+        )
+        LOGIN_PASSWORD_COUNT.labels(outcome="ok").inc()
+        return LoginVerifyResponse(
+            client_id=rec.client_id, twofa_required=True,
+            twofa_methods=methods,
+            challenge=create_twofa_challenge_token(rec.client_id))
 
     LOGIN_PASSWORD_COUNT.labels(outcome="ok").inc()
     record_event(
@@ -1749,3 +1784,118 @@ async def auth_re_consent(
             detail="Не удалось зафиксировать согласие — попробуйте ещё раз",
         ) from e
     return {"ok": True, "doc_versions": versions}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 2FA-1 #587 slice B — завершение входа кодом
+# ══════════════════════════════════════════════════════════════════
+
+PURPOSE_TWOFA = "twofa"
+
+
+class TwoFAVerifyRequest(BaseModel):
+    challenge: str
+    code: str = Field(min_length=6, max_length=16)
+
+
+class TwoFAEmailCodeRequest(BaseModel):
+    challenge: str
+
+
+@router.post("/auth/2fa/email-code")
+def auth_twofa_email_code(req: TwoFAEmailCodeRequest, http_req: Request):
+    """Выслать одноразовый код на почту аккаунта (способ «письмо»).
+    Требует живой challenge (пароль уже прошёл); та же OTP-инфра, что
+    signup: TTL, hash-хранение, rate-limit подсети."""
+    from src.auth.jwt_auth import decode_twofa_challenge
+    from src.auth.twofa import get_twofa_registry
+
+    _ip = client_ip(http_req)
+    try:
+        check_otp_verify_attempt(_ip or "unknown")
+    except RateLimited as e:
+        raise HTTPException(429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_sec or 60)})
+    client_id = decode_twofa_challenge(req.challenge)
+    tfa = get_twofa_registry().status(client_id)
+    if not tfa.email_enabled:
+        raise HTTPException(409, detail="Способ «письмо на почту» не включён")
+    rec = get_registry().get(client_id)
+    if rec is None or not rec.email:
+        raise HTTPException(409, detail="У аккаунта нет подтверждённой почты")
+
+    from src.auth.email_sender import EmailDeliveryError, get_email_sender, render_otp_email
+    from src.auth.otp import generate_otp, hash_otp
+    from src.auth.otp_store import get_otp_store, otp_ttl
+
+    code = generate_otp()
+    get_otp_store().create(email=rec.email, purpose=PURPOSE_TWOFA,
+                           code_hash=hash_otp(code))
+    subject, body, html = render_otp_email(
+        code=code, purpose="входа",
+        ttl_minutes=int(otp_ttl().total_seconds() / 60))
+    try:
+        get_email_sender().send(to=rec.email, subject=subject, body=body, html=html)
+    except EmailDeliveryError as e:
+        logger.error("2fa email send failed: %s", e)
+        raise HTTPException(502, detail="Не удалось отправить письмо — попробуйте ещё раз")
+    record_event(event_type=EVT_LOGIN, event_subtype="twofa_email_sent",
+                 client_id=client_id, ip=_ip,
+                 user_agent=http_req.headers.get("user-agent"))
+    return {"sent": True}
+
+
+@router.post("/auth/2fa/verify", response_model=LoginVerifyResponse)
+def auth_twofa_verify(req: TwoFAVerifyRequest, http_req: Request,
+                      response: Response):
+    """Обмен challenge + код → полноценная сессия (JWT + refresh-кука).
+    Порядок проверки: TOTP → резервный код → email-код. Провал — один
+    generic 403 (какой способ не подошёл — не раскрываем); попытки под
+    per-подсеточным rate-limit."""
+    from src.auth.jwt_auth import decode_twofa_challenge
+    from src.auth.otp import verify_otp as _verify_email_otp
+    from src.auth.otp_store import get_otp_store
+    from src.auth.twofa import get_twofa_registry, verify_totp
+
+    _ip = client_ip(http_req)
+    _ua = http_req.headers.get("user-agent")
+    try:
+        check_otp_verify_attempt(_ip or "unknown")
+    except RateLimited as e:
+        raise HTTPException(429, detail=str(e),
+                            headers={"Retry-After": str(e.retry_after_sec or 60)})
+    client_id = decode_twofa_challenge(req.challenge)
+    reg = get_twofa_registry()
+
+    via = None
+    secret = reg.totp_secret(client_id)
+    if secret and verify_totp(secret, req.code):
+        via = "totp"
+    elif reg.consume_backup_code(client_id, req.code):
+        via = "backup_code"
+    else:
+        rec0 = get_registry().get(client_id)
+        if rec0 is not None and rec0.email and reg.status(client_id).email_enabled:
+            store = get_otp_store()
+            row = store.find_active(rec0.email, PURPOSE_TWOFA)
+            if row is not None and _verify_email_otp(req.code, row.code_hash):
+                store.mark_used(row.id)
+                via = "email"
+    if via is None:
+        record_event(event_type=EVT_LOGIN, event_subtype="twofa_failure",
+                     client_id=client_id, ip=_ip, user_agent=_ua, success=False)
+        raise HTTPException(403, detail="Код не подошёл")
+
+    rec = get_registry().get(client_id)
+    if rec is None:
+        raise HTTPException(401, detail="Аккаунт не найден")
+    from src.auth.jwt_auth import assert_account_open
+    assert_account_open(rec)
+
+    record_event(event_type=EVT_LOGIN, event_subtype="success",
+                 client_id=client_id, ip=_ip, user_agent=_ua,
+                 metadata={"method": f"password+{via}"})
+    token = create_access_token(client_id=client_id, roles=["forecast"])
+    from src.auth.refresh_tokens import get_refresh_store
+    _set_refresh_cookie(response, get_refresh_store().issue(client_id))
+    return LoginVerifyResponse(client_id=client_id, access_token=token)
