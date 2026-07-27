@@ -23,7 +23,7 @@ from src.auth.jwt_auth import AuthContext
 from src.clients.registry import ClientRecord
 
 
-_SENSITIVE = ("api_key_hash", "email_canonical", "oauth_subject")
+_SENSITIVE = ("api_key_hash", "email_canonical", "oauth_subject", "password_hash")
 
 
 def test_safe_field_allowlist_excludes_credentials():
