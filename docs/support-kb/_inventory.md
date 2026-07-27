@@ -16,19 +16,7 @@
 | general--bezopasnost-i-vashi-dannye.md | Ваши данные в Sprosly: хранение, изоляция, экспорт и удаление | general | backend:src/api/routers/clients.py (export/close), src/pipeline/pii_purge.py, help:bezopasnost-dannyh | 2097 |
 | general--chto-takoe-sprosly.md | Sprosly: что это, какие задачи решает и чем отличается подход | general | frontend:LandingPage.tsx + backend:src/plans/plans.py + docs/design/cabinet-v2 | 2400 |
 | general--domeny-i-dostup.md | Адреса Sprosly: сайт, кабинет, новости, база знаний — и как устроен вход | general | frontend:src/shared/hostRouting.ts, backend:src/auth/* | 1171 |
-| general--glossarij-dataset.md | Глоссарий: Датасет | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 612 |
-| general--glossarij-gorizont-prognoza.md | Глоссарий: Горизонт прогноза | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 563 |
-| general--glossarij-naivnyj-prognoz.md | Глоссарий: Наивный прогноз | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 649 |
-| general--glossarij-obuchenie-modeli.md | Глоссарий: Обучение модели | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 732 |
-| general--glossarij-p10-p90.md | Глоссарий: Диапазон p10–p90 | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 684 |
-| general--glossarij-podgotovka-dannyh.md | Глоссарий: Подготовка данных | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 747 |
-| general--glossarij-rekomenduemyj-zakaz.md | Глоссарий: Рекомендуемый заказ | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 642 |
-| general--glossarij-sku.md | Глоссарий: SKU | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 662 |
-| general--glossarij-sliyanie-fajlov.md | Глоссарий: Слияние файлов («новый файл побеждает») | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 737 |
-| general--glossarij-strahovoj-zapas.md | Глоссарий: Страховой запас | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 655 |
-| general--glossarij-tochnost-dlya-zakaza.md | Глоссарий: Точность для заказа | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 697 |
-| general--glossarij-uroven-servisa.md | Глоссарий: Уровень сервиса | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 700 |
-| general--glossarij-versiya-dannyh.md | Глоссарий: Версия данных | general | backend:src/plans/plans.py, src/datasets/merge.py, src/api/routers/*, help-центр | 653 |
+| general--glossarij.md | Глоссарий Sprosly: все термины простыми словами | general | объединение 13 заметок + фронтенд/бэкенд (см. front-matter) | 28795 |
 | general--kak-chto-proishodit-posle-zagruzki.md | Что происходит с файлом после загрузки: статусы | general | backend:src/storage/upload_pipeline.py | 1169 |
 | general--kak-dokladka-i-pereobuchenie.md | Как докладывать свежие данные и переобучать модель | general | backend:src/datasets/merge.py, datasets.py | 966 |
 | general--kak-nastrojka-urovnya-servisa.md | Как настроить уровень сервиса | general | backend:inference.py (order-recommendations), docs/design/cabinet-v2 | 766 |
