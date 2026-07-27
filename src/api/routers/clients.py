@@ -102,7 +102,11 @@ def _client_to_safe_dict(rec) -> dict:
     fields from this set; api_key_hash / oauth_subject / email_canonical
     were never user-facing — they were just incidentally serialised by
     `rec.__dict__`."""
-    return {k: v for k, v in rec.__dict__.items() if k in _CLIENT_SAFE_FIELDS}
+    safe = {k: v for k, v in rec.__dict__.items() if k in _CLIENT_SAFE_FIELDS}
+    # производный флаг для «Способ входа» в кабинете (#472): сам хеш
+    # никогда не покидает реестр
+    safe["has_password"] = bool(getattr(rec, "password_hash", None))
+    return safe
 
 
 @router.post("/clients", status_code=201)
