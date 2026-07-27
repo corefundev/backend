@@ -28,15 +28,22 @@ services:
     image: ghcr.io/ggml-org/llama.cpp:server
     container_name: supbot-llm
     restart: unless-stopped
+    # #592: -c 8192 давал KV-кэш ~1.8ГБ (fp16, 2 слота) — вместе с весами
+    # (1.8ГБ mmap) не влезало в лимит 4g, ядро выселяло страницы модели и
+    # каждый токен перечитывался с диска (~0.5 tok/s, iowait 50%).
+    # Чату хватает ctx 2048 (промпт ~700 ток + max_tokens 400, запросы
+    # синхронные по одному); --mlock прибивает веса резидентно.
     command: >
       -m /models/qwen3-1.7b-q8.gguf
       --host 0.0.0.0 --port 8080
-      -c 8192 -t 3 --no-warmup
+      -c 2048 --parallel 1 -t 3 --mlock --no-warmup
       --jinja
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
       - ./models:/models:ro
+    ulimits:
+      memlock: -1
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -45,7 +52,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4g
+          memory: 5g
 
   # SUP-2 (#505): Chat API + оркестратор (host-network не нужен —
   # ходит в vectordb и llm по хост-loopback через host.docker.internal).
