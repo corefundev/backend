@@ -598,14 +598,14 @@ def run_promo_process(
     try:
         events_df = pd.read_parquet(result.output_path)
         events = []
-        for row in events_df.itertuples(index=False):
+        for raw in events_df.to_dict("records"):
             events.append(PromoEvent(
-                sku=None if pd.isna(row.sku) else str(row.sku),
-                category=None if pd.isna(row.category) else str(row.category),
-                date_from=pd.Timestamp(row.date_from).date().isoformat(),
-                date_to=pd.Timestamp(row.date_to).date().isoformat(),
-                depth_pct=None if pd.isna(row.depth) else float(row.depth),
-                name=None if pd.isna(row.name) else str(row.name),
+                sku=None if pd.isna(raw["sku"]) else str(raw["sku"]),
+                category=None if pd.isna(raw["category"]) else str(raw["category"]),
+                date_from=pd.Timestamp(raw["date_from"]).date().isoformat(),
+                date_to=pd.Timestamp(raw["date_to"]).date().isoformat(),
+                depth_pct=None if pd.isna(raw["depth"]) else float(raw["depth"]),
+                name=None if pd.isna(raw["name"]) else str(raw["name"]),
             ))
         get_promo_calendar_registry().create_candidate(
             client_id=record.client_id,
