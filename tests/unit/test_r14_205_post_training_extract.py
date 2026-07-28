@@ -84,7 +84,7 @@ def _wire_forecast_env(monkeypatch, *, forecasts_df, model_exists=True,
     monkeypatch.setattr(pt, "build_features", lambda df, config, **k: df)
     monkeypatch.setattr(pt, "get_feature_columns", lambda df, config: ["f1"])
 
-    def _fake_forecast(model, df, feature_cols, config, horizon, max_skus):
+    def _fake_forecast(model, df, feature_cols, config, horizon, max_skus, **kw):
         captured["horizon"] = horizon
         captured["max_skus"] = max_skus
         return forecasts_df

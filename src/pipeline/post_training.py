@@ -101,8 +101,12 @@ def generate_and_store_forecasts(
         return
     model = storage.load_model()
     _lags, _rw = serve_feature_set(model)
+    # #570 PC-2: события активного календаря — в фичи И в recursive serve
+    from src.features.promo_calendar import load_active_events
+    promo_events = load_active_events(dataset_id)
     df = build_features(
         df, config, pin_lags=_lags or None, pin_rolling=_rw, drop_warmup=False,
+        promo_events=promo_events,
     )
     # #229: market-колонки — из хвоста в артефакте модели (no-op для
     # старых pickle); ДО get_feature_columns, чтобы новые модели увидели
@@ -116,6 +120,7 @@ def generate_and_store_forecasts(
         model, df, feature_cols, config,
         horizon=horizon,
         max_skus=plan_max_skus,
+        promo_events=promo_events,
     )
 
     if forecasts.empty:
@@ -214,9 +219,11 @@ def generate_and_store_explanations(
     df = load_data(data_path, config)
     df = validate_data(df, config)
     _lags, _rw = serve_feature_set(model)
+    from src.features.promo_calendar import load_active_events
     df = build_features(
         df, config, pin_lags=_lags or None, pin_rolling=_rw,
         drop_warmup=False,
+        promo_events=load_active_events(dataset_id),
     )
     from src.features.market import apply_model_market
     df = apply_model_market(model, df, config["data"]["date_col"])

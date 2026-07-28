@@ -21,6 +21,7 @@ def build_features(
     pin_lags:    list[int] | None = None,
     pin_rolling: list[int] | None = None,
     drop_warmup: bool = True,
+    promo_events: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
     Build the model feature frame.
@@ -136,6 +137,17 @@ def build_features(
             df = build_event_ramp_features(df, config, date_col)
         except Exception as e:
             logger.warning(f"Event-ramp features failed: {e}")
+
+    # Календарь акций (#570 PC-2): known-future промо-фичи. Fail-open —
+    # promo_events=None (нет календаря) даёт нулевые колонки, поведение
+    # прежнее; ошибки строителя не роняют обучение, но логируются громко.
+    if cfg_f.get("promo_calendar", {}).get("enabled", True):
+        try:
+            from src.features.promo_calendar import build_promo_calendar_features
+            df = build_promo_calendar_features(df, config, date_col,
+                                               events=promo_events)
+        except Exception as e:
+            logger.error(f"Promo-calendar features failed (zero-filled): {e}")
 
     # RU external regressors (CNY/USD/EUR/BYN/KZT — ЦБ РФ daily fix)
     if cfg_f.get("external_regressors_ru", {}).get("enabled", False):

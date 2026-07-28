@@ -58,6 +58,10 @@ features:
     set: full                    # full | ny (NY ramp + dead January only)
     ny_window: 21                # days of pre-New-Year ramp
     gift_window: 10              # days of pre-Feb23/Mar8/May1 ramp
+  # #570 PC-2: known-future фичи из «Календаря акций». Fail-open: без
+  # активного календаря колонки нулевые (поведение прежнее).
+  promo_calendar:
+    enabled: true
 
   # Russian-market external regressors (CNY/USD/EUR/BYN/KZT daily FX,
   # fetched from ЦБ РФ XML_dynamic endpoint and cached on disk).
