@@ -88,6 +88,7 @@ def _scan_job(upload_id: str) -> dict:
     Runs in the scan worker. Imports are local so the module can be loaded
     without the full project dependency tree at rq-registration time.
     """
+    from src.storage import upload_registry as ur
     from src.storage.upload_pipeline import run_scan
 
     record = run_scan(upload_id)
@@ -96,6 +97,13 @@ def _scan_job(upload_id: str) -> dict:
     # «Подготовить» button in «Подготовка данных»); the user starts it when they
     # choose. _emit_upload_inbox only fires on a terminal state (here: INFECTED);
     # SCANNED_CLEAN is a silent waiting state (the section surfaces it).
+    #
+    # #570 PC-1: календарь акций — исключение из «ждём кнопку»: его
+    # обработка и ЕСТЬ валидация (кандидат в pending_review, активный
+    # календарь не трогается — пользовательский контроль остаётся на
+    # шаге «Применить»). Поэтому сразу в очередь promo-процесса.
+    if record.status == ur.SCANNED_CLEAN and record.kind == "promo_calendar":
+        enqueue_promo_process(upload_id, record.client_id)
     _emit_upload_inbox(record)
     return {
         "upload_id": upload_id,
@@ -247,3 +255,43 @@ def enqueue_prepare(upload_id: str, client_id: str) -> Optional[str]:
     SCANNED_CLEAN upload. Thin wrapper over enqueue_process so the API speaks the
     domain verb; ownership stamping + sync fallback are inherited."""
     return enqueue_process(upload_id, client_id=client_id)
+
+
+def _promo_process_job(upload_id: str) -> dict:
+    """#570 PC-1: валидация календаря акций в sku-process воркере (там есть
+    доступ к sandbox-брокеру). Кандидат создаётся в run_promo_process."""
+    from src.storage.upload_pipeline import run_promo_process
+
+    record = run_promo_process(upload_id)
+    _emit_upload_inbox(record)          # PROCESSED / PROCESSING_FAIL
+    return {
+        "upload_id": upload_id,
+        "status": record.status,
+        "row_count": record.row_count,
+        "error_message": record.error_message,
+    }
+
+
+def enqueue_promo_process(
+    upload_id: str,
+    client_id: str,
+    timeout: int = 300,            # календарь мал (≤2 МБ), 5 мин с запасом
+) -> Optional[str]:
+    try:
+        queue = get_queue("sku-process")
+        job = queue.enqueue(
+            _promo_process_job,
+            kwargs=dict(upload_id=upload_id),
+            job_timeout=timeout,
+            result_ttl=86400,
+            meta={"client_id": client_id},
+        )
+        logger.info("promo process enqueued: job=%s upload=%s", job.id, upload_id)
+        return job.id
+    except Exception as e:
+        if os.environ.get("ALLOW_SYNC_UPLOAD_FALLBACK") != "1":
+            logger.error("promo queue unavailable and sync fallback disabled: %s", e)
+            raise
+        logger.warning("promo queue unavailable (%s); running inline", e)
+        _promo_process_job(upload_id)
+        return None

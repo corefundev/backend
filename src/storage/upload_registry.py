@@ -124,6 +124,9 @@ class UploadRecord:
     # worker auto-attaches after the user-triggered prep completes.
     # NULL = legacy flow (upload not aimed at a dataset).
     dataset_id: Optional[str] = None
+    # #570 PC-1: 'sales' (история продаж) | 'promo_calendar' (календарь
+    # акций). Конвейер общий; ветвится обработка после AV-скана.
+    kind: str = "sales"
     # DS-2 tail (#467): период данных файла из sandbox-манифеста,
     # персистится при завершении подготовки. NULL = pre-034 загрузка.
     date_min: Optional[str] = None
@@ -198,15 +201,15 @@ class PostgresUploadRegistry(UploadRegistry):
         sql = """
         INSERT INTO sku_uploads
             (upload_id, client_id, filename, size_bytes, sha256, status,
-             dataset_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+             dataset_id, kind)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     record.upload_id, record.client_id, record.filename,
                     record.size_bytes, record.sha256, record.status,
-                    record.dataset_id,
+                    record.dataset_id, record.kind,
                 ))
             conn.commit()
 
@@ -372,6 +375,7 @@ class PostgresUploadRegistry(UploadRegistry):
             processed_key=row.get("processed_key"),
             row_count=row.get("row_count"),
             sku_count=row.get("sku_count"),
+            kind=row.get("kind") or "sales",
             sniff_report=row.get("sniff_report"),
             mapping_proposal=row.get("mapping_proposal"),
             confirmed_mapping=row.get("confirmed_mapping"),

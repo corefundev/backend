@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 # ── Upload limits (API layer also enforces, these are belt-and-suspenders) ─────
 
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # 50 MiB
+# #570: календарь акций — маленький справочник; жёсткий потолок отсекает
+# случайную заливку файла продаж в слот календаря.
+PROMO_CALENDAR_MAX_BYTES = 2 * 1024 * 1024    # 2 MiB
 # .xlsm (macro-enabled Excel) dropped (R13 LOW): it parses identically to
 # .xlsx via openpyxl (macros are never executed), so it adds no capability —
 # only a macro-carrying format we don't need in the allowlist.
@@ -90,16 +93,25 @@ def _validate_upload(filename: str, data: bytes) -> str:
 # ── Stage 1: accept ───────────────────────────────────────────────────────────
 
 def accept_upload(client_id: str, filename: str, data: bytes,
-                  dataset_id: str | None = None) -> ur.UploadRecord:
+                  dataset_id: str | None = None,
+                  kind: str = "sales") -> ur.UploadRecord:
     """
     Called synchronously from the HTTP handler. Returns the new UploadRecord
     with status=uploaded. Does NOT block on scanning — that is done by the
     worker after scan_task is enqueued. dataset_id (DS-2 #467, pre-validated
     by the API layer) aims the upload at a dataset: the process worker
     auto-attaches after the user-triggered prep completes.
+
+    kind='promo_calendar' (#570): тот же конвейер (AV-скан → воркеры),
+    но после чистого скана файл уходит в promo-валидацию, а не ждёт
+    пользовательского «Подготовить».
     """
     z.validate_component(client_id, field="client_id")
     safe_filename = _validate_upload(filename, data)
+    if kind == "promo_calendar" and len(data) > PROMO_CALENDAR_MAX_BYTES:
+        raise UploadRejected(
+            f"календарь акций не должен превышать "
+            f"{PROMO_CALENDAR_MAX_BYTES // (1024 * 1024)} МБ")
 
     upload_id = ur.new_upload_id()
     sha       = ur.compute_sha256(data)
@@ -110,6 +122,7 @@ def accept_upload(client_id: str, filename: str, data: bytes,
         size_bytes=len(data),
         sha256=sha,
         dataset_id=dataset_id,
+        kind=kind,
     )
 
     key = z.upload_key(client_id, upload_id, safe_filename)
@@ -488,6 +501,142 @@ def run_process(
                     orphan, e,
                 )
         raise
+
+
+def run_promo_process(
+    upload_id: str,
+    sandbox: Optional[DockerSandbox] = None,
+) -> ur.UploadRecord:
+    """#570 PC-1: валидация файла «Календаря акций» после чистого AV-скана.
+
+    Sniff → promo-маппинг → sandbox-парс (--schema promo-calendar, построчный
+    честный отчёт) → события пишутся КАНДИДАТОМ (pending_review) в реестр
+    календарей. Активный календарь НЕ трогается: замещение — только явным
+    Apply (atomic swap в promo_calendar.apply). PROCESSED-зона не пишется:
+    канон календаря живёт в БД (события), не в parquet."""
+    import pandas as pd    # лениво: конвейер продаж pandas не нуждается
+
+    from src.storage.promo_calendar import PromoEvent, get_promo_calendar_registry
+    from src.validation.column_mapping import propose_promo_mapping
+
+    registry = ur.get_upload_registry()
+    record = registry.get(upload_id)
+    if record is None:
+        raise KeyError(f"upload_id {upload_id!r} not found")
+    if record.status != ur.SCANNED_CLEAN:
+        logger.info("promo process skipped: upload %s at %s (expected %s)",
+                    upload_id, record.status, ur.SCANNED_CLEAN)
+        return record
+
+    sandbox = sandbox or DockerSandbox()
+    key = z.upload_key(record.client_id, upload_id, record.filename)
+    quarantine = z.get_zone_backend(z.Zone.QUARANTINE)
+
+    # sniff — как в run_prepare: best-effort, при сбое канонический парс
+    try:
+        data = quarantine.download_bytes(key)
+    except Exception as e:
+        logger.error("promo: cannot read quarantined object %s: %s", key, e)
+        if registry.claim(upload_id, ur.SCANNED_CLEAN, ur.PROCESSING) is None:
+            return registry.get(upload_id) or record
+        return registry.update_status(
+            upload_id, ur.PROCESSING_FAIL, error_message=_GENERIC_INFRA_ERROR)
+
+    mapping_json: "str | None" = None
+    try:
+        sniffed = sandbox.sniff(data, record.filename)
+    except Exception as e:    # noqa: BLE001 — best-effort sniff; parse still runs
+        logger.warning("promo sniff errored for %s (%s); canonical parse",
+                       upload_id, e)
+        sniffed = None
+    if sniffed is not None and sniffed.ok and sniffed.manifest:
+        proposal = propose_promo_mapping(sniffed.manifest.get("headers", []))
+        registry.update_fields(
+            upload_id, sniff_report=sniffed.manifest,
+            mapping_proposal=proposal.to_dict())
+        if proposal.missing_required:
+            if registry.claim(upload_id, ur.SCANNED_CLEAN, ur.PROCESSING) is None:
+                return registry.get(upload_id) or record
+            logger.info("promo %s: missing required %s",
+                        upload_id, proposal.missing_required)
+            return registry.update_status(
+                upload_id, ur.PROCESSING_FAIL,
+                error_message=(
+                    "Не найдены обязательные колонки календаря: даты начала "
+                    "и окончания акции (date_from, date_to). Скачайте шаблон "
+                    "и сверьте заголовки."))
+        confirmed = {k: v for k, v in proposal.mapping.items() if v}
+        registry.update_fields(upload_id, confirmed_mapping=confirmed)
+        mapping_json = json.dumps(confirmed)
+
+    claimed = registry.claim(upload_id, ur.SCANNED_CLEAN, ur.PROCESSING)
+    if claimed is None:
+        record = registry.get(upload_id) or record
+        logger.info("promo process skipped: upload %s claim lost (at %s)",
+                    upload_id, record.status)
+        return record
+    record = claimed
+
+    try:
+        result: SandboxResult = sandbox.run(
+            data, record.filename, mapping=mapping_json,
+            schema="promo-calendar")
+    except SandboxError as e:
+        logger.error("promo sandbox launch failed for %s: %s", upload_id, e)
+        return registry.update_status(
+            upload_id, ur.PROCESSING_FAIL, error_message=_GENERIC_INFRA_ERROR)
+
+    if not result.ok or result.output_path is None:
+        logger.warning("promo parse failed id=%s exit=%s err=%s",
+                       upload_id, result.exit_code,
+                       (result.stderr or "").strip()[:2000])
+        return registry.update_status(
+            upload_id, ur.PROCESSING_FAIL,
+            error_message=_client_parse_error(result.stderr or ""))
+
+    manifest = result.manifest or {}
+    try:
+        events_df = pd.read_parquet(result.output_path)
+        events = []
+        for raw in events_df.to_dict("records"):
+            events.append(PromoEvent(
+                sku=None if pd.isna(raw["sku"]) else str(raw["sku"]),
+                category=None if pd.isna(raw["category"]) else str(raw["category"]),
+                date_from=pd.Timestamp(raw["date_from"]).date().isoformat(),
+                date_to=pd.Timestamp(raw["date_to"]).date().isoformat(),
+                depth_pct=None if pd.isna(raw["depth"]) else float(raw["depth"]),
+                name=None if pd.isna(raw["name"]) else str(raw["name"]),
+            ))
+        get_promo_calendar_registry().create_candidate(
+            client_id=record.client_id,
+            dataset_id=record.dataset_id,
+            filename=record.filename,
+            report=manifest,
+            events=events,
+            source_key=key,
+        )
+    except Exception as e:
+        logger.error("promo candidate write failed for %s: %s", upload_id, e)
+        return registry.update_status(
+            upload_id, ur.PROCESSING_FAIL, error_message=_GENERIC_INFRA_ERROR)
+    finally:
+        try:
+            Path(result.output_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Best-effort cleanup of quarantine copy (как у продаж).
+    try:
+        quarantine.delete(key)
+    except Exception as e:
+        logger.warning("quarantine delete failed for %s: %s", upload_id, e)
+
+    return registry.update_status(
+        upload_id, ur.PROCESSED,
+        row_count=int(manifest.get("rows_accepted") or 0),
+        date_min=manifest.get("date_min"),
+        date_max=manifest.get("date_max"),
+    )
 
 
 def get_processed_path(record: ur.UploadRecord) -> str:

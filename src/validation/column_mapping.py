@@ -147,6 +147,54 @@ _SYNONYMS: Dict[str, List[str]] = {
     ],
 }
 
+# ── Promo-calendar schema (#570 PC-1) ────────────────────────────────────────
+# Отдельный файл «Календарь акций»: строка = акция. sku/category намеренно
+# переиспользуют словари продаж (те же выгрузки 1С/маркетплейсов).
+PROMO_REQUIRED_FIELDS = ("date_from", "date_to")
+PROMO_OPTIONAL_FIELDS = ("sku", "category", "depth", "name")
+PROMO_CANONICAL_FIELDS = PROMO_REQUIRED_FIELDS + PROMO_OPTIONAL_FIELDS
+
+_PROMO_SYNONYMS: Dict[str, List[str]] = {
+    "date_from": [
+        # RU
+        "date from", "дата начала", "дата начала акции", "начало", "начало акции",
+        "старт", "старт акции", "дата старта", "дата с", "период с", "с даты",
+        "действует с", "начало периода", "дата начало",
+        # EN
+        "from", "start", "start date", "date start", "promo start",
+        "begin", "begin date", "valid from", "from date",
+    ],
+    "date_to": [
+        # RU
+        "date to", "дата окончания", "дата окончания акции", "окончание",
+        "окончание акции", "конец", "конец акции", "финиш", "дата по",
+        "период по", "по дату", "действует по", "действует до", "конец периода",
+        "дата завершения", "дата конец",
+        # EN
+        "to", "end", "end date", "date end", "promo end", "finish",
+        "valid to", "valid until", "until", "to date", "expiry", "expiry date",
+    ],
+    "sku": _SYNONYMS["sku"],
+    "category": _SYNONYMS["category"],
+    "depth": [
+        # RU
+        "depth", "глубина", "глубина скидки", "скидка", "скидка процент",
+        "процент скидки", "размер скидки", "скидка в процентах", "процент",
+        # EN
+        "discount", "discount pct", "discount percent", "discount rate",
+        "sale depth", "markdown", "pct off", "percent off",
+    ],
+    "name": [
+        # RU
+        "название", "название акции", "наименование акции", "акция",
+        "промо", "промоакция", "промо акция", "кампания", "название кампании",
+        "комментарий", "описание", "примечание",
+        # EN
+        "name", "promo name", "promotion", "promotion name", "campaign",
+        "campaign name", "title", "description", "comment", "note",
+    ],
+}
+
 # Confidence bands for the best match score.
 _HIGH, _MEDIUM = 0.90, 0.75
 # Fuzzy acceptance floor and a length-gap guard for the Levenshtein.
@@ -243,6 +291,56 @@ class MappingProposal:
         }
 
 
+def _propose(
+    headers: List[str],
+    fields: "tuple[str, ...]",
+    synonyms: Dict[str, List[str]],
+    required: "tuple[str, ...]",
+) -> MappingProposal:
+    """Общее ядро подбора маппинга (продажи и календарь акций, #570):
+    greedy-назначение лучших скорингов, один заголовок — не более чем
+    одному полю."""
+    norm = {h: _normalize(h) for h in headers}
+    scored: List[tuple] = []   # (score, field, header)
+    for fld in fields:
+        syns = synonyms[fld]
+        for h in headers:
+            s = _score_header(norm[h], syns)
+            if s > 0.0:
+                scored.append((s, fld, h))
+    # greedy assignment: highest score first, one header per field, one field
+    # per header.
+    scored.sort(key=lambda t: t[0], reverse=True)
+    mapping: Dict[str, Optional[str]] = {f: None for f in fields}
+    field_score: Dict[str, float] = {f: 0.0 for f in fields}
+    used_headers: set = set()
+    for s, fld, h in scored:
+        if mapping[fld] is not None or h in used_headers:
+            continue
+        mapping[fld] = h
+        field_score[fld] = s
+        used_headers.add(h)
+
+    field_confidence = {
+        f: (_band(field_score[f]) if mapping[f] is not None else "none")
+        for f in fields
+    }
+    unmapped = [h for h in headers if h not in used_headers]
+    missing_required = [f for f in required if mapping[f] is None]
+    auto_confirmable = (
+        not missing_required
+        and all(field_confidence[f] == "high" for f in required)
+    )
+    return MappingProposal(
+        mapping=mapping,
+        field_confidence=field_confidence,
+        field_score=field_score,
+        unmapped_headers=unmapped,
+        missing_required=missing_required,
+        auto_confirmable=auto_confirmable,
+    )
+
+
 def propose_mapping(headers: List[str]) -> MappingProposal:
     """Propose a canonical mapping for the given header row.
 
@@ -254,43 +352,11 @@ def propose_mapping(headers: List[str]) -> MappingProposal:
     the stored proposal (the system auto-maps regardless; there is no user
     confirmation step), useful for observability of low-confidence auto-maps.
     """
-    norm = {h: _normalize(h) for h in headers}
-    # score[field][header] = match score
-    scored: List[tuple] = []   # (score, field, header)
-    for fld in CANONICAL_FIELDS:
-        syns = _SYNONYMS[fld]
-        for h in headers:
-            s = _score_header(norm[h], syns)
-            if s > 0.0:
-                scored.append((s, fld, h))
-    # greedy assignment: highest score first, one header per field, one field
-    # per header.
-    scored.sort(key=lambda t: t[0], reverse=True)
-    mapping: Dict[str, Optional[str]] = {f: None for f in CANONICAL_FIELDS}
-    field_score: Dict[str, float] = {f: 0.0 for f in CANONICAL_FIELDS}
-    used_headers: set = set()
-    for s, fld, h in scored:
-        if mapping[fld] is not None or h in used_headers:
-            continue
-        mapping[fld] = h
-        field_score[fld] = s
-        used_headers.add(h)
+    return _propose(headers, CANONICAL_FIELDS, _SYNONYMS, REQUIRED_FIELDS)
 
-    field_confidence = {
-        f: (_band(field_score[f]) if mapping[f] is not None else "none")
-        for f in CANONICAL_FIELDS
-    }
-    unmapped = [h for h in headers if h not in used_headers]
-    missing_required = [f for f in REQUIRED_FIELDS if mapping[f] is None]
-    auto_confirmable = (
-        not missing_required
-        and all(field_confidence[f] == "high" for f in REQUIRED_FIELDS)
-    )
-    return MappingProposal(
-        mapping=mapping,
-        field_confidence=field_confidence,
-        field_score=field_score,
-        unmapped_headers=unmapped,
-        missing_required=missing_required,
-        auto_confirmable=auto_confirmable,
-    )
+
+def propose_promo_mapping(headers: List[str]) -> MappingProposal:
+    """Маппинг заголовков файла «Календарь акций» (#570 PC-1) — то же ядро,
+    словари календаря (sku/category переиспользуют словари продаж)."""
+    return _propose(
+        headers, PROMO_CANONICAL_FIELDS, _PROMO_SYNONYMS, PROMO_REQUIRED_FIELDS)

@@ -29,7 +29,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -72,6 +72,9 @@ class SpawnRequest(BaseModel):
     # the parser itself json.loads + validates it's a dict of canonical keys.
     sniff:       bool = False
     mapping:     Optional[str] = Field(default=None, max_length=8192)
+    # #570: схема валидации — allowlist, брокер не даёт прокинуть произвольный
+    # CLI (имя parse_schema: `schema` затеняет BaseModel.schema)
+    parse_schema: Optional[Literal["promo-calendar"]] = None
 
 
 class SpawnResponse(BaseModel):
@@ -125,6 +128,7 @@ def spawn(req: SpawnRequest) -> SpawnResponse:
             runtime=os.environ.get("SANDBOX_RUNTIME", "runc"),
             sniff=req.sniff,
             mapping=req.mapping,
+            schema=req.parse_schema,
         )
     except SandboxError as e:
         logger.warning("spawn failed for %s: %s", req.job_dir, e)
