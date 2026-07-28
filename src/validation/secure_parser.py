@@ -519,6 +519,116 @@ def _validate(df: pd.DataFrame, date_col: str, sku_col: str, target_col: str) ->
     return df
 
 
+# ── Promo-calendar schema (#570 PC-1) ────────────────────────────────────────
+# Отдельный файл-календарь акций (вариант B, решение владельца): строка =
+# акция. Валидация ПОСТРОЧНАЯ с честным отчётом (accepted/rejected+причины) —
+# в отличие от продаж, где битый файл отклоняется целиком: календарь чинят
+# по строкам, и клиент должен видеть, ЧТО именно не принято.
+
+_PROMO_REQUIRED = ["date_from", "date_to"]
+_PROMO_OPTIONAL_STR = ["sku", "category", "name"]
+_PROMO_OPTIONAL_NUM = ["depth"]
+_PROMO_SCHEMA = _PROMO_REQUIRED + _PROMO_OPTIONAL_STR + _PROMO_OPTIONAL_NUM
+_PROMO_REJECT_EXAMPLES = 50     # в отчёт — первые N битых строк
+
+
+def _apply_promo_mapping(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Промо-аналог _apply_mapping: тот же strip/rename/dedup-контракт."""
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    df = df.loc[:, ~df.columns.duplicated()]
+    rename: "dict[str, str]" = {}
+    for canonical, source in mapping.items():
+        if canonical in _PROMO_SCHEMA and isinstance(source, str) and source in df.columns:
+            rename[source] = canonical
+    df = df.rename(columns=rename)
+    df = df.loc[:, ~df.columns.duplicated()]
+    keep = [c for c in _PROMO_SCHEMA if c in df.columns]
+    return df[keep]
+
+
+def _validate_promo_calendar(df: pd.DataFrame) -> "tuple[pd.DataFrame, dict]":
+    """Построчная валидация календаря. Возвращает (accepted, report).
+
+    Правила формата (эпик #570, зафиксировано):
+      • ровно одно из sku|category заполнено;
+      • date_from/date_to парсятся (ISO и DD.MM.YYYY), date_from ≤ date_to;
+      • depth — число 0..100 или пусто (v1 модели не использует);
+      • формула-подобные ячейки = отказ строки (инъекция в таблицы).
+    Файл отклоняется ЦЕЛИКОМ только если нет обязательных колонок или
+    не принято ни одной строки."""
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    missing = set(_PROMO_REQUIRED) - set(df.columns)
+    if missing:
+        raise ValueError(f"missing required columns: {sorted(missing)}")
+    for col in _PROMO_OPTIONAL_STR + _PROMO_OPTIONAL_NUM:
+        if col not in df.columns:
+            df[col] = ""
+
+    d_from = _to_datetime(df["date_from"])
+    d_to = _to_datetime(df["date_to"])
+    depth_raw = df["depth"].astype(str).str.strip()
+    depth = _to_numeric(df["depth"])
+    sku = df["sku"].astype(str).str.strip().str.slice(0, 128)
+    category = df["category"].astype(str).str.strip().str.slice(0, 128)
+    name = df["name"].astype(str).str.strip().str.slice(0, 256)
+    for col_series in (sku, category, name):
+        col_series[col_series.str.lower() == "nan"] = ""
+
+    rejected: "list[dict]" = []
+    n_rejected = 0
+
+    def _reject(idx: int, reason: str) -> None:
+        nonlocal n_rejected
+        n_rejected += 1
+        if len(rejected) < _PROMO_REJECT_EXAMPLES:
+            # +2: заголовок = строка 1 файла, данные начинаются со 2-й
+            rejected.append({"line": int(idx) + 2, "reason": reason})
+
+    # Формула-инъекция уже нейтрализована на чтении (_strip_formula_prefix,
+    # R2-22): `=cmd()` приходит сюда как литерал "'=cmd()" — отдельная
+    # проверка не нужна, строка безопасна как текст.
+    keep_mask = pd.Series(True, index=df.index)
+    for idx in df.index:
+        if bool(sku[idx]) == bool(category[idx]):
+            _reject(idx, "заполните ровно одно из полей: sku ИЛИ category")
+        elif pd.isna(d_from[idx]) or pd.isna(d_to[idx]):
+            _reject(idx, "дата не распознана (ожидается ГГГГ-ММ-ДД или ДД.ММ.ГГГГ)")
+        elif d_from[idx] > d_to[idx]:
+            _reject(idx, "date_from позже date_to")
+        elif depth_raw[idx] not in ("", "nan") and (
+                pd.isna(depth[idx]) or depth[idx] < 0 or depth[idx] > 100):
+            _reject(idx, "depth должен быть числом от 0 до 100 (процент скидки)")
+        else:
+            continue
+        keep_mask[idx] = False
+
+    accepted = pd.DataFrame({
+        "sku": sku[keep_mask].where(sku[keep_mask].ne(""), other=None),
+        "category": category[keep_mask].where(category[keep_mask].ne(""), other=None),
+        "date_from": d_from[keep_mask],
+        "date_to": d_to[keep_mask],
+        "depth": depth[keep_mask],
+        "name": name[keep_mask].where(name[keep_mask].ne(""), other=None),
+    }).reset_index(drop=True)
+
+    if accepted.empty:
+        raise ValueError(
+            f"no valid rows: all {int(n_rejected)} rows rejected "
+            f"(first: {rejected[0]['reason'] if rejected else 'empty file'})")
+
+    report = {
+        "rows_total": int(len(df)),
+        "rows_accepted": int(len(accepted)),
+        "rows_rejected": int(n_rejected),
+        "rejected_examples": rejected,
+        "sku_rows": int(accepted["sku"].notna().sum()),
+        "category_rows": int(accepted["category"].notna().sum()),
+        "date_min": str(accepted["date_from"].min().date()),
+        "date_max": str(accepted["date_to"].max().date()),
+    }
+    return accepted, report
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -535,6 +645,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="emit a format sniff report to --manifest and exit (no parse, no parquet)")
     p.add_argument("--mapping", default=None,
                    help='JSON {canonical_field: source_header} applied before validation (DP-3)')
+    p.add_argument("--schema", default="sales", choices=("sales", "promo-calendar"),
+                   help="validation schema: sales (default) or promo-calendar (#570)")
     args = p.parse_args(argv)
 
     input_path: Path = args.input
@@ -576,15 +688,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             raise ValueError(f"unsupported extension: {suffix!r}")
 
-        if mapping:
-            df_raw = _apply_mapping(df_raw, mapping)
-
-        df_clean = _validate(
-            df_raw,
-            date_col=args.date_col,
-            sku_col=args.sku_col,
-            target_col=args.target_col,
-        )
+        promo_report: "dict | None" = None
+        if args.schema == "promo-calendar":
+            if mapping:
+                df_raw = _apply_promo_mapping(df_raw, mapping)
+            df_clean, promo_report = _validate_promo_calendar(df_raw)
+        else:
+            if mapping:
+                df_raw = _apply_mapping(df_raw, mapping)
+            df_clean = _validate(
+                df_raw,
+                date_col=args.date_col,
+                sku_col=args.sku_col,
+                target_col=args.target_col,
+            )
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3
@@ -599,23 +716,40 @@ def main(argv: list[str] | None = None) -> int:
     sample_rows = json.loads(
         df_clean.head(_PREVIEW_SAMPLE_ROWS).to_json(orient="values", date_format="iso")
     )
-    manifest = {
-        "input_filename": input_path.name,
-        "row_count": int(len(df_clean)),
-        "column_count": int(len(df_clean.columns)),
-        "columns": list(df_clean.columns),
-        "sku_count": int(df_clean[args.sku_col].nunique()),
-        "date_min": str(df_clean[args.date_col].min()),
-        "date_max": str(df_clean[args.date_col].max()),
-        "output_sha256": sha,
-        "sample_rows": sample_rows,
-    }
+    if args.schema == "promo-calendar":
+        manifest = {
+            "input_filename": input_path.name,
+            "schema": "promo-calendar",
+            "row_count": int(len(df_clean)),
+            "columns": list(df_clean.columns),
+            "output_sha256": sha,
+            "sample_rows": sample_rows,
+            **(promo_report or {}),
+        }
+    else:
+        manifest = {
+            "input_filename": input_path.name,
+            "row_count": int(len(df_clean)),
+            "column_count": int(len(df_clean.columns)),
+            "columns": list(df_clean.columns),
+            "sku_count": int(df_clean[args.sku_col].nunique()),
+            "date_min": str(df_clean[args.date_col].min()),
+            "date_max": str(df_clean[args.date_col].max()),
+            "output_sha256": sha,
+            "sample_rows": sample_rows,
+        }
     args.manifest.write_text(json.dumps(manifest, indent=2, default=str))
 
-    print(
-        f"OK rows={len(df_clean)} cols={len(df_clean.columns)} "
-        f"skus={manifest['sku_count']} sha256={sha[:12]}"
-    )
+    if args.schema == "promo-calendar":
+        print(
+            f"OK promo rows={len(df_clean)} "
+            f"rejected={manifest.get('rows_rejected', 0)} sha256={sha[:12]}"
+        )
+    else:
+        print(
+            f"OK rows={len(df_clean)} cols={len(df_clean.columns)} "
+            f"skus={manifest['sku_count']} sha256={sha[:12]}"
+        )
     return 0
 
 

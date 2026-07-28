@@ -1,0 +1,5 @@
+bash: line 18: warning: here-document at line 1 delimited by end-of-file (wanted `PYEOF')
+  File "<stdin>", line 16
+    WHERE snippet ILIKE %s LIMIT 3""", (v, v, %едиана% if медиана in q else %квайринг%))
+                                              ^
+SyntaxError: invalid syntax

@@ -83,6 +83,7 @@ def spawn_and_wait(
     runtime: str,
     sniff: bool = False,
     mapping: str | None = None,
+    schema: str | None = None,
 ) -> tuple[int, bool, str, str]:
     """
     Run secure_parser in a hardened container and reap it.
@@ -115,6 +116,9 @@ def spawn_and_wait(
         command.append("--sniff")
     if mapping is not None:
         command += ["--mapping", mapping]
+    # #570: календарь акций валидируется своей схемой (построчный отчёт)
+    if schema is not None:
+        command += ["--schema", schema]
     try:
         container = client.containers.run(
             image=image,
@@ -224,6 +228,7 @@ class DockerSandbox:
     def _spawn_via_broker(
         self, job_dir: str, input_name: str, max_rows: int, max_columns: int,
         sniff: bool = False, mapping: str | None = None,
+        schema: str | None = None,
     ) -> tuple[int, bool, str, str]:
         """POST /spawn on the broker; mirrors spawn_and_wait's return."""
         import urllib.error
@@ -236,6 +241,7 @@ class DockerSandbox:
             "max_columns": max_columns,
             "sniff":       sniff,
             "mapping":     mapping,
+            "parse_schema": schema,
         }).encode("utf-8")
         req = urllib.request.Request(
             f"{self.broker_url}/spawn",
@@ -265,6 +271,7 @@ class DockerSandbox:
     def _stage_and_spawn(
         self, input_bytes: bytes, input_filename: str, *,
         sniff: bool = False, mapping: str | None = None,
+        schema: str | None = None,
     ) -> tuple[int, str, str, Path, Path]:
         """Stage the input into a fresh job dir and spawn the hardened parser.
         Returns (exit_code, stdout, stderr, out_dir, staging_dir); the CALLER
@@ -299,7 +306,7 @@ class DockerSandbox:
             if self.broker_url:
                 exit_code, _timed_out, stdout, stderr = self._spawn_via_broker(
                     staging.name, safe_name, max_rows, max_columns,
-                    sniff=sniff, mapping=mapping,
+                    sniff=sniff, mapping=mapping, schema=schema,
                 )
             else:
                 exit_code, _timed_out, stdout, stderr = spawn_and_wait(
@@ -316,6 +323,7 @@ class DockerSandbox:
                     runtime=self.runtime,
                     sniff=sniff,
                     mapping=mapping,
+                    schema=schema,
                 )
         except SandboxError:
             shutil.rmtree(staging, ignore_errors=True)
@@ -325,6 +333,7 @@ class DockerSandbox:
     def run(
         self, input_bytes: bytes, input_filename: str,
         mapping: str | None = None,
+        schema: str | None = None,
     ) -> SandboxResult:
         """
         Execute the parser on `input_bytes` in a fresh container. When `mapping`
@@ -332,7 +341,7 @@ class DockerSandbox:
         before validation (DP-3). Cleans up the staging directory unconditionally.
         """
         exit_code, stdout, stderr, out_dir, staging = self._stage_and_spawn(
-            input_bytes, input_filename, mapping=mapping,
+            input_bytes, input_filename, mapping=mapping, schema=schema,
         )
         try:
             # Parser exit convention: 0=ok, 2=input missing, 3=validation error

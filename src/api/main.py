@@ -336,6 +336,7 @@ from src.api.routers.news import router as news_router
 from src.api.routers.help import router as help_router
 from src.api.routers.support import router as support_router
 from src.api.routers.twofa import router as twofa_router
+from src.api.routers.promo_calendar import router as promo_calendar_router
 app.include_router(legal_router)
 app.include_router(news_router)
 app.include_router(help_router)
@@ -351,3 +352,4 @@ app.include_router(inference_router)
 app.include_router(auth_router)
 app.include_router(ops_router)
 app.include_router(datasets_router)
+app.include_router(promo_calendar_router)
