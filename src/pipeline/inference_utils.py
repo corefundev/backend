@@ -106,6 +106,7 @@ def recursive_forecast(
     target_col:    str = "sales",
     predict_fn=None,
     config:        dict | None = None,
+    promo_events:  "pd.DataFrame | None" = None,
 ) -> list[dict]:
     """
     Recursive multi-step forecast for a single SKU.
@@ -214,6 +215,31 @@ def recursive_forecast(
     except Exception as e:    # noqa: BLE001 — best-effort; carry on failure
         logger.debug("event-ramp recompute unavailable (sku=%s): %s", sku, e)
 
+    # #570 PC-2 — фичи календаря акций: known-future по природе, тот же
+    # контракт, что праздники/рампы — пересчёт per-step ЕДИНОЙ функцией
+    # обучения (no-skew #58), не carry-forward замороженного значения.
+    promo_by_step: dict[int, dict] = {}
+    recomputed_promo_cols: set[str] = set()
+    try:
+        from src.features.promo_calendar import (
+            PROMO_CAL_FEATURE_COLS, compute_promo_calendar_features,
+        )
+        present_p = [c for c in PROMO_CAL_FEATURE_COLS if c in h.columns]
+        pcal_cfg = (config or {}).get("features", {}).get("promo_calendar", {}) or {}
+        if (config is not None and present_p and promo_events is not None
+                and pcal_cfg.get("enabled", True)):
+            fdates = [last_date + pd.Timedelta(days=s) for s in range(1, horizon + 1)]
+            cat = (h["category"].iloc[-1]
+                   if "category" in h.columns else None)
+            pdf = compute_promo_calendar_features(
+                fdates, [sku] * horizon, [cat] * horizon, promo_events)
+            recomputed_promo_cols = set(present_p) & set(pdf.columns)
+            for s in range(1, horizon + 1):
+                promo_by_step[s] = {
+                    c: pdf.iloc[s - 1][c] for c in recomputed_promo_cols}
+    except Exception as e:    # noqa: BLE001 — best-effort; carry on failure
+        logger.debug("promo-calendar recompute unavailable (sku=%s): %s", sku, e)
+
     # Carry-forward columns that the model uses but the user can't
     # provide for future dates (price, promo, stock, weather, …) —
     # we use the last observed value as the "default future".
@@ -234,6 +260,7 @@ def recursive_forecast(
         and not c.startswith("rolling_")
         and c not in recomputed_holiday_cols   # R12-#91 — recomputed, not carried
         and c not in recomputed_ramp_cols      # QH-7 #440 — same contract
+        and c not in recomputed_promo_cols     # #570 PC-2 — same contract
         and c not in {
             "dayofweek", "is_weekend", "weekofyear", "month", "quarter",
             "dayofmonth", "dayofyear", "year",
@@ -278,6 +305,8 @@ def recursive_forecast(
         for c, v in holiday_by_step.get(step, {}).items():
             new_row[c] = v
         for c, v in ramp_by_step.get(step, {}).items():
+            new_row[c] = v
+        for c, v in promo_by_step.get(step, {}).items():
             new_row[c] = v
 
         # ── Lag features: lag_k = target value k rows back ────────
@@ -485,6 +514,7 @@ def serve_forecast(
     target_col:    str = "sales",
     predict_fn=None,
     config:        dict | None = None,
+    promo_events:  "pd.DataFrame | None" = None,
 ) -> list[dict]:
     """
     Serve-path dispatcher (R11-#59 / H2). Use the model's DIRECT heads for
@@ -543,6 +573,7 @@ def serve_forecast(
             tail_rows = recursive_forecast(
                 model, hist_ext, feature_cols, int(horizon) - model_h, sku,
                 sku_col, date_col, target_col, predict_fn, config=config,
+                promo_events=promo_events,
             )
             # Honesty (#158, refined per-date): the tail is the recursive
             # regime — its bands are conditional on fed-back medians and NOT
@@ -555,7 +586,7 @@ def serve_forecast(
 
     return recursive_forecast(model, history, feature_cols, horizon, sku,
                               sku_col, date_col, target_col, predict_fn,
-                              config=config)
+                              config=config, promo_events=promo_events)
 
 
 def forecast_all_skus(
@@ -565,6 +596,7 @@ def forecast_all_skus(
     config:       dict,
     horizon:      int | None = None,
     max_skus:     int | None = None,
+    promo_events: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
     Run recursive_forecast for every SKU in df.
@@ -608,6 +640,7 @@ def forecast_all_skus(
             date_col=date_col,
             target_col=target_col,
             config=config,                   # R12-#91: recompute holidays on recursive path
+            promo_events=promo_events,       # #570 PC-2: known-future promo
         )
         all_rows.extend(rows)
         processed += 1

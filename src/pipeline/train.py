@@ -393,7 +393,11 @@ def run_training_pipeline(
 
     # ── 4. Feature engineering ────────────────────────────────
     _progress(4, 9, "Построение признаков (календарь, лаги, погода, праздники)")
-    df = build_features(df, config)
+    # #570 PC-2: known-future промо из активного календаря датасета
+    # (fail-open: нет календаря → None → нулевые promo_cal_* колонки)
+    from src.features.promo_calendar import load_active_events
+    promo_events = load_active_events(dataset_id)
+    df = build_features(df, config, promo_events=promo_events)
     # #229: market features — MODEL-CARRIED state (см. src/features/market.py:
     # serve-parity запрещает считать их в build_features). Train-мерж по
     # полному ряду; хвост вшивается в модель перед save (attach ниже).

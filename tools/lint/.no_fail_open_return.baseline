@@ -35,9 +35,9 @@ src/pipeline/task_queue.py:234  pre-R9 baseline; triage in R10 — _run_pipeline
 src/pipeline/train.py:326  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
 src/pipeline/train.py:356  pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
 src/pipeline/train.py:256  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
-src/pipeline/inference_utils.py:214  QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes
-src/pipeline/inference_utils.py:188  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal)
-src/pipeline/inference_utils.py:370  pre-R9 baseline (was :341, +29 QH-7 #440 event-ramp recompute block); triage in R10 — recursive forecast fallback
+src/pipeline/inference_utils.py:215  QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes (+PC-2 #570 promo-фичи)
+src/pipeline/inference_utils.py:189  R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal) (+PC-2 #570 promo-фичи)
+src/pipeline/inference_utils.py:399  pre-R9 baseline (was :341, +29 QH-7 #440 event-ramp recompute block); triage in R10 — recursive forecast fallback (+PC-2 #570 promo-фичи)
 src/auth/otp.py:72  pre-R9 baseline; triage in R10 — OTP file race fallback
 src/auth/vault_agent.py:264  pre-R9 baseline; triage in R10 — Lockbox bootstrap path A (+1 line after R10 Phase 0-B compose-DSN insertion)
 src/auth/vault_agent.py:301  pre-R9 baseline; triage in R10 — Lockbox bootstrap path B (+1 line after R10 Phase 0-B)
@@ -45,10 +45,10 @@ src/auth/vault_agent.py:313  pre-R9 baseline; triage in R10 — Lockbox bootstra
 src/auth/api_keys.py:151  R9-T4-006 — API key hash try; triage in R10 (audit-critical)
 src/features/external_regressors_ru.py:141  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
 src/features/external_regressors_ru.py:157  pre-R9 baseline; triage in R10 — CBR FX feed best-effort
-src/features/engineering.py:145  QH-7 #440 — event-ramp optional feature step (same warn-and-continue class as weather/holidays below); training completes without the feature
-src/features/engineering.py:121  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +14 #418 per-sku-lags block)
-src/features/engineering.py:129  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +14 #418 per-sku-lags block)
-src/features/engineering.py:137  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block)
+src/features/engineering.py:149  QH-7 #440 — event-ramp optional feature step (same warn-and-continue class as weather/holidays below); training completes without the feature (+PC-2 #570 promo-фичи)
+src/features/engineering.py:122  pre-R9 baseline; triage in R10 — feature engineering optional step (was :107, +14 #418 per-sku-lags block) (+PC-2 #570 promo-фичи)
+src/features/engineering.py:130  pre-R9 baseline; triage in R10 — feature engineering optional step (was :115, +14 #418 per-sku-lags block) (+PC-2 #570 promo-фичи)
+src/features/engineering.py:138  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block) (+PC-2 #570 promo-фичи)
 src/storage/upload_pipeline.py:195  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment] (was :178, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap)
 src/storage/upload_pipeline.py:225  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment] (was :208, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap)
 src/api/routers/inference.py:746  (+90 XP-1 #469 explanation above) (+34 AZ-1 stock-read) (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
@@ -76,9 +76,9 @@ src/api/routers/training.py:327  pre-R9 baseline; triage in R10 — trigger_trai
 src/api/routers/training.py:356  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope) (was :352, +4 DP-4b prep-gate msg)
 src/api/routers/training.py:369  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope) (was :365, +4 DP-4b prep-gate msg)
 src/data/anomaly_detection.py:91  pre-R9 baseline; triage in R10 — anomaly detection optional (was :78, +MA-3 guard)
-src/pipeline/inference_utils.py:455  R11-#59 (was :426, +29 QH-7 #440 event-ramp recompute block) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected)
-src/pipeline/inference_utils.py:518  R11-#59 (was :489, +29 QH-7 #440 event-ramp recompute block) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply)
-src/pipeline/inference_utils.py:530  QW2-1 #224 (was :501, +29 QH-7 #440 event-ramp recompute block) — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback) (was :482, +5 #229 choke merge; +2 #307 static apply)
+src/pipeline/inference_utils.py:484  R11-#59 (was :426, +29 QH-7 #440 event-ramp recompute block) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected) (+PC-2 #570 promo-фичи)
+src/pipeline/inference_utils.py:548  R11-#59 (was :489, +29 QH-7 #440 event-ramp recompute block) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply) (+PC-2 #570 promo-фичи)
+src/pipeline/inference_utils.py:560  QW2-1 #224 (was :501, +29 QH-7 #440 event-ramp recompute block) — serve_forecast chained branch: if the direct HEAD-SEGMENT raises, head_rows=[] and the function falls through to the full-recursive serve — same designed-safety-path class as :470 (the fall-through IS the fallback) (was :482, +5 #229 choke merge; +2 #307 static apply) (+PC-2 #570 promo-фичи)
 
 src/pipeline/reconcile_runs.py:115  #265 — reconcile per-sender notify guard: the heal (status=failed) is ALREADY persisted above; a sender failure must not abort healing the remaining runs
 src/pipeline/reconcile_runs.py:118  #265 — reconcile notifications outer guard: same rationale; healing is the contract, notification is best-effort (NC-1 discipline)
@@ -106,3 +106,5 @@ src/api/routers/inference.py:257  #469 default-dataset: run-lookup best-effort �
 src/storage/upload_pipeline.py:548  PC-1 #570 — run_promo_process best-effort sniff: сбой sniff = канонический парс (как run_prepare:319), никакое состояние не глотается, лог громкий
 src/storage/upload_pipeline.py:625  PC-1 #570 — quarantine delete best-effort ПОСЛЕ успешной записи кандидата (тот же контракт, что run_process); провал уборки не должен валить принятый календарь
 src/storage/upload_pipeline.py:631  PC-1 #570 — unlink временного parquet в finally, best-effort уборка
+src/pipeline/inference_utils.py:240  PC-2 #570 — promo-calendar recompute best-effort (тот же контракт, что holiday/ramp выше): сбой пересчёта = carry-forward, лог debug
+src/features/engineering.py:157  PC-2 #570 — promo-calendar builder best-effort (fail-open по контракту эпика): сбой = нулевые promo_cal_* колонки, лог ERROR громкий

@@ -69,6 +69,9 @@ def run_batch_inference(
     from src.features.static_features import apply_model_static
     df = apply_model_static(model, df, config["data"]["sku_col"])
     feature_cols = get_feature_columns(df, config)
+    # #570 PC-2: batch-CLI не несёт dataset_id (работает по data_path) —
+    # календарь не подключаем (fail-open, нулевые promo_cal_*); боевые
+    # прогнозы идут через post_training/serve, где события передаются.
     result = forecast_all_skus(model, df, feature_cols, config)
 
     if output_path:

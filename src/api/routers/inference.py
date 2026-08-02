@@ -822,9 +822,14 @@ def predict(
         # trained with. /predict is single-SKU: a short-history SKU would
         # otherwise auto-drop the long lags the model expects → KeyError.
         _pin_lags, _pin_rw = serve_feature_set(service.primary)
+        # #570 PC-2: события активного календаря дефолтного датасета —
+        # в фичи (x_last-агрегаты для direct) и в recursive serve
+        from src.features.promo_calendar import load_active_events
+        promo_events = load_active_events(_default_dataset_id(client_id))
         df_feat      = build_features(
             df, config,
             pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
+            promo_events=promo_events,
         )
         # #229: market-колонки из хвоста модели (no-op для старых pickle) —
         # именно этот single-SKU путь и требует model-carried state:
@@ -865,6 +870,7 @@ def predict(
             sku=req.sku,
             predict_fn=_wrap_predict,  # recursive-path fallback (single-step / overflow / direct-fail)
             config=config,             # R12-#91: recompute holidays per forecast date
+            promo_events=promo_events,  # #570 PC-2: known-future promo per step
         )
 
         forecasts      = [round(float(r["predicted_sales"]), 4) for r in forecast_rows]
