@@ -39,6 +39,21 @@ RUN pip install --no-cache-dir --upgrade \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip uninstall -y multipart && pip install --no-cache-dir python-multipart
+# Re-fix ПОСЛЕ requirements: транзитивные зависимости откатывают setuptools
+# (Trivy: CVE-2025-47273, path traversal в PackageIndex ≤78.1.0) — финальный
+# апгрейд гарантирует патченную версию в итоговом слое образа.
+RUN pip install --no-cache-dir --upgrade "setuptools>=80"
+
+# Security (class-elimination): pip — build-инструмент, в рантайме он не
+# нужен (аудит: entrypoints uvicorn/rq/скрипты, ни одного вызова pip в
+# src/scripts/compose). Его вендорённые копии (pip/_vendor: msgpack,
+# setuptools, …) регулярно ловят CVE и валят image-скан, хотя в НАШЕМ
+# дереве зависимостей стоят патченные версии. Удаляем pip целиком —
+# уязвимый код физически отсутствует в образе, а не спрятан от сканера.
+# setuptools ОСТАЁТСЯ (патченный ≥80): pkg_resources нужен рантайму
+# сторонних библиотек.
+RUN python -m pip uninstall -y pip
+
 
 # Исходный код
 COPY src/ src/

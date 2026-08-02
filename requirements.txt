@@ -106,6 +106,9 @@ mlflow==3.13.0
 # ── Очередь задач ─────────────────────────────────────
 redis==5.0.4
 rq==1.16.2
+# security: GHSA-6v7p-g79w-8964 (out-of-bounds в Unpacker) — msgpack у нас
+# транзитивный; явный пин держит патченную версию поверх чужих требований
+msgpack==1.2.1
 
 # ── Upload pipeline (sandbox / antivirus) ─────────────
 # docker SDK: process-worker spawns secure_parser containers.
