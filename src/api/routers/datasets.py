@@ -229,7 +229,10 @@ def get_dataset(client_id: str, dataset_id: str,
         "date_min": u.date_min, "date_max": u.date_max,
         "created_at": u.created_at,
     } for u in ureg.list_for_client(client_id, limit=100)
-        if u.dataset_id == dataset_id and u.upload_id not in attached]
+        if u.dataset_id == dataset_id and u.upload_id not in attached
+        # #570 PC-3: календарные загрузки живут в секции «Календарь акций»,
+        # в списке ФАЙЛОВ ДАННЫХ датасета им не место (kind-ветвление)
+        and u.kind != "promo_calendar"]
 
     out = _with_model(_ds_view(ds, reg), _model_blocks(client_id) or {})
     out["files_detail"] = files
