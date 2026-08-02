@@ -245,13 +245,13 @@ def promo_calendar_upcoming(
                        dataset_id, e)
 
     events = []
-    for e in reg.list_events(active.calendar_id):
-        if e.sku != sku:
+    for ev in reg.list_events(active.calendar_id):
+        if ev.sku != sku:
             continue
-        if date_max and str(e.date_to) < str(date_max)[:10]:
+        if date_max and str(ev.date_to) < str(date_max)[:10]:
             continue                      # акция целиком в прошлом данных
-        events.append({"date_from": e.date_from, "date_to": e.date_to,
-                       "name": e.name})
+        events.append({"date_from": ev.date_from, "date_to": ev.date_to,
+                       "name": ev.name})
     events.sort(key=lambda x: x["date_from"])
     return {"events": events[:5]}
 
