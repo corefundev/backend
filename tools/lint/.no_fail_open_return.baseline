@@ -108,3 +108,4 @@ src/storage/upload_pipeline.py:625  PC-1 #570 — quarantine delete best-effort 
 src/storage/upload_pipeline.py:631  PC-1 #570 — unlink временного parquet в finally, best-effort уборка
 src/pipeline/inference_utils.py:240  PC-2 #570 — promo-calendar recompute best-effort (тот же контракт, что holiday/ramp выше): сбой пересчёта = carry-forward, лог debug
 src/features/engineering.py:157  PC-2 #570 — promo-calendar builder best-effort (fail-open по контракту эпика): сбой = нулевые promo_cal_* колонки, лог ERROR громкий
+src/api/routers/promo_calendar.py:243  PC-3 #570 — upcoming: date_max датасета best-effort обогащение фильтра; его недоступность НЕ роняет бейдж (показываем все sku-события), лог warning громкий

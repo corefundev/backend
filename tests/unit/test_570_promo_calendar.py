@@ -290,3 +290,41 @@ def test_run_promo_process_creates_candidate(monkeypatch, tmp_path):
 
     ur_mod.reset_registry_for_tests()
     pc_mod.reset_registry_for_tests()
+
+
+# ── PC-3: /promo-calendar/upcoming (бейдж SKU) ───────────────────────────
+
+def test_upcoming_filters_sku_and_past(monkeypatch, reg):
+    _wire(monkeypatch, reg)
+    monkeypatch.setattr(
+        "src.api.routers.inference._default_dataset_id", lambda cid: "ds1")
+
+    class _V:
+        date_max = "2015-11-10"
+    class _DS:
+        current_version = 1
+    class _DsReg:
+        def get(self, did): return _DS()
+        def get_version(self, did, v): return _V()
+    import src.storage.datasets as ds_mod
+    monkeypatch.setattr(ds_mod, "get_datasets_registry", lambda: _DsReg())
+
+    events = [
+        PromoEvent(sku="137", category=None, date_from="2015-06-01",
+                   date_to="2015-06-03", name="прошлая"),
+        PromoEvent(sku="137", category=None, date_from="2015-11-15",
+                   date_to="2015-11-17", name="будущая"),
+        PromoEvent(sku="999", category=None, date_from="2015-11-20",
+                   date_to="2015-11-21", name="чужая"),
+        PromoEvent(sku=None, category="Cinema", date_from="2015-11-25",
+                   date_to="2015-11-26", name="категорийная (v2)"),
+    ]
+    c = reg.create_candidate("c1", "ds1", "a.csv", {}, events, None)
+    reg.apply(c.calendar_id)
+
+    out = pcr.promo_calendar_upcoming("c1", sku="137", auth=_auth())
+    assert [e["name"] for e in out["events"]] == ["будущая"]
+
+    # нет активного календаря → пусто (fail-open)
+    reg.remove_active("ds1")
+    assert pcr.promo_calendar_upcoming("c1", sku="137", auth=_auth()) == {"events": []}

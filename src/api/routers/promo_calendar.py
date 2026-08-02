@@ -204,6 +204,58 @@ def promo_calendar_delete(
     return {"removed": removed}
 
 
+@router.get("/clients/{client_id}/promo-calendar/upcoming")
+def promo_calendar_upcoming(
+    client_id: str,
+    sku: str,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """#570 PC-3: предстоящие акции SKU для бейджа на странице прогноза.
+
+    Датасет — дефолтный (как у прогнозов: датасет последнего promoted-
+    обучения). «Предстоящие» = события активного календаря, чьё date_to
+    не раньше конца истории данных (окно прогноза начинается после него).
+    v1 — только sku-события; категорийные акции в бейдже — v2
+    (резолв категории SKU требует чтения снапшота)."""
+    require_client_access(client_id, auth)
+    _promo_calendar_allowed(client_id)
+
+    from src.api.routers.inference import _default_dataset_id
+    from src.storage.datasets import get_datasets_registry
+    from src.storage.promo_calendar import get_promo_calendar_registry
+
+    dataset_id = _default_dataset_id(client_id)
+    if not dataset_id:
+        return {"events": []}
+    reg = get_promo_calendar_registry()
+    active = reg.get_active(dataset_id)
+    if active is None:
+        return {"events": []}
+
+    # конец истории данных = начало окна прогноза
+    date_max = None
+    try:
+        ds_reg = get_datasets_registry()
+        ds = ds_reg.get(dataset_id)
+        if ds is not None and ds.current_version > 0:
+            v = ds_reg.get_version(dataset_id, ds.current_version)
+            date_max = getattr(v, "date_max", None)
+    except Exception as e:    # noqa: BLE001 — бейдж вспомогательный, не роняем
+        logger.warning("upcoming: dataset date_max unavailable (%s): %s",
+                       dataset_id, e)
+
+    events = []
+    for ev in reg.list_events(active.calendar_id):
+        if ev.sku != sku:
+            continue
+        if date_max and str(ev.date_to) < str(date_max)[:10]:
+            continue                      # акция целиком в прошлом данных
+        events.append({"date_from": ev.date_from, "date_to": ev.date_to,
+                       "name": ev.name})
+    events.sort(key=lambda x: x["date_from"])
+    return {"events": events[:5]}
+
+
 _TEMPLATE_CSV = (
     "﻿"    # BOM: Excel-RU открывает UTF-8 корректно
     "sku;category;date_from;date_to;depth;name\n"
