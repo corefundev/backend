@@ -65,6 +65,16 @@ RUN pip install --no-cache-dir -r /tmp/requirements-sandbox.txt && \
 
 COPY src/validation/secure_parser.py /opt/secure_parser.py
 
+# Security (class-elimination): pip — build-инструмент, в рантайме он не
+# нужен (аудит: entrypoints uvicorn/rq/скрипты, ни одного вызова pip в
+# src/scripts/compose). Его вендорённые копии (pip/_vendor: msgpack,
+# setuptools, …) регулярно ловят CVE и валят image-скан, хотя в НАШЕМ
+# дереве зависимостей стоят патченные версии. Удаляем pip целиком —
+# уязвимый код физически отсутствует в образе, а не спрятан от сканера.
+# setuptools ОСТАЁТСЯ (патченный ≥80): pkg_resources нужен рантайму
+# сторонних библиотек.
+RUN python -m pip uninstall -y pip
+
 # Strip interactive shells — nothing in the sandbox should need them.
 # We keep /bin/sh only if you need it for Docker exec debugging; comment
 # out to go stricter.
