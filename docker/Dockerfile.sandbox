@@ -65,14 +65,6 @@ RUN pip install --no-cache-dir -r /tmp/requirements-sandbox.txt && \
 
 COPY src/validation/secure_parser.py /opt/secure_parser.py
 
-# Strip interactive shells — nothing in the sandbox should need them.
-# We keep /bin/sh only if you need it for Docker exec debugging; comment
-# out to go stricter.
-RUN rm -f /bin/bash /bin/dash /usr/bin/perl /usr/bin/awk /usr/bin/ssh || true
-
-# Drop privileges early (Docker will enforce --user too, but defense in depth).
-USER 65534:65534
-
 # Security (class-elimination): pip — build-инструмент, в рантайме он не
 # нужен (аудит: entrypoints uvicorn/rq/скрипты, ни одного вызова pip в
 # src/scripts/compose). Его вендорённые копии (pip/_vendor: msgpack,
@@ -82,5 +74,13 @@ USER 65534:65534
 # setuptools ОСТАЁТСЯ (патченный ≥80): pkg_resources нужен рантайму
 # сторонних библиотек.
 RUN python -m pip uninstall -y pip
+
+# Strip interactive shells — nothing in the sandbox should need them.
+# We keep /bin/sh only if you need it for Docker exec debugging; comment
+# out to go stricter.
+RUN rm -f /bin/bash /bin/dash /usr/bin/perl /usr/bin/awk /usr/bin/ssh || true
+
+# Drop privileges early (Docker will enforce --user too, but defense in depth).
+USER 65534:65534
 
 ENTRYPOINT ["python", "/opt/secure_parser.py"]
