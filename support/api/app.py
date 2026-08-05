@@ -124,6 +124,33 @@ SYSTEM = (
 )
 
 
+_GREETING_RE = re.compile(
+    r"^\s*(привет\w*|здравствуй\w*|добрый (день|вечер|утро)|доброе утро|"
+    r"хай|hello|hi|ку|salut|start|начать|помоги\w*|help)\s*[!.…]*\s*$",
+    re.IGNORECASE)
+_THANKS_RE = re.compile(
+    r"^\s*(спасибо\w*|благодар\w*|спс|thanks|thank you|thx|пока|до свидания)"
+    r"\s*[!.…]*\s*$", re.IGNORECASE)
+
+_WELCOME = (
+    "Здравствуйте! Я ассистент Sprosly. Помогу разобраться с загрузкой "
+    "данных, обучением модели, точностью прогноза, тарифами и настройками — "
+    "спрашивайте своими словами, отвечу со ссылками на документацию."
+)
+_BYE = "Пожалуйста! Если появятся вопросы по Sprosly — я на месте."
+
+
+def small_talk(message: str) -> str | None:
+    """Приветствие/благодарность — не вопрос из БЗ: тёплый ответ без RAG
+    и без эскалации (UX #566: на «привет» ассистент не отсылает в
+    поддержку)."""
+    if _GREETING_RE.match(message):
+        return _WELCOME
+    if _THANKS_RE.match(message):
+        return _BYE
+    return None
+
+
 def retrieve(query: str) -> list[dict]:
     emb = model().encode(f"query: {query}", normalize_embeddings=True).tolist()
     conn = psycopg2.connect(DB)
@@ -163,9 +190,16 @@ async def chat(req: Request) -> StreamingResponse:
 
     # Ответ строится СИНХРОННО (LLM stream=False) — так и журналируем факт,
     # и решаем отдать/эскалировать по ПОЛНОМУ тексту, и лишь потом стримим.
-    hits = retrieve(message) if message else []
-    strong = [h for h in hits if h["sim"] >= MIN_SIM]
-    answer, escalate, cites = _ESC_MSG, True, []
+    # SUP-UX #566: приветствие/благодарность — canned-ответ без retrieval
+    # и LLM; журналируем наравне с обычными диалогами.
+    canned = small_talk(message) if message else None
+    if canned is not None:
+        strong = []
+        answer, escalate, cites = canned, False, []
+    else:
+        hits = retrieve(message) if message else []
+        strong = [h for h in hits if h["sim"] >= MIN_SIM]
+        answer, escalate, cites = _ESC_MSG, True, []
 
     if strong:
         context = "\n\n".join(
