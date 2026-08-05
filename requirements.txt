@@ -7,8 +7,8 @@
 # Это позволяет pip разрешить конфликты автоматически.
 #
 # Проверенные совместимые комбинации:
-#   mlflow 3.13.0 + pyarrow 23.0.1 (mlflow 3.13 allows pyarrow<25,>=4;
-#     mlflow 3.13 also caps numpy<3 / scipy<2 / sklearn<2 / pandas<3,
+#   mlflow 3.13.0 + pyarrow 23.0.1 (mlflow 3.15 allows pyarrow<26,>=4;
+#     mlflow 3.15 also caps numpy<3 / scipy<2 / sklearn<2 / pandas<3,
 #     so the existing pins + the scipy<2 evidently wedge all hold)
 #   evidently 0.5.0 + opentelemetry-api>=1.25.0
 # ══════════════════════════════════════════════════════
@@ -39,7 +39,7 @@ scipy==1.13.0
 # LOCKSTEP so the parquet IPC format stays consistent across the
 # sandbox-write → main-pipeline-read boundary (R3-3 lesson: pyarrow version
 # skew silently breaks deserialization).
-pyarrow==23.0.1           # 23.0.1: closes CVE-2026-25087; within mlflow 3.13's pyarrow<25
+pyarrow==23.0.1           # 23.0.1: closes CVE-2026-25087; within mlflow 3.15's pyarrow<26
 
 # ── API ───────────────────────────────────────────────
 # 0.135.0 drops the Starlette upper-bound cap (requires only starlette>=0.46.0),
@@ -79,10 +79,13 @@ PyJWT==2.13.0              # R12-#85: CVE-2026-48526 + 48522-25 fixed in 2.13; C
 hvac==2.3.0
 # R12-#89 (M1): imported directly (lockbox_agent PS256 signing, Google
 # OIDC RS256 verify) but previously rode in as mlflow's transitive —
-# a security-critical primitive must be pinned explicitly. Matches the
-# version mlflow 3.13 resolves (<49,>=43); bump deliberately, not by
-# resolver accident.
-cryptography==48.0.1
+# a security-critical primitive must be pinned explicitly.
+# #605: 49.0.0 закрывает CVE-2026-69249 и влезает в потолок mlflow
+# 3.15.1 (<50). CVE-2026-69247 требует 50.0.0 — его закрывает
+# security-override в docker/Dockerfile{,.worker} (--no-deps ПОСЛЕ
+# requirements). Когда mlflow отпустит потолок до <51 — свернуть
+# override в прямой пин 50.x здесь.
+cryptography==49.0.0
 pyotp==2.9.0    # 2FA-1 #587: TOTP RFC 6238 (приложение-аутентификатор)
 
 # ── Хранилище ─────────────────────────────────────────
@@ -101,7 +104,7 @@ great-expectations==0.18.15
 # the pyarrow 23.0.1 bump needed for CVE-2026-25087. 3.13 widens to
 # pyarrow<25 while keeping numpy<3 / scipy<2 / sklearn<2 / pandas<3, so
 # every existing pin (incl. the scipy<2 evidently wedge) still resolves.
-mlflow==3.13.0
+mlflow==3.15.1
 
 # ── Очередь задач ─────────────────────────────────────
 redis==5.0.4
