@@ -42,6 +42,13 @@ RUN pip install --no-cache-dir --upgrade "setuptools>=80"
 # уязвимый код физически отсутствует в образе, а не спрятан от сканера.
 # setuptools ОСТАЁТСЯ (патченный ≥80): pkg_resources нужен рантайму
 # сторонних библиотек.
+# #605: CVE-2026-69247 закрыт только в cryptography 50.0.0, а mlflow
+# 3.15.1 держит потолок <50 — резолвер не пустит 50.x через requirements.
+# Осознанный security-override (--no-deps: только сам пакет) + проба
+# импортов: билд падает, если override ломает потребителей.
+RUN pip install --no-cache-dir --no-deps "cryptography==50.0.0" && \
+    python -c "import cryptography, jwt, mlflow; import cryptography.hazmat.primitives.asymmetric.rsa"
+
 RUN python -m pip uninstall -y pip
 
 COPY src/ src/
