@@ -1094,3 +1094,110 @@ tests:
       - eval_time: 5h
         alertname: ModelAgeCheckStale
         exp_alerts: []
+
+  # ──────────────────────────────────────────────────────────────
+  # #509 — supbot: Down / HighEscalationShare / SlowP95.
+  # ──────────────────────────────────────────────────────────────
+
+  # SupbotDown: up=0 дольше 5м файрит; up=1 — молчит.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="supbot", instance="10.16.0.2:8090"}'
+        values: '1x5 0x15'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SupbotDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: SupbotDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: supbot
+              instance: "10.16.0.2:8090"
+            exp_annotations:
+              summary: "Ассистент поддержки недоступен (scrape 10.16.0.2:8090 падает 5м)"
+
+  # HighEscalationShare: доля эскалаций 100% при ЗАМЕТНОМ трафике
+  # (1/мин ≈ 0.0167/s > гарда 0.002) — файрит после for:30m.
+  - interval: 1m
+    input_series:
+      - series: 'supbot_requests_total{outcome="escalated"}'
+        values: '0+1x180'
+      - series: 'supbot_requests_total{outcome="answered"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: SupbotHighEscalationShare
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Ассистент эскалирует >60% вопросов за час (при заметном трафике) — деградация retrieval/LLM"
+
+  # Гард малого трафика: 2 эскалации за 3 часа (бета-затишье) — доля
+  # 100%, но rate ниже порога → НЕ файрит (иначе хронический шум).
+  - interval: 1m
+    input_series:
+      - series: 'supbot_requests_total{outcome="escalated"}'
+        values: '0 1x90 2x90'
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: SupbotHighEscalationShare
+        exp_alerts: []
+
+  # SlowP95: рост только в hi-бакетах (>60с) — p95 в (60,90] → файрит;
+  # контроль: рост в le=10 — p95 низкий → молчит.
+  - interval: 1m
+    input_series:
+      - series: 'supbot_request_seconds_bucket{le="1.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="2.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="5.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="10.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="20.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="30.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="60.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="90.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="+Inf"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: SupbotSlowP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "p95 ответа ассистента > 60с полчаса — проверить LLM/очередь (класс #592 mmap-thrash)"
+
+  - interval: 1m
+    input_series:
+      - series: 'supbot_request_seconds_bucket{le="1.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="2.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="5.0"}'
+        values: '0x120'
+      - series: 'supbot_request_seconds_bucket{le="10.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="20.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="30.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="60.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="90.0"}'
+        values: '0+1x120'
+      - series: 'supbot_request_seconds_bucket{le="+Inf"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: SupbotSlowP95
+        exp_alerts: []
