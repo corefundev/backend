@@ -66,6 +66,9 @@ services:
       LLM_URL: http://127.0.0.1:8081
       SUPBOT_ADMIN_SECRET: ${SUPBOT_ADMIN_SECRET:-}
       DIALOG_RETENTION_DAYS: ${DIALOG_RETENTION_DAYS:-30}
+      # #509: эскалации в ops-Telegram (тот же бот, что канарейка)
+      TELEGRAM_ALERT_BOT_TOKEN: ${TELEGRAM_ALERT_BOT_TOKEN:-}
+      TELEGRAM_ALERT_CHAT_ID: ${TELEGRAM_ALERT_CHAT_ID:-}
     network_mode: host
     volumes:
       - ./models:/models

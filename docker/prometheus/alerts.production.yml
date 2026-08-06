@@ -288,3 +288,30 @@ groups:
         annotations:
           summary:     "model_age_check probe is stale (>3h)"
           description: "scripts/model_age_check.sh (hourly, backup container) has not pushed model_age_check_timestamp_seconds in 3h — the staleness NUDGE and the admin console are now blind on model ages (frozen ages could mask real staleness). Check /var/log/model_age_check.log in docker-backup-1 and pushgateway reachability."
+
+  # ── #509: AI-ассистент поддержки (prod-only: supbot есть только в prod) ──
+  - name: supbot
+    rules:
+      - alert: SupbotDown
+        expr: up{job="supbot"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Ассистент поддержки недоступен (scrape 10.16.0.2:8090 падает 5м)"
+      - alert: SupbotHighEscalationShare
+        expr: >
+          (sum(rate(supbot_requests_total{outcome="escalated"}[1h]))
+           / sum(rate(supbot_requests_total{outcome!="smalltalk"}[1h]))) > 0.6
+          and sum(rate(supbot_requests_total{outcome!="smalltalk"}[1h])) > 0.002
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Ассистент эскалирует >60% вопросов за час (при заметном трафике) — деградация retrieval/LLM"
+      - alert: SupbotSlowP95
+        expr: >
+          histogram_quantile(0.95,
+            rate(supbot_request_seconds_bucket[30m])) > 60
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 ответа ассистента > 60с полчаса — проверить LLM/очередь (класс #592 mmap-thrash)"
