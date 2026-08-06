@@ -29,7 +29,9 @@ from sentence_transformers import SentenceTransformer
 
 DB = f"postgresql://supbot:{os.environ['VECTORDB_PASSWORD']}@127.0.0.1:5433/supbot"
 LLM = os.environ.get("LLM_URL", "http://127.0.0.1:8081")  # host-network
-TOP_K = 5
+# #567: пул кандидатов для пер-док дедупа — из 5 сырых чанков после
+# дедупа часто оставалось <3 документов; 8 даёт полный разнообразный топ-3.
+TOP_K = 8
 MIN_SIM = 0.72          # ниже — считаем, что в документации ответа нет
 EMBED_MODEL = "intfloat/multilingual-e5-small"
 
@@ -109,7 +111,7 @@ def model() -> SentenceTransformer:
     return _model
 
 
-NOANS = "НЕТ_В_ДОКУМЕНТАЦИИ"
+from logic import NOANS, dedupe_by_doc, is_refusal  # noqa: E402
 SYSTEM = (
     "Ты — ассистент поддержки сервиса прогнозирования спроса Sprosly. "
     "Правила:\n"
@@ -198,7 +200,9 @@ async def chat(req: Request) -> StreamingResponse:
         answer, escalate, cites = canned, False, []
     else:
         hits = retrieve(message) if message else []
-        strong = [h for h in hits if h["sim"] >= MIN_SIM]
+        # #567: не больше одного чанка на документ — замер показал, что
+        # дубли одного дока вытесняют правильные статьи из топ-3.
+        strong = dedupe_by_doc([h for h in hits if h["sim"] >= MIN_SIM])
         answer, escalate, cites = _ESC_MSG, True, []
 
     if strong:
@@ -222,7 +226,10 @@ async def chat(req: Request) -> StreamingResponse:
         if _output_unsafe(llm):
             logger.warning("support: output filter tripped, escalating")
             llm = ""
-        if NOANS not in llm and len(llm) >= 3:
+        # #567: модель может перефразировать маркер отказа — проверка
+        # устойчива к парафразу, иначе «Нет в документации.» ушло бы
+        # клиенту как валидный ответ без эскалации.
+        if not is_refusal(llm) and len(llm) >= 3:
             answer, escalate = llm, False
             seen = set()
             for h in strong:

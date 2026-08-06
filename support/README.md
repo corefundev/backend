@@ -14,3 +14,14 @@
 пароль pgvector генерится при бутстрапе, в git не живёт.
 
 Bootstrap на чистом VPS: `bash support/bootstrap_supbot.sh` (по SSH).
+
+## Retention диалогов (#567)
+
+Журнал `dialogs` хранится 30 дней (решение владельца 2026-08-06; диалоги —
+потенциально ПДн). Ежедневный cron на хосте (по образцу канарейки):
+
+```
+5 4 * * * /srv/supbot/guard/retention.sh >> /srv/supbot/retention.log 2>&1
+```
+
+Период переопределяется `DIALOG_RETENTION_DAYS` в `/srv/supbot/.env`.
