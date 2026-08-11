@@ -2,7 +2,10 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py logic.py .
+# все python-модули сервиса разом — добавление нового модуля больше не
+# требует править COPY (класс инцидентов #607/#609: недокопированный
+# модуль; проба import ниже ловит остальное)
+COPY *.py ./
 # #567: build-time проба импорта — недокопированный модуль валит билд,
 # а не прод-контейнер (инцидент 2026-08-06: logic.py не попал в COPY).
 RUN VECTORDB_PASSWORD=build-probe python -c "import app"
