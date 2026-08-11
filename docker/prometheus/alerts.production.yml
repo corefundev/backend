@@ -300,9 +300,9 @@ groups:
           summary: "Ассистент поддержки недоступен (scrape 10.16.0.2:8090 падает 5м)"
       - alert: SupbotHighEscalationShare
         expr: >
-          (sum(rate(supbot_requests_total{outcome="escalated"}[1h]))
-           / sum(rate(supbot_requests_total{outcome!="smalltalk"}[1h]))) > 0.6
-          and sum(rate(supbot_requests_total{outcome!="smalltalk"}[1h])) > 0.002
+          (sum(rate(supbot_requests_total{outcome="escalated",surface!="canary"}[1h]))
+           / sum(rate(supbot_requests_total{outcome!="smalltalk",surface!="canary"}[1h]))) > 0.6
+          and sum(rate(supbot_requests_total{outcome!="smalltalk",surface!="canary"}[1h])) > 0.002
         for: 30m
         labels: {severity: warning}
         annotations:

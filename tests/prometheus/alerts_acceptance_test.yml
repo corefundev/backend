@@ -1201,3 +1201,16 @@ tests:
       - eval_time: 100m
         alertname: SupbotSlowP95
         exp_alerts: []
+
+  # #509: канарейка эскалирует BY DESIGN (surface="canary") — даже её
+  # плотный трафик не зажигает HighEscalationShare.
+  - interval: 1m
+    input_series:
+      - series: 'supbot_requests_total{outcome="escalated", surface="canary"}'
+        values: '0+1x180'
+      - series: 'supbot_requests_total{outcome="answered", surface="public"}'
+        values: '0+1x180'
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: SupbotHighEscalationShare
+        exp_alerts: []

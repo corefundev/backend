@@ -271,11 +271,13 @@ async def chat(req: Request) -> StreamingResponse:
     # #509: метрики — итог запроса одним местом, после журнала
     outcome = ("smalltalk" if canned is not None
                else "escalated" if escalate else "answered")
-    METRICS.inc("supbot_requests_total", {"outcome": outcome})
+    METRICS.inc("supbot_requests_total",
+                {"outcome": outcome, "surface": surface})
     if canned is None and strong:
         METRICS.inc("supbot_retrieval_hits_total")
     METRICS.observe("supbot_request_seconds", _time.monotonic() - t_start)
-    if escalate:
+    # #509: канарейка эскалирует BY DESIGN — в ops-TG не уведомляем
+    if escalate and surface != "canary":
         await _notify_escalation(session_id, surface, message)
 
     async def stream():
