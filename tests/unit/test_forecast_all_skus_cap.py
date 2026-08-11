@@ -86,7 +86,7 @@ def test_truncation_is_stable_first_n_skus():
 
     def _capture(model, history, feature_cols, horizon, sku, sku_col,
                  date_col, target_col, predict_fn=None, config=None,
-                 promo_events=None):
+                 promo_events=None, future_overrides=None):
         # R11-#59: forecast_all_skus now goes through serve_forecast, which
         # delegates to recursive_forecast with the predict_fn arg for a non-
         # MIMO model (model=None here). R12-#91 added the config kwarg —

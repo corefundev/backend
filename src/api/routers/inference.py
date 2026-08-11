@@ -72,6 +72,18 @@ router = APIRouter(tags=["inference"])
 
 # ── Request / response schemas ──────────────────────────────────────────
 
+class WhatIfRequest(BaseModel):
+    """WF-1 #470: сценарий «что если» для одного SKU (Business)."""
+    sku: str = Field(..., min_length=1, max_length=256)
+    # Мультипликатор цены: 0.9 = «−10%». Границы отсекают бессмысленные
+    # сценарии (модель вне носителя обучающих данных).
+    price_mult: Optional[float] = Field(None, ge=0.5, le=1.5)
+    # Тумблер промо на всём окне прогноза.
+    promo: Optional[bool] = None
+    # Окно заказа для дельт (как в order-recommendations).
+    window: int = Field(14, ge=1, le=28)
+
+
 class PredictRequest(BaseModel):
     # SKU must be a real catalog identifier — anything >256 chars is
     # someone abusing the parser. Audit R2-6.
@@ -756,6 +768,74 @@ async def get_upload_prep(
 # (psycopg2 registry read, S3 model load, bcrypt-free, CPU-heavy pandas/ML), so
 # FastAPI runs it in the threadpool and the event loop stays free for other
 # tenants. predict_batch invokes it via run_in_threadpool for real concurrency.
+
+def _serve_single_sku(
+    client_id: str,
+    record,
+    df: "pd.DataFrame",
+    sku: str,
+    requested_horizon: "int | None",
+    future_overrides: "dict[str, float] | None" = None,
+    force_recursive: bool = False,
+):
+    """WF-1 #470: общий serve-конвейер одного SKU (вынесен из /predict
+    БЕЗ изменения поведения). df — сырые строки истории (date/sales/…),
+    отсортированные по дате. Возвращает (forecast_rows, horizon, clipped,
+    model_source, config).
+    """
+    from src.clients.config_manager import get_config_manager as _gcm
+    config = _gcm(CONFIG_PATH).get_effective_serving(client_id, get_registry())
+    horizon, clipped = clip_horizon_to_plan(
+        record, requested_horizon or config["model"]["horizon"])
+    service = _get_or_load_service(client_id, load_factory=load_service_for_client)
+
+    for col, default in [("price", np.nan), ("promo", 0), ("stock", np.nan)]:
+        if col not in df.columns:
+            df[col] = default
+
+    _pin_lags, _pin_rw = serve_feature_set(service.primary)
+    from src.features.promo_calendar import load_active_events
+    promo_events = load_active_events(_default_dataset_id(client_id))
+    df_feat = build_features(
+        df, config,
+        pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
+        promo_events=promo_events,
+    )
+    from src.features.market import apply_model_market
+    df_feat = apply_model_market(service.primary, df_feat,
+                                 config["data"]["date_col"])
+    from src.features.static_features import apply_model_static
+    df_feat = apply_model_static(service.primary, df_feat,
+                                 config["data"]["sku_col"])
+    feature_cols = get_feature_columns(df_feat, config)
+
+    from src.pipeline.inference_utils import serve_forecast
+
+    model_source = "primary"
+
+    def _wrap_predict(features_df):
+        nonlocal model_source
+        preds, source = service.predict(features_df)
+        if source != "primary":
+            model_source = source
+            FALLBACK_COUNT.labels(client_id=client_id).inc()
+        return preds, source
+
+    forecast_rows = serve_forecast(
+        model=service.primary,
+        history=df_feat,
+        feature_cols=feature_cols,
+        horizon=horizon,
+        sku=sku,
+        predict_fn=_wrap_predict,
+        config=config,
+        promo_events=promo_events,
+        future_overrides=future_overrides,
+        force_recursive=force_recursive,
+    )
+    return forecast_rows, horizon, clipped, model_source, config
+
+
 @router.post("/clients/{client_id}/predict", response_model=PredictResponse)
 def predict(
     client_id: str,
@@ -794,18 +874,8 @@ def predict(
         )
 
     try:
-        # Модель-аудит H1: /predict строил фичи по СИСТЕМНОМУ конфигу —
-        # без клиентских override и план-дефолтов (FX у платных) → mismatch
-        # с feature_cols модели → тихий SeasonalNaive-фолбэк.
-        from src.clients.config_manager import get_config_manager as _gcm
-        config   = _gcm(CONFIG_PATH).get_effective_serving(
-            client_id, get_registry())
-        requested_horizon = req.horizon or config["model"]["horizon"]
-        horizon, clipped  = clip_horizon_to_plan(record, requested_horizon)
-        service  = _get_or_load_service(client_id, load_factory=load_service_for_client)
-
-        # Resolve history: either inline payload or pulled from the
-        # processed parquet for the given upload_id.
+        # Модель-аудит H1 → WF-1 #470: конвейер вынесен в _serve_single_sku
+        # (общий с what-if) — поведение /predict сохранено бит-в-бит.
         history = req.history
         if not history and req.upload_id:
             history = _load_processed_for_sku(client_id, req.upload_id, req.sku)
@@ -814,64 +884,9 @@ def predict(
         df["sku"]  = req.sku
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").reset_index(drop=True)
-        for col, default in [("price", np.nan), ("promo", 0), ("stock", np.nan)]:
-            if col not in df.columns:
-                df[col] = default
 
-        # R12-#100 — pin the lag/rolling set to what the loaded model was
-        # trained with. /predict is single-SKU: a short-history SKU would
-        # otherwise auto-drop the long lags the model expects → KeyError.
-        _pin_lags, _pin_rw = serve_feature_set(service.primary)
-        # #570 PC-2: события активного календаря дефолтного датасета —
-        # в фичи (x_last-агрегаты для direct) и в recursive serve
-        from src.features.promo_calendar import load_active_events
-        promo_events = load_active_events(_default_dataset_id(client_id))
-        df_feat      = build_features(
-            df, config,
-            pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
-            promo_events=promo_events,
-        )
-        # #229: market-колонки из хвоста модели (no-op для старых pickle) —
-        # именно этот single-SKU путь и требует model-carried state:
-        # из среза одного SKU «рынок» невычислим.
-        from src.features.market import apply_model_market
-        df_feat = apply_model_market(service.primary, df_feat,
-                                     config["data"]["date_col"])
-        # #307: static-колонки (velocity_band, price_tier) — ДО get_feature_columns,
-        # иначе feature_cols не включит их, а модель обучена с ними.
-        from src.features.static_features import apply_model_static
-        df_feat = apply_model_static(service.primary, df_feat,
-                                     config["data"]["sku_col"])
-        feature_cols = get_feature_columns(df_feat, config)
-
-        # Shared serve dispatcher (R11-#59 / H2): for MIMO/Ensemble it reads
-        # the model's direct heads (no recursive compounding); for a true
-        # single-step model — or a horizon past the model's trained one, or if
-        # direct prediction errors — it drops to recursive_forecast, which
-        # recomputes lag/rolling/calendar per step and carries the SeasonalNaive
-        # fallback via predict_fn below.
-        from src.pipeline.inference_utils import serve_forecast
-
-        model_source = "primary"
-
-        def _wrap_predict(features_df):
-            preds, source = service.predict(features_df)
-            nonlocal model_source
-            if source != "primary":
-                model_source = source
-                FALLBACK_COUNT.labels(client_id=client_id).inc()
-            return preds, source
-
-        forecast_rows = serve_forecast(
-            model=service.primary,     # direct path uses the loaded MIMO/Ensemble
-            history=df_feat,
-            feature_cols=feature_cols,
-            horizon=horizon,
-            sku=req.sku,
-            predict_fn=_wrap_predict,  # recursive-path fallback (single-step / overflow / direct-fail)
-            config=config,             # R12-#91: recompute holidays per forecast date
-            promo_events=promo_events,  # #570 PC-2: known-future promo per step
-        )
+        forecast_rows, horizon, clipped, model_source, _cfg = _serve_single_sku(
+            client_id, record, df, req.sku, req.horizon)
 
         forecasts      = [round(float(r["predicted_sales"]), 4) for r in forecast_rows]
         forecast_dates = [pd.Timestamp(r["date"]).strftime("%Y-%m-%d") for r in forecast_rows]
@@ -904,6 +919,131 @@ def predict(
             status_code=500,
             detail=f"internal error (trace_id={trace_id})",
         )
+
+
+@router.post("/clients/{client_id}/datasets/{dataset_id}/what-if")
+def what_if(
+    client_id: str,
+    dataset_id: str,
+    req: WhatIfRequest,
+    auth: AuthContext = Depends(get_current_client),
+):
+    """WF-1 #470: что-если по цене/промо для одного SKU.
+
+    Оба ряда (базлайн и сценарий) считаются ОДНИМ путём — рекурсивным
+    (direct-головы не видят будущих изменений exogenous, ограничение
+    PC-2) — сравнение like-for-like. Полосу p10/p90 не отдаём:
+    калибровка не валидна для сценария (решение владельца 2026-08-12).
+    Заказ «после» — пропорциональная оценка от хранимой рекомендации.
+    """
+    require_client_access(client_id, auth)
+    t_start = time.perf_counter()
+
+    record = get_registry().get(client_id)
+    if record is None:
+        raise HTTPException(404, detail=f"Client '{client_id}' not found")
+    if record.plan != "business":
+        raise HTTPException(
+            403, detail="Сценарии «что если» доступны на тарифе Business")
+    if req.price_mult is None and req.promo is None:
+        raise HTTPException(
+            422, detail="Укажите изменение цены и/или промо")
+
+    # ── история SKU из снапшота датасета ──
+    from src.storage import zones as z
+    from src.storage.datasets import get_datasets_registry
+    ds_reg = get_datasets_registry()
+    ds = ds_reg.get(dataset_id)
+    if ds is None or ds.client_id != client_id or ds.current_version < 1:
+        raise HTTPException(404, detail="Датасет не найден или пуст")
+    ver = ds_reg.get_version(dataset_id, ds.current_version)
+    if ver is None or not ver.snapshot_key:
+        raise HTTPException(404, detail="Снапшот датасета недоступен")
+    snap = z.get_zone_backend(z.Zone.PROCESSED).load_dataframe(ver.snapshot_key)
+    df = snap[snap["sku"].astype(str) == req.sku].copy()
+    if df.empty:
+        raise HTTPException(404, detail=f"SKU '{req.sku}' нет в датасете")
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
+    # ── честные отказы: сценарий, который модель не может увидеть ──
+    if req.price_mult is not None:
+        prices = df["price"].dropna() if "price" in df.columns else pd.Series(dtype=float)
+        if prices.empty:
+            raise HTTPException(409, detail=(
+                "Сценарий по цене недоступен: в данных этого датасета нет "
+                "колонки цены — модель не обучалась на цене"))
+        if float(prices.std() or 0.0) == 0.0:
+            raise HTTPException(409, detail=(
+                "Сценарий по цене недоступен: цена в истории константна — "
+                "модель не выучила эффект цены"))
+
+    overrides: dict = {}
+    if req.price_mult is not None:
+        last_price = float(df["price"].dropna().iloc[-1])
+        overrides["price"] = round(last_price * req.price_mult, 4)
+    if req.promo is not None:
+        overrides["promo"] = 1.0 if req.promo else 0.0
+
+    try:
+        baseline_rows, horizon, _clip, _src, _cfg = _serve_single_sku(
+            client_id, record, df.copy(), req.sku, None,
+            force_recursive=True)
+        scenario_rows, _h2, _c2, _s2, _cfg2 = _serve_single_sku(
+            client_id, record, df.copy(), req.sku, None,
+            future_overrides=overrides, force_recursive=True)
+    except HTTPException:
+        raise
+    except Exception:
+        import uuid as _uuid
+        trace_id = _uuid.uuid4().hex[:12]
+        logger.exception(
+            f"what-if failed client={client_id} sku={req.sku} trace_id={trace_id}")
+        raise HTTPException(500, detail=f"internal error (trace_id={trace_id})")
+
+    w = min(req.window, len(baseline_rows))
+    base_vals = [max(0.0, float(r["predicted_sales"])) for r in baseline_rows]
+    scen_vals = [max(0.0, float(r["predicted_sales"])) for r in scenario_rows]
+    base_sum = sum(base_vals[:w])
+    scen_sum = sum(scen_vals[:w])
+    delta_pct = ((scen_sum - base_sum) / base_sum * 100.0) if base_sum > 0 else None
+
+    # заказ «до» — из хранимых рекомендаций (order_qty первых w дней);
+    # «после» — пропорциональная ОЦЕНКА (полоса сценария не калибрована)
+    order_before = order_after = None
+    try:
+        from src.storage.forecasts import get_forecasts_registry
+        import math
+        rows = get_forecasts_registry().list_for_client(
+            client_id, dataset_id=dataset_id)
+        oq = [r.get("order_qty") for r in rows
+              if str(r.get("sku")) == req.sku][:w]
+        oq = [float(v) for v in oq if v is not None]
+        if oq:
+            order_before = int(math.ceil(sum(oq)))
+            if base_sum > 0:
+                order_after = int(math.ceil(sum(oq) * (scen_sum / base_sum)))
+    except Exception as e:    # noqa: BLE001 — оценка заказа best-effort
+        logger.warning("what-if: order estimate failed: %s", e)
+
+    logger.info("what-if client=%s sku=%s lat=%.2fs overrides=%s",
+                client_id, req.sku, time.perf_counter() - t_start, overrides)
+    return {
+        "sku": req.sku,
+        "horizon": horizon,
+        "window": w,
+        "dates": [pd.Timestamp(r["date"]).strftime("%Y-%m-%d")
+                  for r in baseline_rows],
+        "baseline": [round(v, 3) for v in base_vals],
+        "scenario": [round(v, 3) for v in scen_vals],
+        "baseline_sum": round(base_sum, 2),
+        "scenario_sum": round(scen_sum, 2),
+        "delta_pct": round(delta_pct, 1) if delta_pct is not None else None,
+        "order_before": order_before,
+        "order_after_estimate": order_after,
+        "note": "Сценарий — точечная оценка модели; интервалы не калиброваны "
+                "для сценариев и не показываются.",
+    }
 
 
 @router.post("/clients/{client_id}/predict/batch")
