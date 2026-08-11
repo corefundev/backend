@@ -112,6 +112,16 @@ scrape_configs:
   # honor_labels: true so the `instance` / `job` labels pushed by the
   # job survive (otherwise prometheus overwrites them with the scrape
   # target's pushgateway:9091).
+  # #509: AI-ассистент поддержки (supbot VPS, приватная сеть).
+  # Метрики отдаёт chatapi (/support/metrics, самописный экспортер).
+  # Job существует ТОЛЬКО в prod (staging supbot'а не имеет — см.
+  # prometheus.staging.yml и правило per-env alert-файлов).
+  - job_name: "supbot"
+    metrics_path: /support/metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["10.16.0.2:8090"]
+
   - job_name: "pushgateway"
     honor_labels: true
     static_configs:

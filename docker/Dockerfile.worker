@@ -49,6 +49,16 @@ RUN pip install --no-cache-dir --upgrade "setuptools>=80"
 RUN pip install --no-cache-dir --no-deps "cryptography==50.0.0" && \
     python -c "import cryptography, jwt, mlflow; import cryptography.hazmat.primitives.asymmetric.rsa"
 
+# #509/Trivy 2026-08-11: linux-libc-dev (kernel headers) — артефакт
+# сборочного тулчейна gcc/g++; в рантайме не нужен, а его свежие CVE
+# (патч ещё не в зеркалах) валят гейт. Убираем из ИТОГОВОЙ ФС каскадом
+# (libc6-dev/g++ уходят следом — после pip install ничего не компилируется).
+# Рантайм-библиотеки прикалываем явно: libgomp1 (lightgbm), libpq5 (psycopg2).
+RUN apt-mark manual libgomp1 libpq5 2>/dev/null; \
+    apt-get purge -y linux-libc-dev \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN python -m pip uninstall -y pip
 
 COPY src/ src/

@@ -19,12 +19,13 @@ import json
 import logging
 import os
 import re
+import time as _time
 import uuid
 
 import httpx
 import psycopg2
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sentence_transformers import SentenceTransformer
 
 DB = f"postgresql://supbot:{os.environ['VECTORDB_PASSWORD']}@127.0.0.1:5433/supbot"
@@ -112,6 +113,29 @@ def model() -> SentenceTransformer:
 
 
 from logic import NOANS, dedupe_by_doc, is_refusal  # noqa: E402
+from metrics import EscalationNotifyLimiter, Registry  # noqa: E402
+
+METRICS = Registry()
+_ESC_LIMITER = EscalationNotifyLimiter()
+_TG_TOKEN = os.environ.get("TELEGRAM_ALERT_BOT_TOKEN", "")
+_TG_CHAT = os.environ.get("TELEGRAM_ALERT_CHAT_ID", "")
+
+
+async def _notify_escalation(session_id: str, surface: str, question: str) -> None:
+    """#509: эскалация — сигнал в ops-Telegram (тот же бот, что канарейка).
+    Fire-and-forget: сбой уведомления не влияет на ответ клиенту."""
+    if not (_TG_TOKEN and _TG_CHAT) or not _ESC_LIMITER.allow(session_id):
+        return
+    text = (f"Ассистент эскалировал вопрос [{surface}] "
+            f"session={session_id[:12]}:\n{question[:400]}")
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
+                data={"chat_id": _TG_CHAT, "text": text})
+    except Exception:  # noqa: BLE001 — уведомление best-effort
+        logger.warning("support: escalation notify failed")
+
 SYSTEM = (
     "Ты — ассистент поддержки сервиса прогнозирования спроса Sprosly. "
     "Правила:\n"
@@ -189,6 +213,7 @@ async def chat(req: Request) -> StreamingResponse:
     session_id = body.get("session_id") or uuid.uuid4().hex
     surface = str(body.get("surface", "public"))[:16]
     subnet = _subnet(client_ip_hdr(req))
+    t_start = _time.monotonic()
 
     # Ответ строится СИНХРОННО (LLM stream=False) — так и журналируем факт,
     # и решаем отдать/эскалировать по ПОЛНОМУ тексту, и лишь потом стримим.
@@ -218,8 +243,12 @@ async def chat(req: Request) -> StreamingResponse:
         try:
             async with httpx.AsyncClient(timeout=90) as client:
                 resp = await client.post(f"{LLM}/v1/chat/completions", json=payload)
+            data = resp.json()
             llm = _strip_think(
-                resp.json()["choices"][0]["message"]["content"]).strip()
+                data["choices"][0]["message"]["content"]).strip()
+            usage = data.get("usage") or {}
+            METRICS.inc("supbot_llm_tokens_total",
+                        value=float(usage.get("completion_tokens", 0)))
         except Exception:    # noqa: BLE001 — таймаут/сбой LLM: НИКОГДА не пустой
             llm = ""
         # SUP-5: выходной фильтр — маркер утечки/инъекции ⇒ не отдаём.
@@ -238,6 +267,16 @@ async def chat(req: Request) -> StreamingResponse:
                     cites.append({"title": h["title"][:80], "slug": _slug(h["url_path"])})
 
     _journal(session_id, surface, message, answer, escalate, cites, subnet)
+
+    # #509: метрики — итог запроса одним местом, после журнала
+    outcome = ("smalltalk" if canned is not None
+               else "escalated" if escalate else "answered")
+    METRICS.inc("supbot_requests_total", {"outcome": outcome})
+    if canned is None and strong:
+        METRICS.inc("supbot_retrieval_hits_total")
+    METRICS.observe("supbot_request_seconds", _time.monotonic() - t_start)
+    if escalate:
+        await _notify_escalation(session_id, surface, message)
 
     async def stream():
         for w in re.findall(r"\S+\s*", answer):
@@ -260,6 +299,14 @@ def _strip_think(s: str) -> str:
 def _slug(url_path: str) -> str:
     m = re.search(r"/help/a/([^/]+)", url_path)
     return m.group(1) if m else url_path.strip("/")
+
+
+@app.get("/support/metrics")
+def prometheus_metrics() -> PlainTextResponse:
+    """#509: Prometheus text format; скрейпится прод-Prometheus по
+    приватной сети. Секретов в метриках нет."""
+    return PlainTextResponse(METRICS.render(),
+                             media_type="text/plain; version=0.0.4")
 
 
 @app.get("/support/admin/metrics")
