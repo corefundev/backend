@@ -107,6 +107,7 @@ def recursive_forecast(
     predict_fn=None,
     config:        dict | None = None,
     promo_events:  "pd.DataFrame | None" = None,
+    future_overrides: "dict[str, float] | None" = None,
 ) -> list[dict]:
     """
     Recursive multi-step forecast for a single SKU.
@@ -276,6 +277,21 @@ def recursive_forecast(
     # carry-source fallback uses the (constant) original last row.
     target_hist = [float(v) for v in h[target_col].tolist()]
     orig_last_row = h.iloc[[-1]]
+
+    # ── WF-1 #470: what-if. future_overrides пишет сценарные значения
+    # exogenous-колонок (price/promo) в каждую будущую строку И включает
+    # пошаговый пересчёт их производных фичей — иначе они заморожены
+    # carry-forward'ом (задокументированный skew L-A4) и сценарий невидим
+    # модели. Формулы зеркалят _build_price_features/_build_promo_features
+    # (shift(1)-семантика); гард от дрейфа — tests/unit/test_470_what_if.py.
+    # В ОБЫЧНОМ serve (future_overrides is None) поведение НЕ меняется.
+    wf_price_hist: list[float] | None = None
+    wf_promo_hist: list[float] | None = None
+    if future_overrides:
+        if "price" in future_overrides and "price" in h.columns:
+            wf_price_hist = [float(v) for v in h["price"].tolist()]
+        if "promo" in future_overrides and "promo" in h.columns:
+            wf_promo_hist = [float(v) for v in h["promo"].tolist()]
     for step in range(1, horizon + 1):
         forecast_date = last_date + pd.Timedelta(days=step)
 
@@ -308,6 +324,35 @@ def recursive_forecast(
             new_row[c] = v
         for c, v in promo_by_step.get(step, {}).items():
             new_row[c] = v
+
+        # ── WF-1 #470: сценарные exogenous + их производные фичи ──
+        if future_overrides:
+            for c, v in future_overrides.items():
+                new_row[c] = v
+            if wf_price_hist is not None:
+                pv = float(future_overrides["price"])
+                prev = wf_price_hist[-1]
+                prev2 = wf_price_hist[-2] if len(wf_price_hist) >= 2 else prev
+                new_row["price_lag_1"] = prev
+                new_row["price_lag_7"] = (
+                    wf_price_hist[-7] if len(wf_price_hist) >= 7 else float("nan"))
+                new_row["price_change"] = (
+                    (prev - prev2) / prev2 if prev2 else 0.0)
+                _pw = np.asarray(wf_price_hist[-7:], dtype=float)
+                new_row["price_rolling_mean_7"] = float(_pw.mean())
+                new_row["price_rolling_std_7"] = (
+                    float(np.std(_pw, ddof=1)) if _pw.size > 1 else 0.0)
+                wf_price_hist.append(pv)
+            if wf_promo_hist is not None:
+                mv = float(future_overrides["promo"])
+                new_row["promo_lag_1"] = wf_promo_hist[-1]
+                new_row["promo_lag_7"] = (
+                    wf_promo_hist[-7] if len(wf_promo_hist) >= 7 else float("nan"))
+                _mw7 = np.asarray(wf_promo_hist[-7:], dtype=float)
+                _mw14 = np.asarray(wf_promo_hist[-14:], dtype=float)
+                new_row["promo_rolling_7"] = float(_mw7.mean())
+                new_row["promo_rolling_14"] = float(_mw14.mean())
+                wf_promo_hist.append(mv)
 
         # ── Lag features: lag_k = target value k rows back ────────
         n_hist = len(target_hist)
@@ -515,6 +560,8 @@ def serve_forecast(
     predict_fn=None,
     config:        dict | None = None,
     promo_events:  "pd.DataFrame | None" = None,
+    future_overrides: "dict[str, float] | None" = None,
+    force_recursive: bool = False,
 ) -> list[dict]:
     """
     Serve-path dispatcher (R11-#59 / H2). Use the model's DIRECT heads for
@@ -537,6 +584,13 @@ def serve_forecast(
     history = apply_model_static(model, history, sku_col)
     is_direct = getattr(model, "is_mimo", False) or getattr(model, "is_ensemble", False)
     model_h = int(getattr(model, "horizon", 0) or 0)
+
+    # WF-1 #470: what-if (future_overrides) обслуживается ТОЛЬКО рекурсией —
+    # direct-головы читают x_last-агрегаты истории и будущего изменения
+    # цены/промо не видят (то же ограничение, что PC-2 задокументировал для
+    # промо). force_recursive обеспечивает like-for-like базлайн сценария.
+    if force_recursive or future_overrides:
+        is_direct = False
 
     if is_direct and model_h and int(horizon) <= model_h:
         try:
@@ -586,7 +640,8 @@ def serve_forecast(
 
     return recursive_forecast(model, history, feature_cols, horizon, sku,
                               sku_col, date_col, target_col, predict_fn,
-                              config=config, promo_events=promo_events)
+                              config=config, promo_events=promo_events,
+                              future_overrides=future_overrides)
 
 
 def forecast_all_skus(
