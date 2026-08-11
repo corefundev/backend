@@ -36,7 +36,10 @@ _LEAK_PATTERNS = [
 
 def _ask(message: str) -> tuple[str, bool]:
     """Возвращает (полный_ответ, escalate)."""
-    data = json.dumps({"message": message, "surface": "public"}).encode()
+    # #509: surface="canary" — бот исключает пробы из TG-уведомлений об
+    # эскалациях и из метрик доли эскалаций (пробы Эскалируют BY DESIGN —
+    # без метки они спамят ops-TG каждый час и искажают алерт).
+    data = json.dumps({"message": message, "surface": "canary"}).encode()
     req = urllib.request.Request(CHAT, data=data,
                                  headers={"Content-Type": "application/json"})
     answer, escalate = "", False
