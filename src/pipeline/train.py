@@ -256,6 +256,27 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         except Exception as reg_err:    # noqa: BLE001 — no registry ≠ no gate
             logger.warning("#227 gate: champion lookup failed (%s) — treating as first model", reg_err)
 
+        # WF-B2 #470 (live find): чемпион валиден, только если СЕРВЯЩИЙ
+        # артефакт реально существует в хранилище. Поле model_path в ряду
+        # реестра переживает удаление объекта (чистка/потеря S3) — гейт
+        # блокировал претендента «в пользу чемпиона», которого физически
+        # нет, и клиент навсегда терял способность обучаться. Определённое
+        # «не найден» ⇒ semantics первой модели (промоут с громким логом);
+        # ошибка/блип хранилища ⇒ консервативно считаем чемпиона живым
+        # (не промоутить слабую модель из-за S3-глюка).
+        if champion is not None:
+            try:
+                from src.storage.backend import ClientStorage
+                if not ClientStorage(client_id).model_exists():
+                    logger.warning(
+                        "#227 gate: champion metric exists but the serving "
+                        "artifact is MISSING (client=%s) — ghost champion "
+                        "dropped, first-model semantics", client_id)
+                    champion = None
+            except Exception as st_err:    # noqa: BLE001 — блип ≠ приговор чемпиону
+                logger.warning("#227 gate: champion artifact check failed "
+                               "(%s) — keeping champion", st_err)
+
         # #247: score the naive on the SAME walk-forward windows the
         # challenger was graded on — a single-tail baseline (the original
         # wiring) never faces the hard folds and biases the gate
