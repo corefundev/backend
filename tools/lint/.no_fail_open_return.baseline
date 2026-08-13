@@ -32,8 +32,8 @@
 src/pipeline/task_queue.py:213  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
 src/pipeline/task_queue.py:220  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
 src/pipeline/task_queue.py:234  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
-src/pipeline/train.py:326  pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
-src/pipeline/train.py:356  pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
+src/pipeline/train.py:347  (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
+src/pipeline/train.py:377  (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
 src/pipeline/train.py:256  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
 src/pipeline/inference_utils.py:216  (+сдвиг WF-1 #470) QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes (+PC-2 #570 promo-фичи)
 src/pipeline/inference_utils.py:190  (+сдвиг WF-1 #470) R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal) (+PC-2 #570 promo-фичи)
@@ -110,3 +110,4 @@ src/pipeline/inference_utils.py:241  (+сдвиг WF-1 #470) PC-2 #570 — promo
 src/features/engineering.py:157  PC-2 #570 — promo-calendar builder best-effort (fail-open по контракту эпика): сбой = нулевые promo_cal_* колонки, лог ERROR громкий
 src/api/routers/promo_calendar.py:243  PC-3 #570 — upcoming: date_max датасета best-effort обогащение фильтра; его недоступность НЕ роняет бейдж (показываем все sku-события), лог warning громкий
 src/api/routers/inference.py:1026  WF-1 #470 — what-if order estimate: заказ «до/после» — best-effort ОБОГАЩЕНИЕ ответа (реестр прогнозов может не иметь строк SKU); блип логируется громко, ряды сценария и суммы отдаются без оценки заказа — сам сценарий не 500-ится
+src/pipeline/train.py:276  WF-B2 #470 ghost-champion — блип хранилища при проверке артефакта чемпиона ≠ приговор: консервативно оставляем чемпиона (слабую модель из-за S3-глюка не промоутим); лог громкий, покрыто test_storage_blip_keeps_champion
