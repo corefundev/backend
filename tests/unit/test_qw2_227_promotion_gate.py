@@ -35,8 +35,12 @@ def _cfg(gate=True, tol=0.02):
             "model": {"horizon": 7, "promotion_gate": gate, "gate_tolerance": tol}}
 
 
-def _reg(monkeypatch, champion_wmape):
-    """Registry stub: one FINISHED champion run (or none)."""
+def _reg(monkeypatch, champion_wmape, artifact_exists=True):
+    """Registry stub: one FINISHED champion run (or none).
+
+    WF-B2 #470: гейт теперь сверяет наличие СЕРВЯЩЕГО артефакта — по
+    умолчанию стабим «жив» (True); ghost-кейсы передают False/исключение.
+    """
     runs = []
     if champion_wmape is not None:
         runs = [SimpleNamespace(status="finished", wmape=champion_wmape,
@@ -46,6 +50,13 @@ def _reg(monkeypatch, champion_wmape):
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
+    import src.storage.backend as backend_mod
+    if callable(artifact_exists):
+        monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                            artifact_exists)
+    else:
+        monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                            lambda self: artifact_exists)
 
 
 def _baseline(monkeypatch, wmape=0.50):
@@ -254,6 +265,10 @@ def test_268_promoted_first_model_with_fail_verdict_becomes_champion(monkeypatch
                             model_path="s3://m/model.pkl")]
     monkeypatch.setattr(truns, "get_training_runs_registry",
                         lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+    # посылка теста — «чемпион СЕРВИТ»: артефакт жив (WF-B2 #470 чек)
+    import src.storage.backend as backend_mod
+    monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                        lambda self: True)
     _baseline(monkeypatch, wmape=0.90)
     agg = {"wmape_global": 0.99, "mase_global": 20.0}   # worse than champion AND naive
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
@@ -300,3 +315,39 @@ def test_268_notifiers_branch_on_blocked_and_accept_kwarg():
     for p in ("src/notifications/training_email.py", "src/notifications/telegram.py"):
         src = Path(p).read_text()
         assert "качество ниже эталона" in src, p
+
+
+# ── WF-B2 #470: чемпион-призрак (метрика жива, артефакт стёрт) ──────────
+
+def test_ghost_champion_promotes_challenger(monkeypatch):
+    """Артефакта чемпиона нет в хранилище ⇒ semantics первой модели:
+    претендент промоутится даже с худшей метрикой — иначе клиент с
+    потерянным артефактом никогда больше не обучится (live-инцидент
+    2026-08-13, client=test)."""
+    _reg(monkeypatch, champion_wmape=0.30, artifact_exists=False)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
+    assert blocked is False
+
+
+def test_live_champion_still_blocks(monkeypatch):
+    """Контроль: живой артефакт — блокировка регрессирующего претендента
+    сохраняется (поведение гейта не ослаблено)."""
+    _reg(monkeypatch, champion_wmape=0.30, artifact_exists=True)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
+    assert blocked is True
+
+
+def test_storage_blip_keeps_champion(monkeypatch):
+    """Блип хранилища при проверке ≠ приговор чемпиону: консервативно
+    считаем его живым (не промоутить слабую модель из-за S3-глюка)."""
+    def _boom(self):
+        raise RuntimeError("s3 blip")
+    _reg(monkeypatch, champion_wmape=0.30, artifact_exists=_boom)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
+    assert blocked is True
