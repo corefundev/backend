@@ -253,7 +253,8 @@ def test_train_button_enqueues_with_dataset(app_client, monkeypatch):
     body = r.json()
     assert body["dataset_version"] == 1 and body["job_id"] == "job-1"
     assert enqueued["dataset_id"] == ds
-    assert enqueued["dataset_is_default"] is True     # единственный датасет
+    # F1 #615: dataset_is_default удалён — legacy dual-write модели больше
+    # нет (serve датасет-скоупный), параметр был мёртв
     assert enqueued["run_dataset"] == ds and enqueued["run_version"] == 1
     assert enqueued["data_path"].endswith("data.parquet")
 

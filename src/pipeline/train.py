@@ -199,7 +199,7 @@ def _seasonal_naive_wmape_on_frame(combined, date_col) -> float:
     return err / act if act > 1e-10 else float("nan")
 
 
-def _promotion_gate(df, config, agg, client_id, wf_combined=None):
+def _promotion_gate(df, config, agg, client_id, wf_combined=None, dataset_id=None):
     """QW2-4 (#227): champion/challenger promotion decision, fail-closed on
     verdicts and fail-open ONLY on gate infrastructure errors.
 
@@ -228,7 +228,10 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         champion = None
         try:
             from src.storage.training_runs import FINISHED, get_training_runs_registry
-            for r in get_training_runs_registry().list_for_client(client_id, limit=20):
+            # review #616 F2: фильтр по датасету на уровне SQL — чемпион
+            # датасета не должен «теряться» за окном top-N чужих ранов.
+            for r in get_training_runs_registry().list_for_client(
+                    client_id, limit=20, dataset_id=dataset_id):
                 # Era markers: a champion metric is comparable ONLY when it
                 # was measured under the SAME evaluation methodology as the
                 # challenger; otherwise first-model semantics. Each ruler
@@ -246,6 +249,13 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
                 # what actually serves) — NOT gate_passed: a promoted-first-
                 # model with an honest FAIL verdict must become the champion,
                 # else every next retrain sees "no champion" forever.
+                # F4 #615: «датасет = отдельная модель» (DS-1) — чемпион
+                # сравним ТОЛЬКО в рамках того же датасета; live-случай:
+                # претендент 1c-live (0.500) блокировался чемпионом чужого
+                # датасета (0.455). Легаси-раны без dataset_id сравнимы
+                # только с легаси-обучением (оба None).
+                if getattr(r, "dataset_id", None) != dataset_id:
+                    continue
                 if (r.status == FINISHED and r.wmape is not None
                         and getattr(r, "model_path", None)
                         and getattr(r, "mase_seasonal", None) is not None
@@ -258,7 +268,9 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
 
         # WF-B2 #470 (live find): чемпион валиден, только если СЕРВЯЩИЙ
         # артефакт реально существует в хранилище. Поле model_path в ряду
-        # реестра переживает удаление объекта (чистка/потеря S3) — гейт
+        # реестра переживает удаление объекта (чистка/потеря S3); слот
+        # проверяем ДАТАСЕТНЫЙ (F3 #615: канонический путь в датасетную
+        # эру пуст всегда и выключал блокировку) — гейт
         # блокировал претендента «в пользу чемпиона», которого физически
         # нет, и клиент навсегда терял способность обучаться. Определённое
         # «не найден» ⇒ semantics первой модели (промоут с громким логом);
@@ -266,8 +278,8 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None):
         # (не промоутить слабую модель из-за S3-глюка).
         if champion is not None:
             try:
-                from src.storage.backend import ClientStorage
-                if not ClientStorage(client_id).model_exists():
+                if not ClientStorage(client_id,
+                                     dataset_id=dataset_id).model_exists():
                     logger.warning(
                         "#227 gate: champion metric exists but the serving "
                         "artifact is MISSING (client=%s) — ghost champion "
@@ -325,7 +337,6 @@ def run_training_pipeline(
     config_path: str = "configs/config.yaml",
     client_id:  str = "default",
     dataset_id: Optional[str] = None,
-    dataset_is_default: bool = False,
 ) -> dict:
     t0 = time.time()
     logger.info(f"=== Training pipeline START | client={client_id} ===")
@@ -377,10 +388,10 @@ def run_training_pipeline(
     except Exception as e:    # noqa: BLE001
         logger.warning(f"Could not apply plan defaults: {e}")
 
-    # DS-1 #466: датасет = своя модель — артефакты уезжают в
-    # {client}/datasets/{dataset}/… . Для ДЕФОЛТНОГО датасета модель
-    # дублируется и в легаси-слот клиента (его читают /predict и
-    # существующие клиентские потоки) — см. сохранение ниже.
+    # DS-1 #466 → #615: датасет = своя модель — артефакты уезжают в
+    # {client}/datasets/{dataset}/…; serve датасет-скоупный, легаси
+    # dual-write удалён (review #616 F15: комментарий обещал
+    # несуществующее поведение).
     storage = ClientStorage(client_id, dataset_id=dataset_id)
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
 
@@ -630,7 +641,7 @@ def run_training_pipeline(
     # Decided BEFORE the final fit: a blocked challenger skips the final
     # fit + quantiles + save entirely (the champion artifact keeps serving
     # untouched, and post-training forecasts are skipped via model_path=None).
-    gate_verdict, gate_blocked = _promotion_gate(df, config, agg, client_id,
+    gate_verdict, gate_blocked = _promotion_gate(df, config, agg, client_id, dataset_id=dataset_id,
                                                  wf_combined=wf_result.combined)
     if gate_blocked:
         elapsed = time.time() - t0
@@ -794,12 +805,9 @@ def run_training_pipeline(
     attach_static_to_model(final_model, static_map)
     model_path = storage.save_model(final_model)
     logger.info(f"  Saved → {model_path}")
-    # DS-1 #466: модель дефолтного датасета дублируется в легаси-слот
-    # клиента — его читают /predict и все существующие клиентские потоки;
-    # мульти-датасетный serve адресует datasets-неймспейс напрямую.
-    if dataset_id and dataset_is_default:
-        legacy_path = ClientStorage(client_id).save_model(final_model)
-        logger.info(f"  Saved (default-dataset legacy slot) → {legacy_path}")
+    # F1/F2 #615: legacy dual-write удалён — serve теперь датасет-скоупный
+    # (load_service_for_dataset), читателей у клиентского слота не осталось;
+    # дубль без fallback.pkl лишь маскировал рассинхрон.
 
     # ── 8. Cold-start + SHAP done above; mark step 8 ──────────
     _progress(8, 9, "Cold-start модель + SHAP объяснения")

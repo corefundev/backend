@@ -49,7 +49,7 @@ def _reg(monkeypatch, champion_wmape, artifact_exists=True):
                                 model_path="s3://m/model.pkl")]
     import src.storage.training_runs as truns
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit, dataset_id=None: runs))
     import src.storage.backend as backend_mod
     if callable(artifact_exists):
         monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
@@ -127,7 +127,7 @@ def test_blocked_champion_lookup_skips_gate_failed_runs(monkeypatch):
                         gate_passed=True, model_path="s3://m/model.pkl"),
     ]
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit, dataset_id=None: runs))
     _baseline(monkeypatch, wmape=0.50)
     agg = {"wmape_global": 0.44, "mase_global": 0.9}   # beats the REAL champion 0.45
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
@@ -229,7 +229,7 @@ def test_247b_pre_honesty_era_champion_is_not_comparable(monkeypatch):
     runs = [SimpleNamespace(status="finished", wmape=0.297, mase=0.95,
                             mase_seasonal=None, gate_passed=None)]   # May-era run
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20, dataset_id=None: runs))
     _baseline(monkeypatch, wmape=0.90)
     agg = {"wmape_global": 0.84, "mase_global": 17.0}   # honest, beats naive
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
@@ -246,7 +246,7 @@ def test_540_sparse_era_champion_is_not_comparable(monkeypatch):
                             mase_seasonal=0.75, eval_coverage=None,
                             gate_passed=True, model_path="s3://m/model.pkl")]
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20, dataset_id=None: runs))
     _baseline(monkeypatch, wmape=0.6768)
     agg = {"wmape_global": 0.5117, "mase_global": 0.6721}   # beats naive
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
@@ -264,7 +264,7 @@ def test_268_promoted_first_model_with_fail_verdict_becomes_champion(monkeypatch
                             gate_passed=False,
                             model_path="s3://m/model.pkl")]
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20, dataset_id=None: runs))
     # посылка теста — «чемпион СЕРВИТ»: артефакт жив (WF-B2 #470 чек)
     import src.storage.backend as backend_mod
     monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
@@ -283,7 +283,7 @@ def test_268_blocked_run_still_not_champion(monkeypatch):
                             mase_seasonal=1.0, eval_coverage=1.0,
                             gate_passed=False, model_path=None)]
     monkeypatch.setattr(truns, "get_training_runs_registry",
-                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20: runs))
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit=20, dataset_id=None: runs))
     _baseline(monkeypatch, wmape=0.90)
     agg = {"wmape_global": 0.50, "mase_global": 1.0}
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "test", wf_combined=None)
@@ -350,4 +350,46 @@ def test_storage_blip_keeps_champion(monkeypatch):
     _baseline(monkeypatch, wmape=0.50)
     agg = {"wmape_global": 0.48, "mase_global": 1.2}
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
+    assert blocked is True
+
+
+def test_champion_scoped_to_same_dataset(monkeypatch):
+    """F4 #615: чемпион другого датасета НЕ сравним — «датасет = отдельная
+    модель» (live-случай: претендент 1c-live блокировался чемпионом чужого
+    датасета). Раны чужого датасета игнорируются ⇒ первая модель."""
+    from types import SimpleNamespace
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.30, mase=1.0,
+                            mase_seasonal=1.1, eval_coverage=1.0,
+                            gate_passed=None, model_path="s3://m/model.pkl",
+                            dataset_id="other-ds")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit, dataset_id=None: runs))
+    import src.storage.backend as backend_mod
+    monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                        lambda self: True)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme",
+                                       dataset_id="ds1")
+    assert blocked is False
+
+
+def test_same_dataset_champion_blocks(monkeypatch):
+    """Контроль F4: чемпион ТОГО ЖЕ датасета блокирует регрессию."""
+    from types import SimpleNamespace
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.30, mase=1.0,
+                            mase_seasonal=1.1, eval_coverage=1.0,
+                            gate_passed=None, model_path="s3://m/model.pkl",
+                            dataset_id="ds1")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit, dataset_id=None: runs))
+    import src.storage.backend as backend_mod
+    monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                        lambda self: True)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme",
+                                       dataset_id="ds1")
     assert blocked is True

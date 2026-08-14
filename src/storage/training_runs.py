@@ -255,8 +255,20 @@ class PostgresTrainingRunsRegistry:
             )
             return cur.rowcount
 
-    def list_for_client(self, client_id: str, limit: int = 50) -> list[TrainingRunRecord]:
-        # Read path → replica when configured.
+    def list_for_client(self, client_id: str, limit: int = 50,
+                        dataset_id: "str | None" = None) -> list[TrainingRunRecord]:
+        # Read path → replica when configured. review #616 F2: фильтр по
+        # датасету — в SQL, а не пост-фильтром окна (чемпион датасета,
+        # вытесненный из top-N ранами других датасетов, «терялся» и
+        # регрессия промоутилась как первая модель).
+        if dataset_id is not None:
+            with self._conn_read() as conn:
+                with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT * FROM sku_training_runs WHERE client_id = %s "
+                        "AND dataset_id = %s ORDER BY enqueued_at DESC LIMIT %s",
+                        (client_id, dataset_id, limit))
+                    return [self._row_to_record(dict(r)) for r in cur.fetchall()]
         with self._conn_read() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(

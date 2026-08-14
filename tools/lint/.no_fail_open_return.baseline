@@ -29,12 +29,12 @@
 # Each of these should either get narrowed to a specific exception type,
 # convert the swallow into a persisted error, or document the fail-open
 # branch as deliberate (and then move out of "broad except" to a typed one).
-src/pipeline/task_queue.py:213  NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
-src/pipeline/task_queue.py:220  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
-src/pipeline/task_queue.py:234  pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
-src/pipeline/train.py:347  (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
-src/pipeline/train.py:377  (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
-src/pipeline/train.py:256  QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
+src/pipeline/task_queue.py:211  (+сдвиг #615) NC-1 #241 — _run_pipeline_or_fail inbox-emit guard: best-effort notification row on failure; a notifications hiccup must not mask the original training error being re-raised (same class as the email/telegram sender guards)
+src/pipeline/task_queue.py:218  (+сдвиг #615) pre-R9 baseline; triage in R10 — _run_pipeline_or_fail outer try (was :204, +12 NC-1 inbox emit)
+src/pipeline/task_queue.py:232  (+сдвиг #615) pre-R9 baseline; triage in R10 — _run_pipeline_or_fail finalizer (was :218, +12 NC-1 inbox emit)
+src/pipeline/train.py:358  (+сдвиг review-fixes #616) (+сдвиг #615) (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — registry lookup in train pipeline (was :321, −2 audit-H1 helper)
+src/pipeline/train.py:388  (+сдвиг review-fixes #616) (+сдвиг #615) (+21 ghost-champion чек #470) pre-R9 baseline; triage in R10 — plan-defaults apply (was :359, −10 audit-H1 helper)
+src/pipeline/train.py:266  (+сдвиг review-fixes #616) (+сдвиг #615) QW2-4 #227 gate infra fail-open (was :246, +4 #268 champion-marker comment) (was :250, #231 kill -1 import)
 src/pipeline/inference_utils.py:216  (+сдвиг WF-1 #470) QH-7 #440 — event-ramp recompute is best-effort enhancement (same contract as the holiday block above): on failure falls back to carry-forward, forecast completes (+PC-2 #570 promo-фичи)
 src/pipeline/inference_utils.py:190  (+сдвиг WF-1 #470) R12-#91 — holiday recompute is best-effort enhancement; on any failure it falls back to the prior carry-forward behaviour and the forecast still completes (core result unaffected) (was :195, -7 R13-7 dead-code removal) (+PC-2 #570 promo-фичи)
 src/pipeline/inference_utils.py:444  (+сдвиг WF-1 #470) pre-R9 baseline (was :341, +29 QH-7 #440 event-ramp recompute block); triage in R10 — recursive forecast fallback (+PC-2 #570 promo-фичи)
@@ -51,7 +51,7 @@ src/features/engineering.py:130  pre-R9 baseline; triage in R10 — feature engi
 src/features/engineering.py:138  pre-R9 baseline; triage in R10 — feature engineering optional step (was :123, +14 #418 per-sku-lags block) (+PC-2 #570 promo-фичи)
 src/storage/upload_pipeline.py:195  pre-R9 baseline; triage in R10 — scan-stage error capture [+3 R13-LOW .xlsm comment] (was :178, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap)
 src/storage/upload_pipeline.py:225  pre-R9 baseline; triage in R10 — scan-stage final [+3 R13-LOW .xlsm comment] (was :208, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap)
-src/api/routers/inference.py:758  (+сдвиг WF-1 #470) (+90 XP-1 #469 explanation above) (+34 AZ-1 stock-read) (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
+src/api/routers/inference.py:745  (+сдвиг review-fixes #616) (+сдвиг WF-1 #470) (+90 XP-1 #469 explanation above) (+34 AZ-1 stock-read) (+138 AZ-1 #465 order-recommendations above) DP-4b #324 — get_upload_prep manifest read: the preview SAMPLE is optional; an unreadable processed-manifest degrades to an empty sample (status/counts still returned), logged loudly — never 500s the read-only preview
 src/storage/upload_pipeline.py:319  DP-4b #324 — run_prepare best-effort sniff: a sniff failure sets result=None and falls through to a CANONICAL parse (never blocks the upload); logged loudly, no state swallowed (was :302, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap)
 src/storage/upload_pipeline.py:455  pre-R9 baseline; triage in R10 — process-stage error capture [+3 R13-LOW .xlsm comment] (was :344, +24 DP-4b run_prepare) (was :421, +4 DS-2 #467 dataset_id) (+13 PC-1 #570 kind/size-cap) (+13 PC-1 #570 kind/size-cap)
 src/storage/upload_pipeline.py:442  pre-R9 baseline; triage in R10 — process-stage final [+3 R13-LOW .xlsm comment] (was :357, +24 DP-4b run_prepare) (was :434, +4 DS-2 #467 dataset_id)
@@ -72,9 +72,9 @@ src/api/routers/notifications.py:157  pre-R9 baseline; triage in R10 — telegra
 # (2 SKU-cap pre-check swallows CLOSED 2026-06-02 by R11-H3 — the manifest
 #  check is now fail-closed: it raises HTTPException instead of swallowing,
 #  so it's no longer log-only. The 3 remaining sites below shifted +24 lines.)
-src/api/routers/training.py:327  pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits) (was :313, +10 #155 envelope) (was :323, +4 DP-4b prep-gate msg)
-src/api/routers/training.py:356  pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope) (was :352, +4 DP-4b prep-gate msg)
-src/api/routers/training.py:369  pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope) (was :365, +4 DP-4b prep-gate msg)
+src/api/routers/training.py:363  (+сдвиг review-fixes #616) pre-R9 baseline; triage in R10 — trigger_training mid-flow (+26 lines after R11-H3 fail-closed cap + docstring, 2026-06-02) (was :294, NC-5 emits) (was :313, +10 #155 envelope) (was :323, +4 DP-4b prep-gate msg)
+src/api/routers/training.py:392  (+сдвиг review-fixes #616) pre-R9 baseline; triage in R10 — trigger_training enqueue (was :334, -11 lines after #73 dropped the counter-refund, 2026-06-18) (was :323, NC-5 emits) (was :342, +10 #155 envelope) (was :352, +4 DP-4b prep-gate msg)
+src/api/routers/training.py:405  (+сдвиг review-fixes #616) pre-R9 baseline; triage in R10 — trigger_training fallback (was :347, -11 lines after #73, 2026-06-18) (was :336, NC-5 emits) (was :355, +10 #155 envelope) (was :365, +4 DP-4b prep-gate msg)
 src/data/anomaly_detection.py:91  pre-R9 baseline; triage in R10 — anomaly detection optional (was :78, +MA-3 guard)
 src/pipeline/inference_utils.py:529  (+сдвиг WF-1 #470) R11-#59 (was :426, +29 QH-7 #440 event-ramp recompute block) — direct_forecast: p10/p90 are an OPTIONAL band; a predict_quantiles failure must not drop the point forecast (best-effort, core result unaffected) (+PC-2 #570 promo-фичи)
 src/pipeline/inference_utils.py:602  (+сдвиг WF-1 #470) R11-#59 (was :489, +29 QH-7 #440 event-ramp recompute block) — serve_forecast: intentional fallback — if direct prediction raises, drop to recursive_forecast (carries the SeasonalNaive fallback). The fall-through IS the designed safety path (was :470, +5 #229 choke merge; +2 #307 static apply) (+PC-2 #570 promo-фичи)
@@ -87,27 +87,26 @@ src/api/routers/clients.py:739  LEG-2 #428 — overview consent-enrichment guard
 src/api/routers/clients.py:749  ADM-3 #256 — overview runs-enrichment guard: same rationale as :594 (was :463, #156 shift) (+13 AUD-5 #357) (−3 #387 fix) (+2 #388 trend-limit comment) (was :681, +25 LEG-2 #428 consent block) (was :706, +21 LEG-3 mismatch block) (+4 #590 has_password)
 src/notifications/staleness_nudge.py:121  NC-3 #243 — email-push guard: push is best-effort (NC-1 sender discipline); a sender failure must not abort the remaining clients' nudges; logged loudly (was :108, +8 AUD-3 #355 episode-key)
 src/notifications/staleness_nudge.py:129  NC-3 #243 — telegram-push guard: same rationale as :116 (was :116, +8 AUD-3 #355)
-src/api/routers/ops.py:296  ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500 (was :279, #156 shift)
-src/api/routers/ops.py:321  ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it) (was :304, #156 shift)
-src/api/routers/ops.py:290  ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278) (was :273, #156 shift)
+src/api/routers/ops.py:307  (+сдвиг review-fixes #616) (+сдвиг #615) ADM-13 #281 — system-page postgres ping guard: NOT swallowed — the exception type is captured INTO the response ("error: X") and rendered to the operator; the health page must degrade per-component, never 500 (was :279, #156 shift)
+src/api/routers/ops.py:332  (+сдвиг review-fixes #616) (+сдвиг #615) ADM-13 #281 — system-page pushgateway guard: same rationale as :278 (redis guard at :286 uses get_redis_or_none which never raises past it) (was :304, #156 shift)
+src/api/routers/ops.py:301  (+сдвиг review-fixes #616) (+сдвиг #615) ADM-13 #281 — system-page redis ping guard: exception type captured INTO the response, rendered to the operator (same class as :278) (was :273, #156 shift)
 src/api/routers/clients.py:431  B4 #156 — export training-runs guard: a missing registry must not deny the client the export of what IS available; logged loudly, bundle key -> [] (+9 AUD-5) (+78 ADM-v3-2 #387 card endpoints) (−3 #387 fix) (+4 #590 has_password)
 src/api/routers/clients.py:439  B4 #156 — export uploads guard: same rationale as :334 (−3 #387 fix) (+4 #590 has_password)
 src/api/routers/clients.py:444  B4 #156 — export access-log guard: same rationale as :334 (−3 #387 fix) (+4 #590 has_password)
 src/storage/sandbox.py:396  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed (+9 PC-1 #570 schema-параметр)
-src/api/routers/inference.py:405  (+сдвиг WF-1 #470) AZ-1 #465 — effective-config blip degrades τ to the documented default 0.7 (logged loudly): рекомендации к заказу остаются доступными при блипе конфиг-чтения; сама τ-override-ветка и гейты выше не задеты
-src/api/routers/inference.py:446  (+сдвиг WF-1 #470) AZ-1 #465 — stock-read enrichment guard: остатки из snapshot'а датасета — обогащение (колонка «Остаток»), а не источник истины страницы; блип чтения S3/реестра логируется громко и оставляет stock пустым — рекомендации без вычитания остаются доступны
-src/pipeline/task_queue.py:696  (+5 таймаут-комментарий #470) #557 best-effort персист job_id: потеря handle логируется, enqueue важнее метаданных
+src/api/routers/inference.py:392  (+сдвиг review-fixes #616) (+сдвиг WF-1 #470) AZ-1 #465 — effective-config blip degrades τ to the documented default 0.7 (logged loudly): рекомендации к заказу остаются доступными при блипе конфиг-чтения; сама τ-override-ветка и гейты выше не задеты
+src/api/routers/inference.py:433  (+сдвиг review-fixes #616) (+сдвиг WF-1 #470) AZ-1 #465 — stock-read enrichment guard: остатки из snapshot'а датасета — обогащение (колонка «Остаток»), а не источник истины страницы; блип чтения S3/реестра логируется громко и оставляет stock пустым — рекомендации без вычитания остаются доступны
+src/pipeline/task_queue.py:695  (+сдвиг review-fixes #616) (+сдвиг #615) (+5 таймаут-комментарий #470) #557 best-effort персист job_id: потеря handle логируется, enqueue важнее метаданных
 src/api/routers/support.py:124  SUP-5 #508 best-effort: источник корпуса (help) независим, падение логируется, снапшот собирается из остальных
 src/api/routers/support.py:132  SUP-5 #508 best-effort: источник корпуса (news) независим, падение логируется
 src/api/routers/support.py:146  SUP-5 #508 best-effort: источник корпуса (plans) независим, падение логируется
-src/api/routers/inference.py:607  (+сдвиг WF-1 #470) XP-1 #469: дифф с прошлой моделью опционален — битый _prev-снапшот логируется и отдаёт change=null, факторы текущей модели важнее
+src/api/routers/inference.py:594  (+сдвиг review-fixes #616) (+сдвиг WF-1 #470) XP-1 #469: дифф с прошлой моделью опционален — битый _prev-снапшот логируется и отдаёт change=null, факторы текущей модели важнее
 src/api/routers/auth.py:824  #579 carry-over согласия: аккаунт уже создан, след чекбокса шага 1 в аудите есть; сбой дозаписи логируется error'ом, восстановление — ConsentGate при первом входе; регистрацию не роняем
-src/api/routers/inference.py:269  (+сдвиг WF-1 #470) #469 default-dataset: run-lookup best-effort — сбой реестра ранов логируется, дефолт деградирует к created_at (страница живёт)
 src/storage/upload_pipeline.py:548  PC-1 #570 — run_promo_process best-effort sniff: сбой sniff = канонический парс (как run_prepare:319), никакое состояние не глотается, лог громкий
 src/storage/upload_pipeline.py:625  PC-1 #570 — quarantine delete best-effort ПОСЛЕ успешной записи кандидата (тот же контракт, что run_process); провал уборки не должен валить принятый календарь
 src/storage/upload_pipeline.py:631  PC-1 #570 — unlink временного parquet в finally, best-effort уборка
 src/pipeline/inference_utils.py:241  (+сдвиг WF-1 #470) PC-2 #570 — promo-calendar recompute best-effort (тот же контракт, что holiday/ramp выше): сбой пересчёта = carry-forward, лог debug
 src/features/engineering.py:157  PC-2 #570 — promo-calendar builder best-effort (fail-open по контракту эпика): сбой = нулевые promo_cal_* колонки, лог ERROR громкий
 src/api/routers/promo_calendar.py:243  PC-3 #570 — upcoming: date_max датасета best-effort обогащение фильтра; его недоступность НЕ роняет бейдж (показываем все sku-события), лог warning громкий
-src/api/routers/inference.py:1026  WF-1 #470 — what-if order estimate: заказ «до/после» — best-effort ОБОГАЩЕНИЕ ответа (реестр прогнозов может не иметь строк SKU); блип логируется громко, ряды сценария и суммы отдаются без оценки заказа — сам сценарий не 500-ится
-src/pipeline/train.py:276  WF-B2 #470 ghost-champion — блип хранилища при проверке артефакта чемпиона ≠ приговор: консервативно оставляем чемпиона (слабую модель из-за S3-глюка не промоутим); лог громкий, покрыто test_storage_blip_keeps_champion
+src/api/routers/inference.py:1060  (+сдвиг review-fixes #616) (+сдвиг #615) WF-1 #470 — what-if order estimate: заказ «до/после» — best-effort ОБОГАЩЕНИЕ ответа (реестр прогнозов может не иметь строк SKU); блип логируется громко, ряды сценария и суммы отдаются без оценки заказа — сам сценарий не 500-ится
+src/pipeline/train.py:288  (+сдвиг review-fixes #616) (+сдвиг #615) WF-B2 #470 ghost-champion — блип хранилища при проверке артефакта чемпиона ≠ приговор: консервативно оставляем чемпиона (слабую модель из-за S3-глюка не промоутим); лог громкий, покрыто test_storage_blip_keeps_champion
