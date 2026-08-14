@@ -40,10 +40,22 @@ def load_service_for_dataset(client_id: str,
     storage = ClientStorage(client_id, dataset_id=dataset_id)
     service = ForecastingService(config)
     if not storage.model_exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"No trained model for client '{client_id}'. Run training first.",
-        )
+        # review #616 F3: клиент легаси-эпохи создал датасет, но ещё не
+        # обучил его — датасетный слот пуст, а рабочая легаси-модель
+        # лежит рядом. Раньше /predict её сервил; ломать работающего
+        # клиента деплоем нельзя — сервим legacy с громким логом до
+        # первого датасетного обучения.
+        legacy = ClientStorage(client_id)
+        if dataset_id is not None and legacy.model_exists():
+            logger.warning(
+                "dataset %s has no model for %s — serving LEGACY slot "
+                "until the dataset is trained", dataset_id, client_id)
+            storage = legacy
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No trained model for client '{client_id}'. Run training first.",
+            )
     try:
         service.load_primary(storage)
     except Exception as e:

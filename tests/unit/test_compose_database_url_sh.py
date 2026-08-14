@@ -146,6 +146,13 @@ def test_helper_compose_matches_python_composer_baseline(monkeypatch):
     monkeypatch.setenv("DB_PORT", "5433")
     monkeypatch.setenv("DB_NAME", "appdb")
     monkeypatch.setenv("DB_USER", "appuser")
+    # #616-гигиена: _compose_database_urls_from_components пишет
+    # DATABASE_URL в os.environ НАПРЯМУЮ — регистрируем ключ в monkeypatch
+    # ДО вызова, чтобы teardown его откатил (иначе фейковый DSN утекает в
+    # последующие тесты и любой Postgres-синглтон бьётся о несуществующий
+    # хост — класс order-dependent поломок).
+    monkeypatch.setenv("DATABASE_URL", "sentinel-will-be-overwritten")
+    monkeypatch.setenv("MLFLOW_BACKEND_STORE_URI", "sentinel-will-be-overwritten")
 
     vault_agent._compose_database_urls_from_components()
     python_dsn = os.environ["DATABASE_URL"]

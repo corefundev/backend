@@ -137,6 +137,42 @@ async def trigger_training(
             detail="upload_id is required — raw data_path training is admin-only",
         )
 
+    # review #616 F4: датасетная эпоха — модель сервится из слота ДАТАСЕТА.
+    # Легаси-обучение в клиентский слот «успешно» завершалось бы моделью,
+    # которую никто не читает. Если загрузка привязана к датасету —
+    # делегируем в датасетный флоу (те же гейты, источник — снапшот);
+    # непривязанная загрузка у клиента С датасетами — честный 409.
+    if req.upload_id is not None:
+        try:
+            from src.storage.upload_registry import get_upload_registry
+            _up = get_upload_registry().get(req.upload_id)
+        except Exception as e:    # noqa: BLE001 — реестр недоступен ⇒ 503
+            logger.error("upload lookup failed for %s: %s", req.upload_id, e)
+            raise HTTPException(503, detail="Реестр загрузок временно недоступен")
+        _up_ds = getattr(_up, "dataset_id", None) if _up is not None else None
+        if _up_ds:
+            from src.api.routers.datasets import train_dataset
+            ds_resp = train_dataset(client_id, _up_ds, auth)
+            return TrainResponse(
+                client_id=client_id,
+                job_id=ds_resp.get("job_id"),
+                status=ds_resp.get("status", "queued"),
+                message=(f"Обучение датасета {_up_ds} "
+                         f"(run {ds_resp.get('run_id')}): загрузка привязана "
+                         "к датасету — модель обучается в его слоте"),
+            )
+        try:
+            from src.storage.datasets import get_datasets_registry
+            _has_ds = bool(get_datasets_registry().list_for_client(client_id))
+        except Exception as e:    # noqa: BLE001 — реестр недоступен ⇒ 503
+            logger.error("datasets lookup failed for %s: %s", client_id, e)
+            raise HTTPException(503, detail="Реестр датасетов временно недоступен")
+        if _has_ds:
+            raise HTTPException(409, detail=(
+                "Загрузка не привязана к датасету. Обучение выполняется из "
+                "раздела «Данные»: откройте датасет и нажмите «Обучить», "
+                "либо доложите файл в датасет"))
+
     registry = get_registry()
     record   = registry.get(client_id)
     if record is None:

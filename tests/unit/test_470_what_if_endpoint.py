@@ -136,3 +136,13 @@ def test_missing_price_column_honest_409(app_client):
                         json={"sku": "A", "price_mult": 0.9})
     assert r.status_code == 409
     assert "нет" in r.json()["detail"]
+
+
+def test_soft_deleted_dataset_404(app_client):
+    """review #616 F5: what-if не сервит модель удалённого датасета."""
+    ds_id = _seed_dataset([100.0, 101.0] * 30)
+    from src.storage.datasets import get_datasets_registry
+    get_datasets_registry().soft_delete(ds_id)
+    r = app_client.post(f"/clients/acme/datasets/{ds_id}/what-if",
+                        json={"sku": "A", "price_mult": 0.9})
+    assert r.status_code == 404

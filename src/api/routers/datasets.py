@@ -332,8 +332,8 @@ def train_dataset(client_id: str, dataset_id: str,
 
     Гейты — те же, что у /train (R11-H4 single-in-flight, квота плана,
     fail-closed SKU-кап), источник данных — снапшот ТЕКУЩЕЙ версии
-    датасета; модель уезжает в неймспейс датасета (+ легаси-слот, если
-    датасет дефолтный), прогнозы — в его партицию."""
+    датасета; модель уезжает в неймспейс датасета (легаси dual-write удалён
+    в #615 — serve датасет-скоупный), прогнозы — в его партицию."""
     require_client_access(client_id, auth)
     ds = _dataset_or_404(dataset_id, client_id)
     reg = get_datasets_registry()
@@ -430,5 +430,9 @@ def delete_dataset(client_id: str, dataset_id: str,
                    auth: AuthContext = Depends(get_current_client)):
     require_client_access(client_id, auth)
     _dataset_or_404(dataset_id, client_id)
+    # review #616 F5: тёплая модель удалённого датасета не должна
+    # продолжать сервиться из кэша
+    from src.api.service_cache import invalidate as _invalidate_cache
+    _invalidate_cache(client_id)
     get_datasets_registry().soft_delete(dataset_id)
     return {"dataset_id": dataset_id, "status": "deleted"}

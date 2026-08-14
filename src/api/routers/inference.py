@@ -245,30 +245,17 @@ def _load_processed_for_sku(
 # FastAPI runs it in the threadpool instead of blocking the event loop. (Connection
 # pooling is handled by pgbouncer in front of postgres; no app-level pool needed.)
 def _default_dataset_id(client_id: str):
-    """DS-1 #466 / #469: дефолтный датасет клиента.
+    """DS-1 #466 / #469: дефолтный датасет клиента (fail-open обёртка).
 
-    Приоритет — датасет ПОСЛЕДНЕГО promoted-обучения (там свежие прогнозы
-    и объяснения; «обучил → сразу вижу результат»), фолбэк — первый
-    активный по created_at. Прежний вариант (только created_at) после
-    удаления старого датасета показывал ПУСТУЮ страницу прогнозов при
-    только что успешном обучении соседнего. None — датасетов нет или
-    реестр недоступен (легаси-чтение без фильтра)."""
+    Логика приоритета — ЕДИНСТВЕННАЯ, в _default_dataset_id_strict
+    (датасет последнего promoted-обучения → первый активный). Здесь —
+    только деградация: read-only страницам (прогнозы, объяснения,
+    заказы) блип реестра не должен ронять запрос — None ⇒ легаси-чтение.
+    Serve-путь моделей пользуется строгой версией (review #616 F1:
+    там тихий фолбэк подменял МОДЕЛЬ, а не только фильтр списка).
+    """
     try:
-        from src.storage.datasets import get_datasets_registry
-        ds_rows = get_datasets_registry().list_for_client(client_id)
-        if not ds_rows:
-            return None
-        active_ids = {r.dataset_id for r in ds_rows}
-        try:
-            from src.storage.training_runs import get_training_runs_registry
-            for run in get_training_runs_registry().list_for_client(
-                    client_id, limit=20):
-                if (run.status == "finished" and run.model_path
-                        and run.dataset_id in active_ids):
-                    return run.dataset_id
-        except Exception as e:    # noqa: BLE001 — фолбэк на created_at
-            logger.warning("default-dataset run lookup failed: %s", e)
-        return ds_rows[0].dataset_id
+        return _default_dataset_id_strict(client_id)
     except Exception as e:    # noqa: BLE001 — деградация до легаси-чтения
         logger.warning("default-dataset resolve failed: %s", e)
         return None
@@ -769,6 +756,37 @@ async def get_upload_prep(
 # FastAPI runs it in the threadpool and the event loop stays free for other
 # tenants. predict_batch invokes it via run_in_threadpool for real concurrency.
 
+def _resolve_serve_dataset(client_id: str) -> "str | None":
+    """Review #616 F1: резолв датасета ДЛЯ SERVE обязан быть fail-closed —
+    блип реестра раньше молча уводил на legacy-слот (после #615 пустой →
+    404 на каждый /predict; у dual-write-эпохи — тихий сервинг устаревшей
+    модели). Инфра-сбой ⇒ 503; None ⇒ у клиента честно нет датасетов.
+    Read-only страницы продолжают пользоваться fail-open
+    _default_dataset_id — там неверный дефолт не подменяет модель."""
+    try:
+        return _default_dataset_id_strict(client_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("serve dataset resolution failed for %s: %s", client_id, e)
+        raise HTTPException(503, detail="Реестр датасетов временно недоступен")
+
+
+def _default_dataset_id_strict(client_id: str) -> "str | None":
+    """Как _default_dataset_id, но исключения НЕ глотаются (serve-путь)."""
+    from src.storage.datasets import get_datasets_registry
+    ds_rows = get_datasets_registry().list_for_client(client_id)
+    if not ds_rows:
+        return None
+    active_ids = {r.dataset_id for r in ds_rows}
+    from src.storage.training_runs import get_training_runs_registry
+    for run in get_training_runs_registry().list_for_client(client_id, limit=20):
+        if (run.status == "finished" and run.model_path
+                and run.dataset_id in active_ids):
+            return run.dataset_id
+    return ds_rows[0].dataset_id
+
+
 def _serve_single_sku(
     client_id: str,
     record,
@@ -788,13 +806,14 @@ def _serve_single_sku(
     config = _gcm(CONFIG_PATH).get_effective_serving(client_id, get_registry())
     horizon, clipped = clip_horizon_to_plan(
         record, requested_horizon or config["model"]["horizon"])
-    # F1/F6 #615: модель датасета, а не legacy-слот клиента; ключ кэша
-    # включает датасет (F5: TTL внутри кэша).
+    # F1/F6 #615: модель датасета, а не legacy-слот клиента; резолв
+    # fail-closed (review F1), ключ кэша — только через владельца формата
+    # (review F13).
+    from src.api.service_cache import cache_key as _cache_key
     if dataset_id is None:
-        dataset_id = _default_dataset_id(client_id)
-    cache_key = f"{client_id}::{dataset_id or 'legacy'}"
+        dataset_id = _resolve_serve_dataset(client_id)
     service = _get_or_load_service(
-        cache_key,
+        _cache_key(client_id, dataset_id),
         load_factory=lambda: load_service_for_dataset(client_id, dataset_id))
 
     for col, default in [("price", np.nan), ("promo", 0), ("stock", np.nan)]:
@@ -803,7 +822,10 @@ def _serve_single_sku(
 
     _pin_lags, _pin_rw = serve_feature_set(service.primary)
     from src.features.promo_calendar import load_active_events
-    promo_events = load_active_events(_default_dataset_id(client_id))
+    # review #616 F9: календарь ТОГО датасета, чью модель сервим — не
+    # дефолтного (кросс-датасетные события искажали what-if) и без
+    # повторного SQL-резолва.
+    promo_events = load_active_events(dataset_id)
     df_feat = build_features(
         df, config,
         pin_lags=_pin_lags or None, pin_rolling=_pin_rw, drop_warmup=False,
@@ -962,7 +984,10 @@ def what_if(
     from src.storage.datasets import get_datasets_registry
     ds_reg = get_datasets_registry()
     ds = ds_reg.get(dataset_id)
-    if ds is None or ds.client_id != client_id or ds.current_version < 1:
+    # review #616 F5: get() не фильтрует soft-deleted — отсекаем явно,
+    # иначе what-if бессрочно сервит модель удалённого датасета
+    if (ds is None or ds.client_id != client_id or ds.current_version < 1
+            or getattr(ds, "status", "active") != "active"):
         raise HTTPException(404, detail="Датасет не найден или пуст")
     ver = ds_reg.get_version(dataset_id, ds.current_version)
     if ver is None or not ver.snapshot_key:

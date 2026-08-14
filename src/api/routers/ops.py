@@ -210,14 +210,21 @@ async def prometheus_metrics(request: Request):
 
 
 @router.post("/clients/{client_id}/reload")
-async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):
-    """Invalidate model cache — forces reload from storage on next request."""
+def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):
+    """Invalidate model cache — forces reload from storage on next request.
+
+    review #616 F11: sync def — FastAPI исполняет его в threadpool;
+    прежний async def гонял синхронный SQL-резолв и холодную S3-загрузку
+    модели прямо на event loop, блокируя все запросы процесса. Резолв
+    датасета — строгий (инфра-сбой ⇒ 503, а не прогрев legacy-слота
+    после инвалидации живых записей).
+    """
     require_client_access(client_id, auth)
     invalidate_service_cache(client_id)   # префиксно: все датасеты клиента
-    # F1 #615: прогреваем модель ДЕФОЛТНОГО датасета (то, что сервит /predict)
-    from src.api.routers.inference import _default_dataset_id
-    ds = _default_dataset_id(client_id)
-    get_or_load(f"{client_id}::{ds or 'legacy'}",
+    from src.api.routers.inference import _resolve_serve_dataset
+    from src.api.service_cache import cache_key
+    ds = _resolve_serve_dataset(client_id)
+    get_or_load(cache_key(client_id, ds),
                 load_factory=lambda: load_service_for_dataset(client_id, ds))
     return {"client_id": client_id, "status": "reloaded"}
 

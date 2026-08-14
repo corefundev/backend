@@ -524,6 +524,11 @@ def _training_job(
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
     dataset_id: Optional[str] = None,
+    # review #616 F7 — страховка окна деплоя: джобы, поставленные СТАРЫМ
+    # API с уже удалёнными kwargs (dataset_is_default), не должны падать
+    # TypeError ДО _mark_run_failed (ран вис бы «training» 4 часа без
+    # уведомлений). Снять после релиза, когда очередь гарантированно чиста.
+    **_deploy_window_compat,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.

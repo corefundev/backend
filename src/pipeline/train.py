@@ -228,7 +228,10 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None, dataset_id=Non
         champion = None
         try:
             from src.storage.training_runs import FINISHED, get_training_runs_registry
-            for r in get_training_runs_registry().list_for_client(client_id, limit=20):
+            # review #616 F2: фильтр по датасету на уровне SQL — чемпион
+            # датасета не должен «теряться» за окном top-N чужих ранов.
+            for r in get_training_runs_registry().list_for_client(
+                    client_id, limit=20, dataset_id=dataset_id):
                 # Era markers: a champion metric is comparable ONLY when it
                 # was measured under the SAME evaluation methodology as the
                 # challenger; otherwise first-model semantics. Each ruler
@@ -385,10 +388,10 @@ def run_training_pipeline(
     except Exception as e:    # noqa: BLE001
         logger.warning(f"Could not apply plan defaults: {e}")
 
-    # DS-1 #466: датасет = своя модель — артефакты уезжают в
-    # {client}/datasets/{dataset}/… . Для ДЕФОЛТНОГО датасета модель
-    # дублируется и в легаси-слот клиента (его читают /predict и
-    # существующие клиентские потоки) — см. сохранение ниже.
+    # DS-1 #466 → #615: датасет = своя модель — артефакты уезжают в
+    # {client}/datasets/{dataset}/…; serve датасет-скоупный, легаси
+    # dual-write удалён (review #616 F15: комментарий обещал
+    # несуществующее поведение).
     storage = ClientStorage(client_id, dataset_id=dataset_id)
     logger.info(f"Storage: {storage.backend.__class__.__name__} → {storage.path('models/model.pkl')}")
 
