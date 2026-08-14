@@ -642,7 +642,12 @@ def enqueue_training(
     data_path: str,
     config_path: str = "configs/config.yaml",
     storage_backend: str | None = None,
-    timeout: int = 7200,          # 2 hours max
+    # #470 live-инцидент 2026-08-13: Business-ансамбль на 346 SKU/205k
+    # строк легитимно идёт ~104 мин; вариативность (ретраи внешних
+    # источников ЦБ и т.п.) выбила прогон за 2ч — RQ убил джоб на
+    # середине. Потолок обязан превышать НАБЛЮДАЕМУЮ длительность с
+    # запасом ×1.7, а не впритык: 3 часа.
+    timeout: int = 10800,
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
     dataset_id: Optional[str] = None,
