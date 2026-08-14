@@ -351,3 +351,45 @@ def test_storage_blip_keeps_champion(monkeypatch):
     agg = {"wmape_global": 0.48, "mase_global": 1.2}
     verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme")
     assert blocked is True
+
+
+def test_champion_scoped_to_same_dataset(monkeypatch):
+    """F4 #615: чемпион другого датасета НЕ сравним — «датасет = отдельная
+    модель» (live-случай: претендент 1c-live блокировался чемпионом чужого
+    датасета). Раны чужого датасета игнорируются ⇒ первая модель."""
+    from types import SimpleNamespace
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.30, mase=1.0,
+                            mase_seasonal=1.1, eval_coverage=1.0,
+                            gate_passed=None, model_path="s3://m/model.pkl",
+                            dataset_id="other-ds")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
+    import src.storage.backend as backend_mod
+    monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                        lambda self: True)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme",
+                                       dataset_id="ds1")
+    assert blocked is False
+
+
+def test_same_dataset_champion_blocks(monkeypatch):
+    """Контроль F4: чемпион ТОГО ЖЕ датасета блокирует регрессию."""
+    from types import SimpleNamespace
+    import src.storage.training_runs as truns
+    runs = [SimpleNamespace(status="finished", wmape=0.30, mase=1.0,
+                            mase_seasonal=1.1, eval_coverage=1.0,
+                            gate_passed=None, model_path="s3://m/model.pkl",
+                            dataset_id="ds1")]
+    monkeypatch.setattr(truns, "get_training_runs_registry",
+                        lambda: SimpleNamespace(list_for_client=lambda c, limit: runs))
+    import src.storage.backend as backend_mod
+    monkeypatch.setattr(backend_mod.ClientStorage, "model_exists",
+                        lambda self: True)
+    _baseline(monkeypatch, wmape=0.50)
+    agg = {"wmape_global": 0.48, "mase_global": 1.2}
+    verdict, blocked = _promotion_gate(_df(), _cfg(), agg, "acme",
+                                       dataset_id="ds1")
+    assert blocked is True

@@ -22,7 +22,7 @@ on two prep extractions:
     (REQUEST_COUNT, REQUEST_LATENCY, FALLBACK_COUNT). Module-level
     counter registration must happen exactly once per process, so
     centralising them avoids "Duplicated timeseries" on import.
-  - `src/api/loaders.py` — `load_service_for_client` factory.
+  - `src/api/loaders.py` — `load_service_for_dataset` factory (F1 #615: модель по-датасетно).
     Pulls the ML stack (`ForecastingService` + `ClientStorage`);
     kept out of `service_cache.py` so the cache module stays
     ML-stack-free.
@@ -53,7 +53,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.api.loaders import CONFIG_PATH, load_service_for_client
+from src.api.loaders import CONFIG_PATH, load_service_for_dataset
 from src.api.metrics import FALLBACK_COUNT, REQUEST_COUNT, REQUEST_LATENCY
 from src.api.service_cache import get_or_load as _get_or_load_service
 from src.auth.jwt_auth import AuthContext, get_current_client, require_client_access
@@ -777,6 +777,7 @@ def _serve_single_sku(
     requested_horizon: "int | None",
     future_overrides: "dict[str, float] | None" = None,
     force_recursive: bool = False,
+    dataset_id: "str | None" = None,
 ):
     """WF-1 #470: общий serve-конвейер одного SKU (вынесен из /predict
     БЕЗ изменения поведения). df — сырые строки истории (date/sales/…),
@@ -787,7 +788,14 @@ def _serve_single_sku(
     config = _gcm(CONFIG_PATH).get_effective_serving(client_id, get_registry())
     horizon, clipped = clip_horizon_to_plan(
         record, requested_horizon or config["model"]["horizon"])
-    service = _get_or_load_service(client_id, load_factory=load_service_for_client)
+    # F1/F6 #615: модель датасета, а не legacy-слот клиента; ключ кэша
+    # включает датасет (F5: TTL внутри кэша).
+    if dataset_id is None:
+        dataset_id = _default_dataset_id(client_id)
+    cache_key = f"{client_id}::{dataset_id or 'legacy'}"
+    service = _get_or_load_service(
+        cache_key,
+        load_factory=lambda: load_service_for_dataset(client_id, dataset_id))
 
     for col, default in [("price", np.nan), ("promo", 0), ("stock", np.nan)]:
         if col not in df.columns:
@@ -988,10 +996,11 @@ def what_if(
     try:
         baseline_rows, horizon, _clip, _src, _cfg = _serve_single_sku(
             client_id, record, df.copy(), req.sku, None,
-            force_recursive=True)
+            force_recursive=True, dataset_id=dataset_id)
         scenario_rows, _h2, _c2, _s2, _cfg2 = _serve_single_sku(
             client_id, record, df.copy(), req.sku, None,
-            future_overrides=overrides, force_recursive=True)
+            future_overrides=overrides, force_recursive=True,
+            dataset_id=dataset_id)
     except HTTPException:
         raise
     except Exception:

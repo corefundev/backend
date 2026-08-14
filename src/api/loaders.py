@@ -27,15 +27,17 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH: str = os.getenv("CONFIG_PATH", "configs/config.yaml")
 
 
-def load_service_for_client(client_id: str) -> ForecastingService:
-    """Cold-load factory: construct `ForecastingService`, try
-    primary, fall back to fallback artefact on failure. Raises
-    HTTPException 404 (no trained model) or 503 (primary +
-    fallback both unavailable) — those propagate through
-    `service_cache.get_or_load` to the route handler.
+def load_service_for_dataset(client_id: str,
+                             dataset_id: "str | None") -> ForecastingService:
+    """Cold-load factory (F1 #615): модель живёт ПО-ДАТАСЕТНО (DS-1
+    «датасет = отдельная модель») — читаем слот датасета, а не legacy
+    клиентский. dataset_id=None — легаси-клиент без датасетов (чтение
+    старого слота, обратная совместимость). Raises HTTPException 404
+    (no trained model) / 503 (primary + fallback both unavailable) —
+    those propagate through `service_cache.get_or_load` unchanged.
     """
     config  = _get_cfg(CONFIG_PATH)
-    storage = ClientStorage(client_id)
+    storage = ClientStorage(client_id, dataset_id=dataset_id)
     service = ForecastingService(config)
     if not storage.model_exists():
         raise HTTPException(

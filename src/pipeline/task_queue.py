@@ -178,7 +178,6 @@ def _run_pipeline_or_fail(
     runs,
     run_id: Optional[str],
     dataset_id: Optional[str] = None,
-    dataset_is_default: bool = False,
 ) -> dict:
     """Invoke `run_training_pipeline`; on exception, write FAILED to
     training_runs + flip sku_clients.status=failed + fire failure
@@ -196,7 +195,6 @@ def _run_pipeline_or_fail(
             config_path=config_path,
             client_id=client_id,
             dataset_id=dataset_id,
-            dataset_is_default=dataset_is_default,
         )
     except Exception as e:
         _mark_run_failed(runs, run_id, str(e))
@@ -526,7 +524,6 @@ def _training_job(
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
     dataset_id: Optional[str] = None,
-    dataset_is_default: bool = False,
 ) -> dict:
     """
     Actual training work executed inside an rq worker.
@@ -566,7 +563,6 @@ def _training_job(
     with _merged_cleanup_guard(merged_cleanup):
         result = _run_pipeline_or_fail(
             dataset_id=dataset_id,
-            dataset_is_default=dataset_is_default,
             client_id=client_id,
             effective_data_path=effective_data_path,
             config_path=config_path,
@@ -651,7 +647,6 @@ def enqueue_training(
     run_id: Optional[str] = None,
     extend_from_paths: Optional[list[str]] = None,
     dataset_id: Optional[str] = None,
-    dataset_is_default: bool = False,
 ) -> Optional[str]:
     """
     Enqueue a training job. Returns rq job_id.
@@ -678,8 +673,7 @@ def enqueue_training(
                 run_id=run_id,
                 extend_from_paths=extend_from_paths,
                 dataset_id=dataset_id,
-                dataset_is_default=dataset_is_default,
-            ),
+                ),
             job_timeout=timeout,
             result_ttl=86400,       # keep result 24h
             # Audit R3-1: stamp client_id so /jobs/{job_id} can enforce
@@ -732,7 +726,6 @@ def enqueue_training(
             run_id=run_id,
             extend_from_paths=extend_from_paths,
             dataset_id=dataset_id,
-            dataset_is_default=dataset_is_default,
         )
         return None
 

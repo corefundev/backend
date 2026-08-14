@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src.api.loaders import load_service_for_client
+from src.api.loaders import load_service_for_dataset
 from src.api.service_cache import (
     cached_client_ids,
     get_or_load,
@@ -213,8 +213,12 @@ async def prometheus_metrics(request: Request):
 async def reload_model(client_id: str, auth: AuthContext = Depends(get_current_client)):
     """Invalidate model cache — forces reload from storage on next request."""
     require_client_access(client_id, auth)
-    invalidate_service_cache(client_id)
-    get_or_load(client_id, load_factory=load_service_for_client)
+    invalidate_service_cache(client_id)   # префиксно: все датасеты клиента
+    # F1 #615: прогреваем модель ДЕФОЛТНОГО датасета (то, что сервит /predict)
+    from src.api.routers.inference import _default_dataset_id
+    ds = _default_dataset_id(client_id)
+    get_or_load(f"{client_id}::{ds or 'legacy'}",
+                load_factory=lambda: load_service_for_dataset(client_id, ds))
     return {"client_id": client_id, "status": "reloaded"}
 
 

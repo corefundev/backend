@@ -6,12 +6,15 @@ R5-M1 slice-8 prep (this commit) — load orchestration extraction.
 
 Public API
 ──────────
-* `invalidate(client_id)` — drop the cached service. Idempotent.
-* `cached_client_ids()` — snapshot of cached client ids (for
+* `invalidate(client_id)` — drop cached services of the client
+  (prefix-match по всем его датасетам). Idempotent.
+* `cached_client_ids()` — snapshot of cached cache-keys (for
   GET /internal/state).
-* `get_or_load(client_id, *, load_factory)` — fetch the cached
-  service; on miss, call `load_factory(client_id)` under the
-  per-client lock and cache the result.
+* `get_or_load(key, *, load_factory)` — fetch by cache key
+  ("client::dataset", F1/F5 #615); on miss, call `load_factory()`
+  (zero-arg closure) under the per-key lock and cache the result.
+  Записи живут не дольше MODEL_CACHE_TTL_SEC (default 900) — после
+  обучения свежая модель подхватывается без рестарта API (F5).
 
 The `load_factory` callable is passed in (dependency injection) so
 this module stays clean of the ML stack (`ForecastingService`,
@@ -49,23 +52,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MODEL_CACHE_MAX: int = max(1, int(os.environ.get("MODEL_CACHE_MAX", "256")))
+# F5 #615: TTL кэша — потолок устаревания модели после переобучения
+# (пост-тренинг ничего не инвалидирует кросс-процессно; TTL даёт
+# ограниченную, честно задокументированную свежесть).
+MODEL_CACHE_TTL_SEC: float = float(os.environ.get("MODEL_CACHE_TTL_SEC", "900"))
 
 # OrderedDict is used so LRU bump = move_to_end, eviction = popitem(last=False).
-_services: "OrderedDict[str, ForecastingService]" = OrderedDict()
+# Значение — (service, loaded_at_monotonic) ради TTL (F5 #615).
+_services: "OrderedDict[str, tuple[ForecastingService, float]]" = OrderedDict()
 _services_lock: threading.Lock = threading.Lock()
 _per_client_locks: "OrderedDict[str, threading.Lock]" = OrderedDict()
 
 
 def invalidate(client_id: str) -> None:
-    """Drop the cached service for `client_id`. Called after
-    config-change (so next /predict reloads with new config), after
-    training (so the freshly-trained model replaces the stale
-    cached one), and on plan-tier change.
+    """Drop cached services of `client_id` — ПРЕФИКСНО по всем его
+    датасетам (ключи "client::dataset", F1 #615). Called after
+    config-change, training reload and plan-tier change.
 
     Idempotent — no-op if the client wasn't cached. Thread-safe.
     """
+    prefix = f"{client_id}::"
     with _services_lock:
-        _services.pop(client_id, None)
+        _services.pop(client_id, None)          # легаси-ключ, если был
+        for k in [k for k in _services if k.startswith(prefix)]:
+            _services.pop(k, None)
 
 
 def cached_client_ids() -> list[str]:
@@ -95,8 +105,9 @@ def _client_lock(client_id: str) -> threading.Lock:
 
 def _cache_service(client_id: str, service: "ForecastingService") -> None:
     """Insert + bump-to-front + evict-LRU. Caller holds the per-client lock."""
+    import time as _time
     with _services_lock:
-        _services[client_id] = service
+        _services[client_id] = (service, _time.monotonic())
         _services.move_to_end(client_id)
         while len(_services) > MODEL_CACHE_MAX:
             evicted_id, _ = _services.popitem(last=False)
@@ -109,7 +120,7 @@ def _cache_service(client_id: str, service: "ForecastingService") -> None:
 def get_or_load(
     client_id: str,
     *,
-    load_factory: Callable[[str], "ForecastingService"],
+    load_factory: Callable[[], "ForecastingService"],
 ) -> "ForecastingService":
     """Fetch the cached service; on miss, build via `load_factory`
     under the per-client lock to prevent the thundering-herd cold
@@ -127,28 +138,32 @@ def get_or_load(
     # Fast path — already cached, no lock needed (dict get is atomic in
     # CPython). On cache hit, bump LRU recency under the services lock
     # so the LRU eviction policy reflects actual usage.
+    import time as _time
     cached = _services.get(client_id)
-    if cached is not None:
+    if cached is not None and _time.monotonic() - cached[1] < MODEL_CACHE_TTL_SEC:
         with _services_lock:
             # Re-check under lock since another thread could have
             # evicted between our get and the move_to_end call.
-            if client_id in _services:
+            entry = _services.get(client_id)
+            if entry is not None:
                 _services.move_to_end(client_id)
-                return _services[client_id]
+                return entry[0]
 
     with _client_lock(client_id):
         # Re-check under per-client lock — another thread may have
-        # just populated.
+        # just populated (и не протух по TTL).
         cached = _services.get(client_id)
-        if cached is not None:
+        if cached is not None and _time.monotonic() - cached[1] < MODEL_CACHE_TTL_SEC:
             with _services_lock:
-                if client_id in _services:
+                entry = _services.get(client_id)
+                if entry is not None:
                     _services.move_to_end(client_id)
-                    return _services[client_id]
+                    return entry[0]
 
-        # Cold-load via the caller-supplied factory. Any HTTPException
-        # raised here (404 no model / 503 primary+fallback unavailable)
-        # propagates to the route handler.
-        service = load_factory(client_id)
+        # Cold-load via the caller-supplied factory (zero-arg closure —
+        # ключ кэша "client::dataset" сам по себе не аргумент загрузки).
+        # Any HTTPException raised here (404 no model / 503 primary+
+        # fallback unavailable) propagates to the route handler.
+        service = load_factory()
         _cache_service(client_id, service)
         return service

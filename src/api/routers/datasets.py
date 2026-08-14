@@ -394,8 +394,6 @@ def train_dataset(client_id: str, dataset_id: str,
     from src.storage import zones as z
     data_path = z.get_zone_backend(z.Zone.PROCESSED).path(
         version.snapshot_key)
-    is_default = (reg.list_for_client(client_id) or [ds])[0].dataset_id         == dataset_id
-
     try:
         record = record_training_started(registry, record)
     except TrainingInProgress as e:
@@ -415,7 +413,7 @@ def train_dataset(client_id: str, dataset_id: str,
         from src.pipeline.task_queue import enqueue_training
         job_id = enqueue_training(
             client_id=client_id, data_path=data_path, run_id=run_id,
-            dataset_id=dataset_id, dataset_is_default=is_default)
+            dataset_id=dataset_id)
     except Exception as e:    # noqa: BLE001 — освобождаем claim (R5-4)
         _release_training_claim(registry, client_id)
         logger.error("dataset train enqueue failed: %s", e)
