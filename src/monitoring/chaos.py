@@ -310,7 +310,8 @@ def run_standard_chaos_suite() -> list[FaultResult]:
         exp.observe("Pre-warmed cache for client 'chaos-client-cached'")
 
         # Now simulate Postgres-down: load_factory would raise.
-        def _factory_raises(cid):
+        # F1 #615: zero-arg factory contract.
+        def _factory_raises():
             raise RuntimeError("Postgres unavailable (chaos simulation)")
 
         cached = get_or_load(

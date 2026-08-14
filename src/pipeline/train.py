@@ -275,7 +275,6 @@ def _promotion_gate(df, config, agg, client_id, wf_combined=None, dataset_id=Non
         # (не промоутить слабую модель из-за S3-глюка).
         if champion is not None:
             try:
-                from src.storage.backend import ClientStorage
                 if not ClientStorage(client_id,
                                      dataset_id=dataset_id).model_exists():
                     logger.warning(
