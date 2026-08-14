@@ -96,7 +96,7 @@ src/api/routers/clients.py:444  B4 #156 — export access-log guard: same ration
 src/storage/sandbox.py:396  DP-4 #324 sniff() best-effort report read; unreadable → ok=False + stderr, surfaced not swallowed (+9 PC-1 #570 schema-параметр)
 src/api/routers/inference.py:405  (+сдвиг WF-1 #470) AZ-1 #465 — effective-config blip degrades τ to the documented default 0.7 (logged loudly): рекомендации к заказу остаются доступными при блипе конфиг-чтения; сама τ-override-ветка и гейты выше не задеты
 src/api/routers/inference.py:446  (+сдвиг WF-1 #470) AZ-1 #465 — stock-read enrichment guard: остатки из snapshot'а датасета — обогащение (колонка «Остаток»), а не источник истины страницы; блип чтения S3/реестра логируется громко и оставляет stock пустым — рекомендации без вычитания остаются доступны
-src/pipeline/task_queue.py:691  #557 best-effort персист job_id: потеря handle логируется, enqueue важнее метаданных
+src/pipeline/task_queue.py:696  (+5 таймаут-комментарий #470) #557 best-effort персист job_id: потеря handle логируется, enqueue важнее метаданных
 src/api/routers/support.py:124  SUP-5 #508 best-effort: источник корпуса (help) независим, падение логируется, снапшот собирается из остальных
 src/api/routers/support.py:132  SUP-5 #508 best-effort: источник корпуса (news) независим, падение логируется
 src/api/routers/support.py:146  SUP-5 #508 best-effort: источник корпуса (plans) независим, падение логируется
