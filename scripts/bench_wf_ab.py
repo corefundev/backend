@@ -96,6 +96,11 @@ ARMS: dict[str, dict] = {
                           "per_sku_lags": True,
                           "lags": [1, 7, 14, 28, 56, 112, 224],
                           "rolling_windows": [7, 14, 28, 56, 112, 224]}},
+    # Э2 (реабилитации после MA-1): is_gap_day как фича — на заполненной
+    # сетке модель должна отличать импутированный ноль «закрытого дня»
+    # от настоящего нулевого спроса (M4; флаг существует с мая, не мерился).
+    "gap_day_on":    {"model": "mimo",     "statics": "fold_clean", "market": False,
+                      "features_overrides": {"is_gap_day_enabled": True}},
     # Вопрос владельца 2026-07-20: лаг-365 изолированно поверх победителя.
     "mem365":        {"model": "mimo",     "statics": "fold_clean", "market": False,
                       "features_overrides": {
